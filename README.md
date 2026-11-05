@@ -1,8 +1,8 @@
 # ha-rig
 
-The automated test rig for [Device Side](https://github.com/jasonmx/deviceside): it runs Device Side's actions
-against a live Home Assistant and its real devices, and writes the test records in device-side's
-`docs/test-records/` that clear an adapter's `experimental` flag and gate each release. Private; device-side keeps
+The automated test rig for [DeviceSide](https://github.com/jasonmx/deviceside): it runs DeviceSide's actions
+against a live Home Assistant and its real devices, and writes the test records in deviceside's
+`docs/test-records/` that clear an adapter's `experimental` flag and gate each release. Private; deviceside keeps
 only the records.
 
 Setup, running it, and writing step files: [docs/rig.md](docs/rig.md).

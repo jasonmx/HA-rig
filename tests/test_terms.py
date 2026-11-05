@@ -1,4 +1,4 @@
-"""ha_rig/terms.py and scripts/check_private.py: the household's terms, for device-side's check and this repo's."""
+"""ha_rig/terms.py and scripts/check_private.py: the household's terms, for deviceside's check and this repo's."""
 
 import importlib.util
 import subprocess
@@ -75,7 +75,7 @@ def git_repo(path: Path) -> Path:
     return path
 
 
-def test_write_puts_the_terms_in_the_main_checkout_for_device_sides_check(tmp_path):
+def test_write_puts_the_terms_in_the_main_checkout_for_devicesides_check(tmp_path):
     repo = git_repo(tmp_path / "deviceside")
     path = REAL_WRITE(repo, {"light.kitchen_relay": "light.Kitchen_Relay", "abc.def": "HA_TOKEN from .env.rig"})
     assert path == repo / terms.TERMS_FILE
@@ -95,7 +95,7 @@ def test_write_leaves_unchanged_terms_alone(tmp_path):
 
 def test_main_writes_into_the_target(tmp_path, monkeypatch, capsys):
     repo = tmp_path / "deviceside"
-    monkeypatch.setattr(terms, "device_side_repo", lambda: repo)
+    monkeypatch.setattr(terms, "deviceside_repo", lambda: repo)
     monkeypatch.setattr(terms, "write", lambda target: target / terms.TERMS_FILE)
     assert terms.main() == 0
     assert str(repo / terms.TERMS_FILE) in capsys.readouterr().out
@@ -105,7 +105,7 @@ def test_main_fails_when_a_profile_cannot_be_read(tmp_path, monkeypatch, capsys)
     def unreadable(target):
         raise ValueError("house.yaml: not valid YAML")
 
-    monkeypatch.setattr(terms, "device_side_repo", lambda: tmp_path)
+    monkeypatch.setattr(terms, "deviceside_repo", lambda: tmp_path)
     monkeypatch.setattr(terms, "write", unreadable)
     assert terms.main() == 1
     assert "not valid YAML" in capsys.readouterr().out

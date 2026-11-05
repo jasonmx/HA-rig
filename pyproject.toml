@@ -35,8 +35,8 @@ known-first-party = ["ha_rig", "tests"]
 ignore-words-list = "hass,currenty"
 
 [dependency-groups]
-# The rig imports device-side's registry and actions, so it needs what device-side's tests do: keep these in step
-# with the dev group of device-side's pyproject.toml.
+# The rig imports deviceside's registry and actions, so it needs what deviceside's tests do: keep these in step
+# with the dev group of deviceside's pyproject.toml.
 dev = [
     "aiohue==4.9.0",
     "pytest-homeassistant-custom-component==0.13.373",

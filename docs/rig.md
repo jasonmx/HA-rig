@@ -1,15 +1,15 @@
 # The rig
 
-The rig runs Device Side's actions against a live Home Assistant and its real devices, and writes the test records
+The rig runs DeviceSide's actions against a live Home Assistant and its real devices, and writes the test records
 that clear an adapter's `experimental` flag. Its tests are YAML step files in `ha_rig/steps/`, one per action.
 `scripts/rig.py` runs each file against every integration in the profile that has an adapter for the action, after a
 y/N gate: the devices change state, so nothing moves until you say yes. `--dry-run` prints the plan and stops.
 
 ## Setup
 
-The rig lives here, apart from device-side, which is public. It tests a device-side checkout: the one you run it
+The rig lives here, apart from deviceside, which is public. It tests a deviceside checkout: the one you run it
 from, so each worktree tests its own code, or `DEVICE_SIDE_REPO`, else a `deviceside` (or `device-side`) checkout
-beside this one. Run it from the device-side worktree under test:
+beside this one. Run it from the deviceside worktree under test:
 
 ```sh
 cd ~/src/deviceside            # or a linked worktree of it
@@ -17,15 +17,15 @@ cd ~/src/deviceside            # or a linked worktree of it
 ```
 
 `uv sync` here installs what the rig's own tests need (`.venv/bin/pytest`, which import the sibling checkout). A run
-needs what device-side's environment already has: the shebang's `uv run` uses the project of the directory it is run
+needs what deviceside's environment already has: the shebang's `uv run` uses the project of the directory it is run
 from.
 
 The rig keeps the profiles and `.env.rig` in this repo's main checkout, and its locks, journals and baseline in the
-device-side checkout's git common dir, shared by every worktree of it. It writes its test records into the
-device-side checkout, to commit there. On every invocation it also writes the household's terms, every profile's
-entity IDs and IEEEs and `.env.rig`'s host and token, to `.private-terms.rig` in device-side's main checkout
-(gitignored), where device-side's household check reads them; `python -m ha_rig.terms` does it by hand after editing
-a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in device-side's main checkout, where the
+deviceside checkout's git common dir, shared by every worktree of it. It writes its test records into the
+deviceside checkout, to commit there. On every invocation it also writes the household's terms, every profile's
+entity IDs and IEEEs and `.env.rig`'s host and token, to `.private-terms.rig` in deviceside's main checkout
+(gitignored), where deviceside's household check reads them; `python -m ha_rig.terms` does it by hand after editing
+a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in deviceside's main checkout, where the
 rig kept them before it moved: move them here.
 
 ## Before a run
@@ -38,7 +38,7 @@ locks it would need.
 ### Lanes
 
 The run starts with one lane per integration, side by side, each holding that integration's cases on fixed entities.
-A case stays out of the lanes when its step file sets device_side options or has `entry` steps (either reloads the
+A case stays out of the lanes when its step file sets DeviceSide options or has `entry` steps (either reloads the
 integration, cutting off every lane's fades), or when it uses a roaming bulb, a rig-made group or scene, or a powered entity or
 its supply. Those run afterwards, one at a time. `--serial` runs every case one at a time: a case that passes with it
 and fails in a lane points at radio or HA contention.
@@ -53,7 +53,7 @@ address, tokens, deploy commands and Hue bridge.
 
 `--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
 records from different profiles of the same suite overwrite each other. A record is public, so name a profile for its
-setup (`lab`, `house`), never for a person or place. The household checks, device-side's (through
+setup (`lab`, `house`), never for a person or place. The household checks, deviceside's (through
 `.private-terms.rig`) and this repo's (`scripts/check_private.py`), keep every profile's entity IDs, members, supplies,
 pause list and IEEEs out of commits.
 
@@ -64,7 +64,7 @@ actions and reads states and registries, and a non-admin token can't change your
 
 Some suites need an admin token in `HA_ADMIN_TOKEN`: ZHA (its cluster command is admin-only, and the adapter passes
 the caller's context through), Zigbee2MQTT (setting device options over MQTT), suites whose adapter has options
-(to set them), `lifecycle` (reloading and disabling device_side's entry), and roaming. Without it, a run that
+(to set them), `lifecycle` (reloading and disabling DeviceSide's entry), and roaming. Without it, a run that
 includes them stops before the gate; `--integration` or `--action` leaves them out.
 
 ### The blocker gate
@@ -77,7 +77,7 @@ nothing.
 
 ### Deploys
 
-Each run deploys the device-side checkout's committed, pushed branch and restarts HA whenever HA hasn't loaded that
+Each run deploys the deviceside checkout's committed, pushed branch and restarts HA whenever HA hasn't loaded that
 tree, so a run queued behind another tests its own code. A record cites the commit HA loaded, read before the tests, so
 committing mid-run is safe. `--no-deploy` tests whatever HA runs and, unless that is your checkout's tree, writes no
 record.
@@ -91,7 +91,7 @@ record.
 - **Home record.** What a roaming bulb was before its first move is kept until it is back as it was, across crashes
   (`ha_rig/home.py`).
 - **Journal.** Each run journals what it changes, so Ctrl-C, a signal, or the next run after a crash puts the devices
-  back, device_side's options and a disabled entry included; `--recover` puts back everything
+  back, DeviceSide's options and a disabled entry included; `--recover` puts back everything
   (`ha_rig/journal.py`).
 - **Baseline.** Changes beyond the devices (paused automations, log levels, Z2M device options) are shared by runs
   side by side, and the last one out puts them back (`ha_rig/baseline.py`).
@@ -102,13 +102,13 @@ record.
   taking a lock.
 
 A probe takes the same locks through `--hold`, which runs a command while holding them and returns its exit code:
-`scripts/rig.py --hold zha -- <command>`, with `--exclusive` for one that restarts HA or reloads device_side. It
+`scripts/rig.py --hold zha -- <command>`, with `--exclusive` for one that restarts HA or reloads DeviceSide. It
 writes no journal, so the probe puts back what it changes.
 
 ## Writing a step file
 
 ```yaml
-action: turn_on_for        # the device_side action every test in the file calls
+action: turn_on_for        # the DeviceSide action every test in the file calls
 rig_seconds: 25            # the gate's duration estimate
 tests:
   - name: on_then_off
@@ -129,14 +129,14 @@ tests:
 | `expect_response` | Checks the call's response: `status` (`expected` means `confirmed` where the adapter can confirm, else `sent`), `integration` (`self` is the one under test), `detail`, `clamped_to`, `attributes`. |
 | `expect_error` | The call before it must fail, with this `key` and/or `summary`. |
 | `expect_state` | Checks state and attributes now, or `within` seconds. `unchanged` is the state before the test. A `{min, max}` range fits values that drift. On a `group` it checks every member. |
-| `expect_matches_read` | Checks that HA's state of each of `attributes` (dotted: `xy_color.0`) is within `tolerance` of a live `device_side.get_attributes` read, now or `within` seconds. On a `group` it checks every member. |
+| `expect_matches_read` | Checks that HA's state of each of `attributes` (dotted: `xy_color.0`) is within `tolerance` of a live `deviceside.get_attributes` read, now or `within` seconds. On a `group` it checks every member. |
 | `wait` | Sleeps. |
-| `sample` | Polls `attribute` (dotted: `hs_color.1`) for `for` seconds and expects it `rising`, `falling` or `steady` (brightness may spread one Zigbee level step, 1/254, as a bulb settles after a stop), optionally within `min`/`max`. `source: device_side` reads `device_side.get_attributes` instead of HA's state, in its units (brightness in percent), for a fade HA shows only the end of. |
+| `sample` | Polls `attribute` (dotted: `hs_color.1`) for `for` seconds and expects it `rising`, `falling` or `steady` (brightness may spread one Zigbee level step, 1/254, as a bulb settles after a stop), optionally within `min`/`max`. `source: deviceside` reads `deviceside.get_attributes` instead of HA's state, in its units (brightness in percent), for a fade HA shows only the end of. |
 | `mark_hue` | Notes each light's hue on its own wheel, for `expect_hue_travel`. On ZHA it is read live off the bulb (EnhancedCurrentHue), since HA works its hue out from the bulb's xy, which departs from the bulb's wheel by 25° and more in the greens; elsewhere it is HA's `hs_color`. On a `group` it marks every member. |
 | `expect_hue_travel` | Checks each light has turned `by` degrees round its own wheel since `mark_hue` (negative: down), within `tolerance`, the shorter way round. A hue move's rate is in the bulb's units, so this holds on any gamut. |
 | `do` | Prints an instruction for the person and waits for Enter. Only in the `setup` of an observed test. |
 | `restore` | Puts back the state from before the test. It also runs after every test, pass or fail. |
-| `entry` | `reload`, `disable` or `enable` device_side's config entry, and waits until it has. A test that leaves it disabled has it enabled when it ends, pass or fail, before its restore. |
+| `entry` | `reload`, `disable` or `enable` DeviceSide's config entry, and waits until it has. A test that leaves it disabled has it enabled when it ends, pass or fail, before its restore. |
 | `bridge` | Hue only: writes to the Hue bridge directly, bypassing Home Assistant, as another actor (the Hue app) would. `put: {...}` sends that CLIP v2 body to the target's light (a `group` target's grouped_light); `recall: true` recalls the `scene` target. In an observed run it runs as written. It needs `HUE_BRIDGE_HOST` and `HUE_APP_KEY` in `.env.rig`, and fails in any other integration's suite. |
 | `z2m_option` | Sets Zigbee2MQTT device options on the target (`hue_native_control: false`) and waits for Z2M's ok. Does nothing in another integration's suite. |
 | `expect_z2m_option` | Expects the target's Zigbee2MQTT device options to hold the given values. Does nothing in another integration's suite. |
@@ -150,16 +150,16 @@ The roles are listed in `ha_rig/profile.example.yaml`. `group_color` is a native
 color: color moves groupcast only to a group like that, so it runs the color cases a `group` can't. Everything this
 page says of a `group` holds for it too.
 
-A file with `entry` steps (`lifecycle.yaml`) tests device_side's config entry through its action: reloading it, and
+A file with `entry` steps (`lifecycle.yaml`) tests DeviceSide's config entry through its action: reloading it, and
 the action refusing with `not_loaded` while it is disabled. It runs alone, holding HA exclusively, like an option
 file, and needs a top-level `name:`, which its record takes (`lifecycle.md`) and `--action` picks it by, so it never
 replaces the action's own.
 
-An adapter with options runs each file for its action with them pinned through Device Side's options flow:
+An adapter with options runs each file for its action with them pinned through DeviceSide's options flow:
 `options: [<name>]` at the top of a file turns those on, and every other option in the adapter's scope runs off. Its
 record is `<action>-<name>.md`, with an `Options` row. The rig's own options are put back when the run ends.
 
-A test that means to make device_side warn lists the line under `expected_log:` at the top of its file: regular
+A test that means to make DeviceSide warn lists the line under `expected_log:` at the top of its file: regular
 expressions, each searched for in the whole log line, logger included. A matched line is counted in the summary and
 fails nothing. Keep a pattern as narrow as the warning it expects.
 
@@ -209,7 +209,7 @@ They don't fail, but a test counts toward a test record only when both of its ru
 
 ### Run reports
 
-Every run, failed, partial or unattended, ends by writing a report to `device_side-rig/` in the system temp folder and
+Every run, failed, partial or unattended, ends by writing a report to `deviceside-rig/` in the system temp folder and
 printing its path: each suite's results with the reason for every failure and skip.
 
 ### Run logs
@@ -220,23 +220,23 @@ a run that touches Z2M, or roams) to `<report>.z2m.log` as they arrive, and HA's
 and their paths are printed. When Z2M's coordinator crashed during the run (`ASH_NCP_FATAL_ERROR` or
 `Adapter disconnected`), the summary says so with each crash's time, and the logs stay even after a clean run.
 
-A run also reads HA's log for `WARNING`, `ERROR` and `CRITICAL` lines from `custom_components.device_side`. Each one
+A run also reads HA's log for `WARNING`, `ERROR` and `CRITICAL` lines from `custom_components.deviceside`. Each one
 no step file of the run expects is listed in the summary, keeps the logs and fails the run, so a run that ends clean
-also proves device_side logged nothing amiss; the test records it wrote stand. Another run on the same HA meanwhile
+also proves DeviceSide logged nothing amiss; the test records it wrote stand. Another run on the same HA meanwhile
 can put lines in, so read whose they are before chasing one. A log with no line dated from the run's start (HA
 logging in another time zone) is kept whole and not checked, which the summary says.
 
-`--debug-logs` keeps them whatever the outcome and runs HA's `device_side`, each integration the run touches and Z2M
+`--debug-logs` keeps them whatever the outcome and runs HA's `deviceside`, each integration the run touches and Z2M
 at debug until the run ends. It costs CPU, so timing cases may read differently. Z2M's debug lines reach the capture
 only with `advanced.log_debug_to_mqtt_frontend: true` in its configuration; the brief warns when it is off, and the
 rig never sets it.
 
 ### Test records
 
-When every test of an adapter passes, the run writes `docs/test-records/<integration>/<action>.md` in the device-side
+When every test of an adapter passes, the run writes `docs/test-records/<integration>/<action>.md` in the deviceside
 checkout: the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed or
 partial (`-k`) run writes nothing. The PR that clears an adapter's `experimental` flag cites one, and
 `cut-release-candidate` and `cut-release` refuse a head where a released adapter's code (its module and the modules it
-imports from its integration package) differs from the commit one of its records cites: device-side's
-`scripts/check_release.py --records`. The record's Source row names `scripts/rig.py` and the device-side commit HA
+imports from its integration package) differs from the commit one of its records cites: deviceside's
+`scripts/check_release.py --records`. The record's Source row names `scripts/rig.py` and the deviceside commit HA
 loaded, never one of this repo's. So every adapter changed since its last run needs a new run before the next RC.

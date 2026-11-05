@@ -1,8 +1,8 @@
-"""The household's terms, for device-side's household check, which can't read the rig's files itself.
+"""The household's terms, for deviceside's household check, which can't read the rig's files itself.
 
-device-side is public, so its check (scripts/check_private.py there) refuses a commit naming a household detail. Its
+deviceside is public, so its check (scripts/check_private.py there) refuses a commit naming a household detail. Its
 own blocklist is .private-terms; the rig adds every profile's entity IDs and roaming bulbs' IEEEs, and .env.rig's HA
-host and token, by writing them to TERMS_FILE in the device-side main checkout on each rig invocation, as
+host and token, by writing them to TERMS_FILE in the deviceside main checkout on each rig invocation, as
 `term<TAB>label` lines. A secret is reported by its label, never echoed. `python -m ha_rig.terms` writes it by hand,
 after editing a profile.
 """
@@ -14,9 +14,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .profile import ENV_FILE, Profile, colon_ieee, load_env, profile_paths
-from .target import device_side_repo, main_checkout
+from .target import deviceside_repo, main_checkout
 
-TERMS_FILE = ".private-terms.rig"  # gitignored in device-side
+TERMS_FILE = ".private-terms.rig"  # gitignored in deviceside
 HEADER = "# Written by ha-rig on each run (python -m ha_rig.terms); edits are overwritten.\n"
 # Hosts the docs and examples name on purpose.
 GENERIC_HOSTS = frozenset({"homeassistant.local", "localhost", "127.0.0.1"})
@@ -67,7 +67,7 @@ def write(repo: Path, terms: dict[str, str] | None = None) -> Path:
 
 def main() -> int:
     try:
-        path = write(device_side_repo())
+        path = write(deviceside_repo())
     except ValueError as err:
         print(f"Can't read the household's terms: {err}")
         return 1

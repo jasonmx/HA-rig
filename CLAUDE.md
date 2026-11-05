@@ -1,8 +1,8 @@
 # ha-rig
 
-The private test rig for Device Side (`jasonmx/deviceside`, public). It tests a device-side checkout and writes test
+The private test rig for DeviceSide (`jasonmx/deviceside`, public). It tests a deviceside checkout and writes test
 records into it: see `docs/rig.md`, Setup. What a record must prove, when an adapter's `experimental` flag clears, and
-how releases gate on records are device-side's rules (its `CLAUDE.md`); a change here that alters what a record
+how releases gate on records are deviceside's rules (its `CLAUDE.md`); a change here that alters what a record
 proves needs a matching change there.
 
 **No household details in commits**, though this repo is private: entity IDs, device names, MACs, hostnames and
@@ -16,13 +16,13 @@ gate; never answer the gate (`DEVICE_SIDE_RIG_APPROVED=1`) without Jason's yes f
 
 - `scripts/rig.py`: the runner; `scripts/deploy.sh`: its deploy, through `.env.rig`'s commands
 - `ha_rig/`: the engine, HA and Hue clients, locks, journal, baseline, roaming, run logs, profiles, the target
-  checkout (`target.py`) and the household terms for device-side's check (`terms.py`)
-- `ha_rig/steps/`: one step file per action, named as device-side's action modules are
-- `tests/`: the rig's own tests, with fakes; they import device-side's registry and actions from the target checkout
+  checkout (`target.py`) and the household terms for deviceside's check (`terms.py`)
+- `ha_rig/steps/`: one step file per action, named as deviceside's action modules are
+- `tests/`: the rig's own tests, with fakes; they import deviceside's registry and actions from the target checkout
 
 ## Changes
 
-- Setup: `uv sync`. Keep the `dev` group's pins in step with device-side's `pyproject.toml`.
+- Setup: `uv sync`. Keep the `dev` group's pins in step with deviceside's `pyproject.toml`.
 - Before each push: `.venv/bin/pytest` and `pre-commit run --all-files`.
-- A new or renamed device-side action needs its step file here, landed with or before the device-side PR it tests.
+- A new or renamed deviceside action needs its step file here, landed with or before the deviceside PR it tests.
 - Async throughout; American English, matching HA.
