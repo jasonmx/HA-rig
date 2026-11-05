@@ -1,0 +1,32 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.*_cache
+
+# Household details: connection settings and profiles (also the household check's blocklist)
+.env
+.env.rig
+profiles/
+.private-terms
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editors, OS
+.vscode/
+.DS_Store
+
+# Logs
+*.log
+
+# Claude Code
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/
+
+# pytest-cov data
+.coverage
+.coverage.*
+coverage.json
