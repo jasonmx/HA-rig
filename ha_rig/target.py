@@ -1,6 +1,6 @@
-"""The device-side checkout a run tests, and this rig's own checkout.
+"""The deviceside checkout a run tests, and this rig's own checkout.
 
-The rig tests whichever device-side checkout it is run from, so a run from a linked worktree deploys and records that
+The rig tests whichever deviceside checkout it is run from, so a run from a linked worktree deploys and records that
 worktree's code: DEVICE_SIDE_REPO when set, else the git checkout holding the current directory, else a checkout beside
 this one named deviceside (the repo's name) or device-side (so the rig's own tests run from here). The locks, journals
 and baseline live in the target's git common dir, shared by every worktree of it; the profiles and .env.rig live in
@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 RIG_HOME = Path(__file__).resolve().parents[1]
-COMPONENT = "custom_components/device_side"
+COMPONENT = "custom_components/deviceside"
 SIBLINGS = ("deviceside", "device-side")
 
 
@@ -38,28 +38,28 @@ def main_checkout(repo: Path) -> Path:
     return common.parent if common else repo
 
 
-def is_device_side(path: Path) -> bool:
+def is_deviceside(path: Path) -> bool:
     return (path / COMPONENT / "manifest.json").is_file()
 
 
-def device_side_repo(cwd: Path | None = None, env: dict[str, str] | None = None) -> Path:
-    """The device-side checkout to test (see the module docstring). Raises SystemExit, naming the fix, if none is."""
+def deviceside_repo(cwd: Path | None = None, env: dict[str, str] | None = None) -> Path:
+    """The deviceside checkout to test (see the module docstring). Raises SystemExit, naming the fix, if none is."""
     env = os.environ if env is None else env
     if explicit := env.get("DEVICE_SIDE_REPO"):
         path = Path(explicit).expanduser().resolve()
-        if not is_device_side(path):
-            raise SystemExit(f"DEVICE_SIDE_REPO={explicit} is not a device-side checkout: no {COMPONENT}")
+        if not is_deviceside(path):
+            raise SystemExit(f"DEVICE_SIDE_REPO={explicit} is not a deviceside checkout: no {COMPONENT}")
         return path
-    if (top := git_path(cwd or Path.cwd(), "--show-toplevel")) and is_device_side(top):
+    if (top := git_path(cwd or Path.cwd(), "--show-toplevel")) and is_deviceside(top):
         return top
     for name in SIBLINGS:
-        if is_device_side(sibling := main_checkout(RIG_HOME).parent / name):
+        if is_deviceside(sibling := main_checkout(RIG_HOME).parent / name):
             return sibling
-    raise SystemExit("Run the rig from a device-side checkout, or set DEVICE_SIDE_REPO to one")
+    raise SystemExit("Run the rig from a deviceside checkout, or set DEVICE_SIDE_REPO to one")
 
 
 def refuse_moved_files(repo: Path, rig_checkout: Path) -> None:
-    """Refuse while a household file is still where the rig kept it inside device-side, so no run reads half of a
+    """Refuse while a household file is still where the rig kept it inside deviceside, so no run reads half of a
     move and the old copy doesn't linger outside the household check's reach."""
     old = main_checkout(repo)
     if stale := [path for path in (old / ".env.rig", old / "tests" / "rig" / "profiles") if path.exists()]:

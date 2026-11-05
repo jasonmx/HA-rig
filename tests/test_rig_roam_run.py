@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from custom_components.device_side.core.registry import AdapterRegistry
+from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import engine, roam
 from ha_rig.engine import load_step_file

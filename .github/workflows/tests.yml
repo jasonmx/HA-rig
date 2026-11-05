@@ -13,15 +13,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The rig imports device-side's registry and actions, so it tests against device-side's newest line of work:
-      # whichever of main and the release branches had the latest commit, as device-side's PRs pick their base.
-      - name: Check out device-side
+      # The rig imports deviceside's registry and actions, so it tests against deviceside's newest line of work:
+      # whichever of main and the release branches had the latest commit, as deviceside's PRs pick their base.
+      - name: Check out deviceside
         run: |
           git clone --quiet --filter=blob:none --no-checkout https://github.com/jasonmx/deviceside ../deviceside
           cd ../deviceside
           git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/release/*:refs/remotes/origin/release/*'
           ref=$(git for-each-ref --sort=-committerdate --count=1 --format='%(refname:short)' refs/remotes/origin/main 'refs/remotes/origin/release/*')
-          echo "device-side at $ref"
+          echo "deviceside at $ref"
           git checkout --quiet --detach "$ref"
 
       - uses: actions/setup-python@v7
