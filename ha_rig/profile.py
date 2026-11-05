@@ -39,6 +39,24 @@ TOLERANCE_S = {"shelly": 2.0, "hue": 2.0, "zigbee2mqtt": 3.0, "zha": 3.0, "matte
 # it starts from what HA shows.
 SETTLE_S = {"hue": 15.0, "zigbee2mqtt": 2.0}
 
+
+@dataclass(frozen=True, slots=True)
+class EntryReload:
+    """Actions that make core reload the device's own config entry some time after they write to it: its entities
+    go unavailable and come back, and a call landing meanwhile fails."""
+
+    actions: frozenset[str]
+    deadline_s: float  # from the write, by when the entities must have gone unavailable and come back
+
+
+# Shelly: a SetConfig makes the device report config_changed, and core reloads the entry ENTRY_RELOAD_COOLDOWN (60 s)
+# after the first one (a Debouncer with immediate=False: later writes in the window coalesce, and don't push it back).
+ENTRY_RELOADS = {
+    "shelly": EntryReload(
+        frozenset({"set_auto_off", "set_auto_on", "clear_auto_off", "clear_auto_on"}), deadline_s=100.0
+    ),
+}
+
 # The order in which roaming bulbs visit the networks a run needs, moving directly from one to the next, after their
 # home, where a run starts and ends.
 CYCLE = ("hue", "zha", "zigbee2mqtt")

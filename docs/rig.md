@@ -91,8 +91,8 @@ record.
 - **Home record.** What a roaming bulb was before its first move is kept until it is back as it was, across crashes
   (`ha_rig/home.py`).
 - **Journal.** Each run journals what it changes, so Ctrl-C, a signal, or the next run after a crash puts the devices
-  back, DeviceSide's options and a disabled entry included; `--recover` puts back everything
-  (`ha_rig/journal.py`).
+  back, DeviceSide's options, a disabled entry and a Shelly device's persistent auto-off / auto-on included;
+  `--recover` puts back everything (`ha_rig/journal.py`).
 - **Baseline.** Changes beyond the devices (paused automations, log levels, Z2M device options) are shared by runs
   side by side, and the last one out puts them back (`ha_rig/baseline.py`).
 - **Locks.** Runs share the rig through one lock per integration and one on HA, so runs on different integrations go
@@ -131,6 +131,7 @@ tests:
 | `expect_state` | Checks state and attributes now, or `within` seconds. `unchanged` is the state before the test. A `{min, max}` range fits values that drift. On a `group` it checks every member. |
 | `expect_matches_read` | Checks that HA's state of each of `attributes` (dotted: `xy_color.0`) is within `tolerance` of a live `deviceside.get_attributes` read, now or `within` seconds. On a `group` it checks every member. |
 | `wait` | Sleeps. |
+| `expect_no_reload` | Checks the target doesn't go unavailable (its device's entry reloading) for `for` seconds: after a call that should have written nothing. |
 | `sample` | Polls `attribute` (dotted: `hs_color.1`) for `for` seconds and expects it `rising`, `falling` or `steady` (brightness may spread one Zigbee level step, 1/254, as a bulb settles after a stop), optionally within `min`/`max`. `source: deviceside` reads `deviceside.get_attributes` instead of HA's state, in its units (brightness in percent), for a fade HA shows only the end of. |
 | `mark_hue` | Notes each light's hue on its own wheel, for `expect_hue_travel`. On ZHA it is read live off the bulb (EnhancedCurrentHue), since HA works its hue out from the bulb's xy, which departs from the bulb's wheel by 25° and more in the greens; elsewhere it is HA's `hs_color`. On a `group` it marks every member. |
 | `expect_hue_travel` | Checks each light has turned `by` degrees round its own wheel since `mark_hue` (negative: down), within `tolerance`, the shorter way round. A hue move's rate is in the bulb's units, so this holds on any gamut. |
@@ -170,6 +171,13 @@ expected_log:
 
 An integration in `SETTLE_S` (`ha_rig/profile.py`) predicts a light's brightness for a while after a raise, lower
 or `stop`, so a later test on that light waits until it reads the device again.
+
+An action in `ENTRY_RELOADS` (`ha_rig/profile.py`: Shelly's `set_`/`clear_auto_off`/`_on`) makes core reload the
+device's entry a while after it writes, so its entities go unavailable and come back. After a call that wrote
+(`confirmed` or `sent`), the engine watches for that reload, and the next `call` or `set` on the light, the restore
+and the test's end wait it out; a reload that never comes fails the test. Checks don't wait, so a countdown can be
+watched meanwhile. A test calling one of these actions has its light's auto config read first and put back, before
+its on/off.
 
 ### Observed tests
 

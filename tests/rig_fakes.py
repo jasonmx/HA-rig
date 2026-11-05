@@ -712,3 +712,43 @@ tests:
       - set: {state: off}
 """
 WAITING_MIDWAY = RESTORED_MIDWAY.replace("      - restore: null\n", "      - wait: 30\n")
+
+
+class ShellyAuto:
+    """DeviceSide's Shelly auto-off / auto-on actions and get_attributes as a `respond`, on devices whose config
+    starts as `config`. A write reloads the entity's entry `reload_after` seconds later (unless `reloads` is False),
+    which keeps it unavailable for `reload_for` and is logged in ha.calls as ("reload", entity_id, {}); writes in the
+    window share one reload. A call landing on an unavailable entity raises, as HA's would."""
+
+    def __init__(self, config: dict[str, dict] | None = None, reloads: bool = True, reload_after=0.02, reload_for=0.02):
+        self.config = config or {}
+        self.reloads, self.reload_after, self.reload_for = reloads, reload_after, reload_for
+        self.pending: dict[str, asyncio.Task] = {}
+
+    def __call__(self, ha: FakeHA, action: str, data: dict) -> dict:
+        entity_id = data["entity_id"]
+        if ha.states[entity_id]["state"] == "unavailable":
+            raise HAError({"code": "home_assistant_error", "translation_key": "unavailable", "message": entity_id})
+        config = self.config.setdefault(entity_id, {"auto_off": None, "auto_on": None})
+        if action == "get_attributes":
+            return {entity_id: copy.deepcopy(config)}
+        which = f"auto_{action.rpartition('_')[2]}"
+        wanted = None if action.startswith("clear_") else {"duration": data["duration"]["seconds"]}
+        if config[which] == wanted:
+            detail = "already_clear" if wanted is None else "already_set"
+            return {entity_id: {"status": "unchanged", "integration": "shelly", "detail": detail}}
+        config[which] = wanted
+        if self.reloads and entity_id not in self.pending:
+            self.pending[entity_id] = task = asyncio.create_task(self._reload(ha, entity_id))
+            PENDING.append(task)
+        return {entity_id: {"status": "confirmed", "integration": "shelly"}}
+
+    async def _reload(self, ha: FakeHA, entity_id: str) -> None:
+        await asyncio.sleep(self.reload_after)
+        state = ha.states[entity_id]
+        ha.set(entity_id, "unavailable")
+        await asyncio.sleep(self.reload_for)
+        ha.states[entity_id] = state
+        ha.calls.append(("reload", entity_id, {}))
+        del self.pending[entity_id]
+        PENDING.remove(asyncio.current_task())  # done: nothing for a test's teardown to cancel

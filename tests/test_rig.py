@@ -9,6 +9,7 @@ import signal
 import threading
 import types
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -783,6 +784,34 @@ async def test_recover_puts_back_every_lanes_case(tmp_path, monkeypatch):
     assert ha.states["light.a"] == LIGHT_A_ON
     assert ha.states["light.b"] == light_b_on
     assert not journal.path.exists()
+
+
+async def test_recover_puts_back_a_cases_auto_config_and_waits_out_its_reload(monkeypatch):
+    monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
+    monkeypatch.setitem(engine.ENTRY_RELOADS, "shelly", replace(engine.ENTRY_RELOADS["shelly"], deadline_s=0.5))
+    shelly = fakes.ShellyAuto({"switch.plug": {"auto_off": {"duration": 6}, "auto_on": None}})
+    ha = fakes.FakeHA({"switch.plug": {"state": "on"}}, shelly)
+    entry = {
+        "taken": {"switch.plug": {"entity_id": "switch.plug", "state": "off", "attributes": {}}},
+        "stored": {},
+        "power": {},
+        "auto": {"switch.plug": {"auto_off": None, "auto_on": {"duration": 30}}},
+        "integration": "shelly",
+    }
+    printed = []
+
+    await rig.recover_case(ha, entry, printed.append).restore()
+
+    assert shelly.config["switch.plug"] == {"auto_off": None, "auto_on": {"duration": 30}}
+    assert [call[:2] for call in ha.calls] == [
+        ("deviceside", "clear_auto_off"),
+        ("deviceside", "set_auto_on"),
+        ("reload", "switch.plug"),  # one reload for both writes, waited out before the state goes back
+        ("switch", "turn_off"),
+    ]
+    assert "Putting switch.plug's auto_off off, auto_on 30 s back, waiting out the entry reload a change makes." in (
+        printed
+    )
 
 
 async def test_recover_puts_back_a_case_a_journal_from_before_lanes_left(tmp_path, monkeypatch):
