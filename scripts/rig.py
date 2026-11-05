@@ -1725,7 +1725,18 @@ def recover_case(ha: HAClient, entry: dict, out: Callable[[str], None], **journa
     for entity_id, state in entry["taken"].items():
         if state is not None and state["state"] in ("on", "off"):
             out(f"Putting {entity_id} back {state['state']}.")
-    return Snapshot(ha, entry.get("power", {}), taken=entry["taken"], stored=entry.get("stored", {}), **journaled)
+    for entity_id, rows in entry.get("auto", {}).items():
+        shown = ", ".join(f"{name} {'off' if row is None else f'{row['duration']:g} s'}" for name, row in rows.items())
+        out(f"Putting {entity_id}'s {shown} back, waiting out the entry reload a change makes.")
+    return Snapshot(
+        ha,
+        entry.get("power", {}),
+        taken=entry["taken"],
+        stored=entry.get("stored", {}),
+        integration=entry.get("integration"),
+        auto=entry.get("auto", {}),
+        **journaled,
+    )
 
 
 async def recover_roam(

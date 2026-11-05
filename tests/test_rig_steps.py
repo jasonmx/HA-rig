@@ -16,6 +16,8 @@ def test_every_shipped_step_file_parses(path):
 def test_every_step_file_has_an_action():
     actions = {step_file.action for step_file in load_step_files()}
     assert actions == {
+        "clear_auto_off",
+        "clear_auto_on",
         "get_attributes",
         "lower_brightness",
         "lower_hue",
@@ -24,6 +26,8 @@ def test_every_step_file_has_an_action():
         "raise_hue",
         "raise_saturation",
         "set_attributes",
+        "set_auto_off",
+        "set_auto_on",
         "set_scene",
         "stop",
         "turn_on_for",
@@ -53,6 +57,9 @@ def test_the_step_files_keep_their_roles():
         "group",
     )
     assert by_action["turn_off_for"].roles == ("switch_plug", "light_onoff", "light_wrapped", "light_dimmable")
+    for action in ("set_auto_off", "set_auto_on", "clear_auto_off", "clear_auto_on"):
+        assert by_action[action].roles == ("switch_plug", "light_color")
+        assert all(test.only == frozenset({"shelly"}) for test in by_action[action].tests)
 
 
 HEADER = "action: turn_on_for\nrig_seconds: 5\ntests:\n  - name: broken\n    roles: [switch_plug]\n    steps:\n"
@@ -76,6 +83,7 @@ def observed(observe: str = "{see: s, watch: w, ask: a}", setup: str = "[{wait: 
         (HEADER + "      - set: {state: on}\n        wait: 1\n", "step 1: expected one `kind: args` mapping"),
         (HEADER + "      - set: {state: dim}\n", "step 1 (set): state must be on or off"),
         (HEADER + "      - set: {}\n", "step 1 (set): missing state"),
+        (HEADER + "      - expect_no_reload: {}\n", "step 1 (expect_no_reload): missing for"),
         (HEADER + "      - call: {target: lamp}\n", "target 'lamp' is not a profile role"),
         (HEADER + "      - call: {duration: forever}\n", "unknown name 'forever'"),
         (HEADER + "      - wait: duration / 2\n", "something other than numbers, names and + - *"),

@@ -1,0 +1,25 @@
+# Clearing the persistent auto-on. Roles and the entry reload as in set_auto_off.yaml; the devices start with it
+# clear.
+action: clear_auto_on
+rig_seconds: 500
+tests:
+  - name: clears
+    roles: [switch_plug, light_color]
+    only: [shelly]
+    steps:
+      - set: {state: on}
+      - call: {action: set_auto_on, duration: 6}
+      - expect_response: {status: expected, integration: self}
+      - call: {}  # waits out the set's entry reload
+      - expect_response: {status: expected, integration: self}
+      - set: {state: off}  # waits out the clear's
+      - wait: duration + 2 * tol
+      - expect_state: {state: off}
+
+  - name: unchanged_when_clear
+    roles: [switch_plug, light_color]
+    only: [shelly]
+    steps:
+      - call: {}
+      - expect_response: {status: unchanged, detail: already_clear}
+      - expect_no_reload: {for: 75}  # an unchanged call sends no SetConfig

@@ -1,7 +1,7 @@
 # hue_dimmer tests/RELEASE_CHECKLIST.md §4 as steps.
 # On the group role the set gives every member the same values, so the room's own row reads them back too.
 action: get_attributes
-rig_seconds: 300
+rig_seconds: 750
 tests:
   - name: reads_while_off  # §4.1
     roles: [light_ct, group]
@@ -137,3 +137,17 @@ tests:
       - expect_state: {state: on, within: 20 + 2 * tol}
       - call: {}
       - expect_response: {attributes: {timer: null}}
+
+  # Shelly's persistent auto-off and auto-on, from the device's config: null while clear, the delay once set. Each
+  # write reloads the device's entry; the next call waits it out (set_auto_off.yaml).
+  - name: reads_auto_off_and_on
+    roles: [switch_plug, light_color]
+    only: [shelly]
+    steps:
+      - set: {state: off}
+      - call: {}
+      - expect_response: {attributes: {auto_off: null, auto_on: null}}
+      - call: {action: set_auto_off, duration: 30}
+      - call: {action: set_auto_on, duration: 40}  # waits out the first write's entry reload
+      - call: {}  # and the second's
+      - expect_response: {attributes: {auto_off.duration: 30, auto_on.duration: 40}}

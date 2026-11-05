@@ -25,7 +25,7 @@ from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
 from .client import HAClient, HAError, device_ieee
 from .journal import Journal
-from .profile import GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
+from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +71,11 @@ _RAMPS = frozenset(
 )
 _PREDICTED = _RAMPS | {"stop"}
 SWEEP_TIME_S = 5.0
+
+# The statuses of a call that wrote to the device; `unchanged` and `rejected` sent nothing.
+_WRITES = frozenset({"confirmed", "sent"})
+# The rows of get_attributes a snapshot keeps for a case that calls an ENTRY_RELOADS action, and their set and clear.
+AUTO_ROWS = ("auto_off", "auto_on")
 
 
 class SchemaError(ValueError):
@@ -161,7 +166,9 @@ class Observe:
 STEADY_SPREAD = {("brightness", "ha"): 255 / 254 + 1e-9, ("brightness", "deviceside"): 100 / 254 + 0.1 + 1e-9}
 
 # Steps that check something; an observed run turns them into the waits they imply.
-CHECKS = frozenset({"expect_response", "expect_error", "expect_state", "expect_matches_read", "sample"})
+CHECKS = frozenset(
+    {"expect_response", "expect_error", "expect_state", "expect_matches_read", "sample", "expect_no_reload"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +333,12 @@ def _parse_sample(args: Any) -> dict:
     return args
 
 
+def _parse_expect_no_reload(args: Any) -> dict:
+    args = _mapping(args, required=["for"], allowed=["target"])
+    args["for"] = Expr.parse(args["for"])
+    return args
+
+
 def _parse_mark_hue(args: Any) -> dict:
     return _mapping(args, allowed=["target"])
 
@@ -394,6 +407,8 @@ PARSERS: dict[str, Callable[[Any], Any]] = {
     # HA's state matches a live deviceside.get_attributes read: what HA shows is where the light really is.
     "expect_matches_read": _parse_expect_matches_read,
     "wait": Expr.parse,
+    # The target doesn't go unavailable (an entry reload) for `for` seconds.
+    "expect_no_reload": _parse_expect_no_reload,
     "sample": _parse_sample,
     # The bulb's own hue now, and how far round its own wheel it has turned since: a hue move's rate is in its units.
     "mark_hue": _parse_mark_hue,
@@ -833,6 +848,11 @@ class Snapshot:
     restored: cases running at once in lanes each have their own key, the integration. An entity that couldn't be put
     back moves to `cases[<key>+unrestored]`, which the lane's next case doesn't overwrite, so --recover tries again;
     an entity already there keeps the state it had first.
+
+    For an entity in `reads_auto` (a case calling one of its integration's ENTRY_RELOADS actions), the device's
+    persistent auto_off and auto_on are read too, journaled under `auto`, and put back before its on/off: else a
+    lingering auto-on would undo the restore's turn-off. A write to them reloads the device's entry, which `reloading`
+    waits out (watch_reload); the restore waits for its own before it goes on.
     """
 
     ha: HAClient
@@ -842,6 +862,15 @@ class Snapshot:
     stored: dict[str, dict] = field(default_factory=dict)
     journal: Journal | None = None
     journal_key: str = SERIAL
+    integration: str | None = None  # whose ENTRY_RELOADS a write to `auto` waits for
+    reads_auto: frozenset[str] = frozenset()
+    auto: dict[str, dict] = field(default_factory=dict)  # entity -> {auto_off, auto_on}, as get_attributes reads them
+    reloading: dict[str, asyncio.Task] = field(default_factory=dict)  # entity -> its entry reload's watcher
+
+    def entry(self) -> dict:
+        """What the journal keeps for the case: `auto` and `integration` only where a case read auto config."""
+        entry = {"taken": self.taken, "stored": self.stored, "power": self.power}
+        return entry | ({"auto": self.auto, "integration": self.integration} if self.auto else {})
 
     async def take(self, entity_id: str, group: bool = False) -> dict | None:
         """The entity's state before the case moved it, and that of every entity it powers."""
@@ -853,21 +882,92 @@ class Snapshot:
                 )
                 if attributes := (response or {}).get(entity_id):
                     self.stored[entity_id] = attributes
+            if entity_id in self.reads_auto:
+                self.auto[entity_id] = await self.read_auto(entity_id)
             if self.journal is not None:
-                self.journal.put(
-                    "cases", self.journal_key, {"taken": self.taken, "stored": self.stored, "power": self.power}
-                )
+                self.journal.put("cases", self.journal_key, self.entry())
             for powered, supply in self.power.items():
                 if supply == entity_id:
                     await self.take(powered)
         return self.taken[entity_id]
 
+    async def read_auto(self, entity_id: str) -> dict:
+        """The entity's auto_off and auto_on rows; raises if the read lacks either, as the case couldn't put it back."""
+        response = await self.ha.call_service(
+            "deviceside", "get_attributes", {"entity_id": entity_id}, return_response=True
+        )
+        row = (response or {}).get(entity_id) or {}
+        if missing := [name for name in AUTO_ROWS if name not in row]:
+            raise StepFailure(
+                f"{entity_id}: get_attributes read no {' or '.join(missing)}, so no restore could put it back"
+            )
+        return {name: row[name] for name in AUTO_ROWS}
+
+    def watch_reload(self, entity_id: str) -> None:
+        """Start watching for the entry reload a write to the entity's device makes, at once, so a quick one can't
+        slip past; one already pending covers this write too, as core's debouncer coalesces them."""
+        if (task := self.reloading.get(entity_id)) is None or task.done():
+            deadline_s = ENTRY_RELOADS[self.integration].deadline_s
+            self.reloading[entity_id] = asyncio.create_task(self._reloaded(entity_id, deadline_s))
+
+    async def _reloaded(self, entity_id: str, deadline_s: float) -> None:
+        """The entity goes unavailable and comes back, within deadline_s of the write; a StepFailure otherwise."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + deadline_s
+        try:
+            await self.ha.wait_for(entity_id, _unavailable, deadline_s)
+        except TimeoutError:
+            raise StepFailure(f"{entity_id}: no entry reload within {deadline_s:g} s of the write") from None
+        try:
+            await self.ha.wait_for(entity_id, lambda state: not _unavailable(state), max(deadline - loop.time(), 0))
+        except TimeoutError:
+            raise StepFailure(f"{entity_id}: still unavailable {deadline_s:g} s after the write") from None
+
+    async def await_reload(self, entity_id: str | None = None) -> None:
+        """Wait out the entity's pending entry reload, or every one; a watcher's failure is raised, once."""
+        for pending in [entity_id] if entity_id is not None else list(self.reloading):
+            if (task := self.reloading.pop(pending, None)) is not None:
+                await task
+
+    async def settle_reloads(self) -> None:
+        """Wait out every pending reload before a restore's calls, logging a watcher's failure: the case reports it."""
+        for entity_id in list(self.reloading):
+            try:
+                await self.await_reload(entity_id)
+            except Exception as err:  # noqa: BLE001 - logged; the case has reported a failed watcher itself
+                _LOGGER.warning("Restoring anyway: %s", err)
+
+    async def put_back_auto(self) -> list[str]:
+        """Put each entity's auto_off and auto_on back as they were taken, waiting out the reload a write makes; the
+        entities it failed on. The set and clear actions change nothing on a device already there."""
+        failed = []
+        for entity_id, rows in self.auto.items():
+            try:
+                for name, row in rows.items():
+                    which = name.removeprefix("auto_")
+                    action = f"clear_auto_{which}" if row is None else f"set_auto_{which}"
+                    data = {"entity_id": entity_id} | (
+                        {} if row is None else {"duration": {"seconds": row["duration"]}}
+                    )
+                    response = await self.ha.call_service("deviceside", action, data, return_response=True)
+                    status = ((response or {}).get(entity_id) or {}).get("status")
+                    if status in _WRITES:
+                        self.watch_reload(entity_id)
+                    elif status != "unchanged":
+                        raise RuntimeError(f"{action} came back {status}: {response}")
+                await self.await_reload(entity_id)
+            except Exception as err:  # noqa: BLE001 - as restore(): logged, and --recover tries again
+                _LOGGER.warning("Could not put back %s's %s: %s; --recover tries again", entity_id, rows, err)
+                failed.append(entity_id)
+        return failed
+
     async def restore(self, clear: bool = True) -> None:
         """Put back every entity taken; `clear=False` keeps the journal, for a case that goes on moving them."""
+        await self.settle_reloads()
+        failed = await self.put_back_auto()
         # A powered entity goes back after its supply, whatever order the case touched them in.
         cut = [entity_id for entity_id in self.taken if self.power.get(entity_id) in self.taken]
         put_back = False
-        failed: list[str] = []
         for entity_id in [entity_id for entity_id in self.taken if entity_id not in cut] + cut:
             state = self.taken[entity_id]
             if state is None or state["state"] not in ("on", "off"):
@@ -906,6 +1006,9 @@ class Snapshot:
                     kept["power"][entity_id] = self.power[entity_id]
                     supply = self.power[entity_id]
                     kept["taken"].setdefault(supply, self.taken.get(supply))
+                if entity_id in self.auto:
+                    kept.setdefault("auto", {})[entity_id] = self.auto[entity_id]
+                    kept["integration"] = self.integration
         self.journal.put("cases", key, kept)
 
     async def put_back_after_power(self, entity_id: str, state: dict) -> bool:
@@ -959,6 +1062,11 @@ async def _prompt(ask: Callable[[str], str], text: str) -> str:
 
     threading.Thread(target=read, name="rig prompt", daemon=True).start()
     return await future
+
+
+def _unavailable(state: dict | None) -> bool:
+    """An entity mid-reload: unavailable, or gone from the state machine."""
+    return state is None or state["state"] == "unavailable"
 
 
 def _is_off_light(entity_id: str, state: dict | None) -> bool:
@@ -1110,6 +1218,8 @@ class _CaseRun:
             ),
             journal=journal,
             journal_key=journal_key,
+            integration=self.integration,
+            reads_auto=self.reads_auto(),
         )
         # Z2M device options a z2m_option step sets, held for the case in the baseline, which puts them back.
         self.baseline: Baseline | None = None
@@ -1122,6 +1232,14 @@ class _CaseRun:
         self.call_times: tuple[float, float] | None = None
         self.sent: dict[str, Any] = {}  # the last call's data
         self.hue_marks: dict[str, float] = {}  # each light's own hue at the last mark_hue
+
+    def reads_auto(self) -> frozenset[str]:
+        """The case's lights and switches whose auto config its snapshot keeps: those of a case calling an
+        ENTRY_RELOADS action, which writes it."""
+        reload = ENTRY_RELOADS.get(self.integration)
+        if reload is None or reload.actions.isdisjoint({self.case.suite.action, *self.case.test.calls}):
+            return frozenset()
+        return frozenset(entity_id for entity_id in self.case.entities.values() if not self.is_group(entity_id))
 
     def entity(self, args: Any) -> str:
         role = args.get("target") if isinstance(args, dict) else None
@@ -1167,6 +1285,10 @@ class _CaseRun:
                 await self.observed()
             else:
                 await self.steps(case.test.steps)
+            try:
+                await self.snapshot.await_reload()  # so the next case never lands mid-reload
+            except Exception as err:  # noqa: BLE001 - a watcher's error fails the case, not the run
+                raise StepFailure(f"case end: {err}") from None
         except StepFailure as err:
             result.outcome, result.detail = Outcome.FAIL, str(err)
         except _NoOneThere:
@@ -1274,6 +1396,7 @@ class _CaseRun:
     async def _set(self, args: dict, _following: str | None) -> None:
         entity_id = self.entity(args)
         domain = entity_id.partition(".")[0]
+        await self.snapshot.await_reload(entity_id)
         await self.touch(entity_id)
         data = {key: value for key, value in args.items() if key not in ("target", "state")}
         if domain == "scene":
@@ -1355,6 +1478,7 @@ class _CaseRun:
     async def _call(self, args: dict, following: str | None) -> None:
         action = args.get("action", self.case.suite.action)
         entity_id = self.entity(args)
+        await self.snapshot.await_reload(entity_id)
         await self.touch(entity_id)
         data: dict[str, Any] = {"entity_id": entity_id}
         for key, value in args.items():
@@ -1378,6 +1502,16 @@ class _CaseRun:
         if following == "expect_error":
             raise StepFailure(f"deviceside.{action} succeeded where an error was expected: {self.response}")
         await self.mark_busy(action, data)
+        self.mark_reloading(action)
+
+    def mark_reloading(self, action: str) -> None:
+        """After a write by an ENTRY_RELOADS action, watch for the entry reload on each light it wrote to: the next
+        call or set on it, the restore and the case's end wait it out (Snapshot.watch_reload). Checks don't."""
+        if (reload := ENTRY_RELOADS.get(self.integration)) is None or action not in reload.actions:
+            return
+        for entity_id, row in (self.response or {}).items():
+            if isinstance(row, dict) and row.get("status") in _WRITES:
+                self.snapshot.watch_reload(entity_id)
 
     async def mark_busy(self, action: str, data: dict) -> None:
         """After a raise, lower or stop, hold its lights until the predictions it left expire (see await_settled)."""
@@ -1542,6 +1676,15 @@ class _CaseRun:
                     f"± {args['tolerance']:g}°"
                 )
 
+    async def _expect_no_reload(self, args: dict, _following: str | None) -> None:
+        entity_id, seconds = self.entity(args), args["for"].eval(self.names)
+        try:
+            state = await self.ha.wait_for(entity_id, _unavailable, seconds)
+        except TimeoutError:
+            return
+        found = state["state"] if state else "gone"
+        raise StepFailure(f"{entity_id}: went {found} within {seconds:g} s, an entry reload")
+
     async def _wait(self, seconds: Expr, _following: str | None) -> None:
         await asyncio.sleep(max(seconds.eval(self.names), 0))
 
@@ -1633,6 +1776,8 @@ class _CaseRun:
 
     async def _relaxed_sample(self, args: dict, _following: str | None) -> None:
         await asyncio.sleep(max(args["for"].eval(self.names), 0))
+
+    _relaxed_expect_no_reload = _relaxed_sample
 
 
 async def run(
