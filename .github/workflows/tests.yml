@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The rig imports device-side's registry and actions, so it tests against device-side's newest line of work:
+      # whichever of main and the release branches had the latest commit, as device-side's PRs pick their base.
+      - name: Check out device-side
+        run: |
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/jasonmx/deviceside ../deviceside
+          cd ../deviceside
+          git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/release/*:refs/remotes/origin/release/*'
+          ref=$(git for-each-ref --sort=-committerdate --count=1 --format='%(refname:short)' refs/remotes/origin/main 'refs/remotes/origin/release/*')
+          echo "device-side at $ref"
+          git checkout --quiet --detach "$ref"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install test dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: .venv/bin/pytest -q tests/
