@@ -49,3 +49,15 @@ def test_device_side_repo_says_how_to_name_one(tmp_path, monkeypatch):
 
 def test_main_checkout_falls_back_outside_a_repo(tmp_path):
     assert target.main_checkout(tmp_path) == tmp_path
+
+
+@pytest.mark.parametrize("stale", [".env.rig", "tests/rig/profiles"])
+def test_a_household_file_left_in_device_side_is_refused(tmp_path, stale):
+    from tests.conftest import REAL_REFUSE_MOVED_FILES
+
+    repo = checkout(tmp_path / "deviceside")
+    (repo / stale).mkdir(parents=True)
+    with pytest.raises(SystemExit, match=f"Move {repo.resolve() / stale} into {tmp_path / 'ha-rig'}"):
+        REAL_REFUSE_MOVED_FILES(repo, tmp_path / "ha-rig")
+    (repo / stale).rmdir()
+    REAL_REFUSE_MOVED_FILES(repo, tmp_path / "ha-rig")  # nothing left: passes

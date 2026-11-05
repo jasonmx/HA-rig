@@ -96,14 +96,14 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ha_rig.target import COMPONENT, RIG_HOME, device_side_repo, main_checkout  # noqa: E402
+from ha_rig.target import COMPONENT, RIG_HOME, device_side_repo  # noqa: E402
 
 REPO = device_side_repo()  # the device-side checkout under test, whose code a run deploys and records
 sys.path.append(str(REPO))
 
 from custom_components.device_side.core.registry import AdapterRegistry  # noqa: E402
 
-from ha_rig import locks, terms  # noqa: E402
+from ha_rig import locks, target, terms  # noqa: E402
 from ha_rig.baseline import NAME as BASELINE_NAME  # noqa: E402
 from ha_rig.baseline import Baseline  # noqa: E402
 from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
@@ -632,8 +632,11 @@ def leave(signum: int, _frame: object) -> None:
 
 
 def wait_or_run(args: argparse.Namespace) -> int:
-    refuse_moved_files()
-    terms.write(REPO)  # device-side's household check reads the profiles' terms from here
+    target.refuse_moved_files(REPO, MAIN_CHECKOUT)
+    try:
+        terms.write(REPO)  # device-side's household check reads the profiles' terms from here
+    except ValueError as err:  # a bad profile must not stop --recover; a run's own refuses it in prepare
+        print(f"device-side's household terms not refreshed: {err}")
     directory = common_dir()
     if args.wait_free:
         locks.wait_free(directory, args.integration)
@@ -653,15 +656,6 @@ def wait_or_run(args: argparse.Namespace) -> int:
     finally:
         if held is not None:
             held.close()
-
-
-def refuse_moved_files() -> None:
-    """Refuse while a household file is still where the rig kept it inside device-side, so no run reads half of a
-    move and the old copy doesn't linger outside the household check's reach."""
-    old = main_checkout(REPO)
-    if stale := [path for path in (old / ".env.rig", old / "tests" / "rig" / "profiles") if path.exists()]:
-        listed = ", ".join(str(path) for path in stale)
-        raise SystemExit(f"Move {listed} into {MAIN_CHECKOUT} (profiles/ and .env.rig there), then run again")
 
 
 def prepare(args: argparse.Namespace) -> Setup:

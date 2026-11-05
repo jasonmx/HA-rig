@@ -1052,26 +1052,25 @@ def test_load_env_still_reads_rig_pause_so_a_run_can_refuse_it(tmp_path, monkeyp
 # --- the device-side checkout under test ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("stale", [".env.rig", "tests/rig/profiles"])
-def test_a_household_file_left_in_device_side_stops_every_mode(tmp_path, monkeypatch, stale):
-    def untouched(*_args):
-        raise AssertionError("ran past the moved files")
-
-    (tmp_path / stale).mkdir(parents=True)
-    monkeypatch.setattr(rig, "main_checkout", lambda repo: tmp_path)
-    monkeypatch.setattr(rig, "common_dir", untouched)
-    with pytest.raises(SystemExit, match=f"Move {tmp_path / stale} into {rig.MAIN_CHECKOUT}"):
-        rig.main(["--wait-free"])
-
-
-def test_every_mode_writes_device_sides_household_terms_first(tmp_path, monkeypatch):
-    written = []
-    monkeypatch.setattr(rig, "main_checkout", lambda repo: tmp_path)
-    monkeypatch.setattr(rig.terms, "write", written.append)
+def test_every_mode_checks_for_moved_files_then_writes_device_sides_household_terms(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(rig.target, "refuse_moved_files", lambda repo, rig_checkout: calls.append(("moved", repo)))
+    monkeypatch.setattr(rig.terms, "write", lambda repo: calls.append(("terms", repo)))
     monkeypatch.setattr(rig, "common_dir", lambda: tmp_path)
     monkeypatch.setattr(rig.locks, "wait_free", lambda directory, integrations: None)
     assert rig.main(["--wait-free"]) == 0
-    assert written == [rig.REPO]
+    assert calls == [("moved", rig.REPO), ("terms", rig.REPO)]
+
+
+def test_a_bad_profile_leaves_the_terms_stale_but_stops_no_mode(tmp_path, monkeypatch, capsys):
+    def unreadable(repo):
+        raise ValueError("house.yaml: not valid YAML")
+
+    monkeypatch.setattr(rig.terms, "write", unreadable)
+    monkeypatch.setattr(rig, "common_dir", lambda: tmp_path)
+    monkeypatch.setattr(rig.locks, "wait_free", lambda directory, integrations: None)
+    assert rig.main(["--wait-free"]) == 0
+    assert "household terms not refreshed: house.yaml: not valid YAML" in capsys.readouterr().out
 
 
 def test_the_runner_tests_a_device_side_checkout():

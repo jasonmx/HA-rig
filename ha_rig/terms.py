@@ -7,6 +7,7 @@ host and token, by writing them to TERMS_FILE in the device-side main checkout o
 after editing a profile.
 """
 
+import os
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -57,8 +58,10 @@ def write(repo: Path, terms: dict[str, str] | None = None) -> Path:
     path = main_checkout(repo) / TERMS_FILE
     text = render(private_terms() if terms is None else terms)
     if not path.exists() or path.read_text() != text:
-        path.write_text(text)
-        path.chmod(0o600)  # it holds the HA token
+        # It holds the HA token: owner-only from the first byte, and set again on a file made before.
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as file:
+            file.write(text)
+        path.chmod(0o600)
     return path
 
 

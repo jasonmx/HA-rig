@@ -56,3 +56,12 @@ def device_side_repo(cwd: Path | None = None, env: dict[str, str] | None = None)
         if is_device_side(sibling := main_checkout(RIG_HOME).parent / name):
             return sibling
     raise SystemExit("Run the rig from a device-side checkout, or set DEVICE_SIDE_REPO to one")
+
+
+def refuse_moved_files(repo: Path, rig_checkout: Path) -> None:
+    """Refuse while a household file is still where the rig kept it inside device-side, so no run reads half of a
+    move and the old copy doesn't linger outside the household check's reach."""
+    old = main_checkout(repo)
+    if stale := [path for path in (old / ".env.rig", old / "tests" / "rig" / "profiles") if path.exists()]:
+        listed = ", ".join(str(path) for path in stale)
+        raise SystemExit(f"Move {listed} into {rig_checkout} (profiles/ and .env.rig there), then run again")

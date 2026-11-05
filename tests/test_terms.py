@@ -141,3 +141,12 @@ def test_check_fails_on_a_hit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(check_private, "all_terms", lambda: {"acme street": "Acme Street"})
     assert check_private.main([str(write(tmp_path, "msg", "Fix lamp on acme street"))]) == 1
     assert "Acme Street" in capsys.readouterr().out
+
+
+def test_write_makes_an_older_file_owner_only_on_a_change(tmp_path):
+    repo = git_repo(tmp_path / "deviceside")
+    path = repo / terms.TERMS_FILE
+    path.write_text("old\n")
+    path.chmod(0o644)
+    REAL_WRITE(repo, {"a": "a"})
+    assert path.stat().st_mode & 0o777 == 0o600

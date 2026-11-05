@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from ha_rig import locks, roam, terms
+from ha_rig import locks, roam, target, terms
 from ha_rig.target import device_side_repo
 
 # The rig imports device-side's registry and actions; appended, so this repo's own `tests` package wins.
@@ -41,3 +41,12 @@ def quick_prime(monkeypatch) -> None:
 def no_terms_written(monkeypatch) -> None:
     """A run writes the household terms into device-side's main checkout; a test's run doesn't."""
     monkeypatch.setattr(terms, "write", lambda repo, found=None: repo)
+
+
+REAL_REFUSE_MOVED_FILES = target.refuse_moved_files  # the autouse fixture swaps the module's for a no-op
+
+
+@pytest.fixture(autouse=True)
+def no_moved_files_check(monkeypatch) -> None:
+    """The real device-side checkout the tests import may still hold a household file the rig refuses."""
+    monkeypatch.setattr(target, "refuse_moved_files", lambda repo, rig_checkout: None)
