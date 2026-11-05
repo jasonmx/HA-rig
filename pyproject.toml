@@ -1,8 +1,15 @@
-# Virtual project (no build backend): uv reads requires-python and the dev group from it.
+# uv sync installs ha_rig editable, so `python -m ha_rig.terms` runs from any directory (deviceside included).
 [project]
 name = "ha-rig"
 version = "0"
 requires-python = ">=3.14.2"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ha_rig"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

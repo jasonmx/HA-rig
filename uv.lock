@@ -1151,7 +1151,7 @@ wheels = [
 [[package]]
 name = "ha-rig"
 version = "0"
-source = { virtual = "." }
+source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [
