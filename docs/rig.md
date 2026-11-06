@@ -97,7 +97,8 @@ you can try a branch's non-device features by hand. When HA already runs the che
   (`ha_rig/home.py`).
 - **Journal.** Each run journals what it changes, so Ctrl-C, a signal, or the next run after a crash puts the devices
   back, DeviceSide's options, a disabled entry and a Shelly device's persistent auto-off / auto-on included;
-  `--recover` puts back everything (`ha_rig/journal.py`).
+  `--recover` puts back everything (`ha_rig/journal.py`). One Ctrl-C or signal, even mid-move, still brings the
+  roaming bulbs home before the run stops; one that can't exits 1, saying so. A second leaves them where they are.
 - **Baseline.** Changes beyond the devices (paused automations, log levels, Z2M device options) are shared by runs
   side by side, and the last one out puts them back (`ha_rig/baseline.py`).
 - **Locks.** Runs share the rig through one lock per integration and one on HA, so runs on different integrations go

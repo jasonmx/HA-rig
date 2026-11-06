@@ -7,6 +7,7 @@ import importlib.util
 import io
 import sys
 import time
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import pytest
@@ -917,3 +918,113 @@ async def test_a_budget_spent_during_a_move_still_runs_the_phases_first_case(tmp
     await budget_run(tmp_path, lab, budget)
 
     assert ("zha" in str(seen)) and seen[-1][2] is False
+
+
+def signal_mid_move(
+    monkeypatch, lab: fakes.Lab, tmp_path: Path, at: str, then: Callable[[], None] = lambda: None
+) -> tuple[Coroutine, Journal, list]:
+    """A run from Hue through ZHA to Z2M, to await in the test's task, which is cancelled as cancel_on_signals
+    cancels the run's on a Ctrl-C: `at` the release from ZHA, or as Z2M opens for the join, both on the way to Z2M; or
+    `home`, at the release from Z2M on the way back; `then` runs as it comes. Returns the run, its journal, and a list
+    that holds True once the signal came."""
+    fake_phases(monkeypatch, lab)
+    journal = Journal(tmp_path / "journal.json")
+    profile = lab_with_pause(tmp_path)
+    run = rig.run_rig(
+        ENV, suites(tmp_path, "zha", "zigbee2mqtt"), profile, None, None, True, None, journal, roaming=True
+    )
+    task = asyncio.current_task()
+    signalled: list[bool] = []
+
+    def signal() -> None:
+        if not signalled:
+            signalled.append(True)
+            task.cancel()
+            then()
+
+    left, opened = lab.ha.on_leave, lab.ha.on_open
+
+    def leave(integration, ieee):
+        left(integration, ieee)
+        if (at, integration) in {("release", "zha"), ("home", "zigbee2mqtt")}:
+            signal()
+
+    def open_(network):
+        opened(network)
+        if at == "join" and network == "zigbee2mqtt":
+            signal()
+
+    lab.ha.on_leave, lab.ha.on_open = leave, open_
+    return run, journal, signalled
+
+
+def heeding_a_pending_cancel(lab: fakes.Lab) -> None:
+    """HA calls that stop at a cancel the task still carries, as an await that defers to task.cancelling() does: the
+    way home must not run in a task that carries the signal's. The fakes' calls rarely suspend, so without this a
+    cancel finds no await to land on before the bulbs are home, which is why the fakes never showed issue #11."""
+    call_service = lab.ha.call_service
+
+    async def heeding(*args, **kwargs):
+        if asyncio.current_task().cancelling():
+            raise asyncio.CancelledError
+        return await call_service(*args, **kwargs)
+
+    lab.ha.call_service = heeding
+
+
+@pytest.mark.parametrize("at", ["release", "join", "home"])
+@pytest.mark.parametrize("heeds", [False, True])
+async def test_a_signal_mid_move_still_brings_the_bulbs_home(tmp_path, monkeypatch, lab, at, heeds):
+    """Issue #11: one Ctrl-C mid-move, away or on the way home, ends the run with the bulbs home and no roam left."""
+    run, journal, signalled = signal_mid_move(monkeypatch, lab, tmp_path, at)
+    if heeds:
+        heeding_a_pending_cancel(lab)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert signalled
+    assert await where(lab) == ["hue", "hue"]
+    assert lab.ha.states["automation.lab"]["state"] == "on"
+    assert not journal.path.exists()
+
+
+async def test_a_signal_on_the_way_home_lets_the_cleanup_after_it_finish(tmp_path, monkeypatch, lab):
+    """The signal that came during the move home stops the run only once everything is put back."""
+    run, _, signalled = signal_mid_move(monkeypatch, lab, tmp_path, "home")
+    closed = []
+    monkeypatch.setattr(lab.bridge, "close", lambda: closed.append(True) or asyncio.sleep(0))
+
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert signalled and closed
+    assert lab.ha.states["automation.lab"]["state"] == "on"
+
+
+@pytest.mark.parametrize("fails", ["join", "cancel"])
+async def test_an_abort_that_cant_bring_the_bulbs_home_says_so_and_keeps_the_journal(
+    tmp_path, monkeypatch, lab, capsys, fails
+):
+    """After a Ctrl-C, a move home that fails (a bulb that doesn't join Hue, or a cancel no signal sent) exits nonzero,
+    saying the bulbs aren't home, with the journal kept for --recover: not "Aborted." as though all is well."""
+    if fails == "join":
+        monkeypatch.setattr(roam, "JOIN_S", 0.02)
+        run, journal, _ = signal_mid_move(monkeypatch, lab, tmp_path, "join", then=lambda: lab.stuck.add(A[2:]))
+    else:
+        run, journal, _ = signal_mid_move(monkeypatch, lab, tmp_path, "join")
+        release = roam.Roamer.release
+
+        async def stray(self, network, bulb):
+            if network == "zigbee2mqtt":
+                raise asyncio.CancelledError
+            await release(self, network, bulb)
+
+        monkeypatch.setattr(roam.Roamer, "release", stray)
+
+    with pytest.raises(SystemExit, match="Aborted with the roaming bulbs not home"):
+        await run
+
+    assert "Could not move the roaming bulbs home" in capsys.readouterr().out
+    assert "roam" in Journal(journal.path).sections
+    assert lab.ha.states["automation.lab"]["state"] == "on"

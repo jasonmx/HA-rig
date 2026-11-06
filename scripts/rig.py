@@ -1566,7 +1566,7 @@ async def run_rig(
             await report_ran(results, ha, registry, commit, profile, keyword, stamp)
             raise SystemExit(f"Roaming stopped: {err}") from None
         finally:
-            home = await leave_lab(roamer, stopped)
+            home, signalled = await sheltered(leave_lab(roamer, stopped))
             await end_logging(logs, levels, admin)
             if pauses is not None:
                 await pauses.release()
@@ -1576,6 +1576,7 @@ async def run_rig(
             await ha.close()
             if admin:
                 await admin.close()
+            end_abort(home, signalled, sys.exception())
         code = end_code(result, home, budget, progress, selected, profile, registry)
     finally:
         flagged = logs.settle(code == 0)
@@ -1793,6 +1794,37 @@ def report_saved(
         print(f"The cases that ran couldn't be reported: {err}")
 
 
+async def sheltered[T](coro: Coroutine[Any, Any, T]) -> tuple[T, bool]:
+    """Run `coro` to its end in a task of its own, and say whether a signal came meanwhile. A signal cancels the run's
+    task (cancel_on_signals), never this one, so the way home neither stops at a signal that comes during it nor at
+    an await that heeds the cancel the run's task still carries from one before it (issue #11): either would leave a
+    bulb a move released off its home network. A second signal still stops it: the first restored the default
+    handlers."""
+    task = asyncio.current_task()
+    inner = asyncio.create_task(coro)
+    signalled = False
+    while not inner.done():
+        try:
+            await asyncio.wait({inner})
+        except asyncio.CancelledError:
+            signalled = True
+            task.uncancel()
+    return inner.result(), signalled
+
+
+def end_abort(home: bool, signalled: bool, propagating: BaseException | None) -> None:
+    """Once all is put back: a run a signal stopped, before the way home (a CancelledError `propagating`) or during it
+    (`signalled`), with the bulbs not home exits saying so, not "Aborted." as though all is well; the journal keeps
+    where they are. A signal that came on the way home stops the run now, unless something else already is."""
+    if not home and (signalled or isinstance(propagating, asyncio.CancelledError)):
+        raise SystemExit(
+            "Aborted with the roaming bulbs not home: the journal keeps where they are, and "
+            "scripts/rig.py --recover tries again."
+        )
+    if signalled and propagating is None:
+        raise asyncio.CancelledError
+
+
 async def leave_lab(roamer: Roamer | None, stopped: Roamer | None) -> bool:
     """After the run: the bulbs home and the groups removed (go_home), or, after a RoamError, only the groups removed:
     a move that failed isn't retried here. Whether the bulbs are home with no group left."""
@@ -1806,9 +1838,13 @@ async def leave_lab(roamer: Roamer | None, stopped: Roamer | None) -> bool:
 async def go_home(roamer: Roamer) -> bool:
     """Remove the rig-made groups and move the roaming bulbs home after a run that stopped part way (a no-op after
     one that finished); whether that is all done, their homes put back included. A failure is printed: the journal
-    keeps where they are, and --recover tries again."""
+    keeps where they are, and --recover tries again. It runs sheltered from signals, so a cancel here is no signal's
+    but a stray one, or asyncio.run's after a second signal: a move that didn't finish, said as such."""
     try:
         await roamer.go(roamer.home_network)
+    except asyncio.CancelledError:
+        print("Could not move the roaming bulbs home: the move was cancelled. scripts/rig.py --recover tries again.")
+        return False
     except Exception as err:  # noqa: BLE001 - as resume: say so, and go on putting the rest back
         print(f"Could not move the roaming bulbs home: {err}. scripts/rig.py --recover tries again.")
         return False
