@@ -63,7 +63,8 @@ unpowered stops the run only when its phase comes, after the bulbs have moved.
 
 A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the blocker or
 --for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished across
-sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish.
+sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish;
+it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case.
 A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
@@ -167,6 +168,7 @@ READY_TIMEOUT_S = 450
 # every case; the grace covers an integration whose entities come back just after the restart.
 TARGETS_TIMEOUT_S = 60
 RESTART_ESTIMATE_S = 90
+MOVE_LEAD_S = 60  # the budget a move needs left: one move's join, rename and HA wait
 ROAM_ESTIMATE_S = 180  # the three moves: the probe's joins took about 10 s each, plus releases, renames and HA
 ABORT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 CLEAR_POLL_S = 15
@@ -982,7 +984,7 @@ def print_resume(args: argparse.Namespace, setup: Setup) -> None:
         )
         print(f"Resuming: {len(done)} of {total} cases done (started {setup.progress.started}); --fresh to start over.")
     if args.budget:
-        print(f"Budget: no case starts after {args.budget:.0f} s; rerun the same way to resume.")
+        print(f"Budget: no case starts after {args.budget:.0f} s from approval, deploy included; rerun to resume.")
 
 
 def print_debug_logs(env: dict, suites: list[Suite], roaming: bool) -> None:
@@ -1564,7 +1566,7 @@ async def run_rig(
             await report_ran(results, ha, registry, commit, profile, keyword, stamp)
             raise SystemExit(f"Roaming stopped: {err}") from None
         finally:
-            home = await leave_lab(roamer, stopped)
+            home, signalled = await sheltered(leave_lab(roamer, stopped))
             await end_logging(logs, levels, admin)
             if pauses is not None:
                 await pauses.release()
@@ -1574,6 +1576,7 @@ async def run_rig(
             await ha.close()
             if admin:
                 await admin.close()
+            end_abort(home, signalled, sys.exception())
         code = end_code(result, home, budget, progress, selected, profile, registry)
     finally:
         flagged = logs.settle(code == 0)
@@ -1657,7 +1660,8 @@ async def run_phases(
     with the bulbs at home; the phases then run only the rest (see merge).
 
     With `progress`, the cases it has saved are left out and each new one is saved as it finishes. Once the `budget`
-    is spent no phase starts, so the bulbs move no further than home."""
+    is spent no phase starts, so the bulbs move no further than home. A move starts only with MOVE_LEAD_S of it left,
+    and buys its phase one case, whatever the budget."""
     results = [] if results is None else results
     lanes = lanes and bool(suites)
     ask = None if unattended else input
@@ -1675,9 +1679,12 @@ async def run_phases(
     }
     only = tail(profile) if lanes else None
     for number, (network, phase_suites) in enumerate(phases(suites, profile, roaming)):
-        if budget is not None and budget.stops():
+        moving = phase_moves(roamer, network)
+        if budget is not None and phase_stopped(budget, moving):
             break
         await visit(roamer, network, bool(phase_suites or not suites))
+        if moving and budget is not None:
+            budget.grant()
         if number == 0 and lanes:
             await wait_for_targets(ha, suites, profile, registry, keyword, only=head(profile))
         if phase_suites:
@@ -1691,6 +1698,18 @@ async def run_phases(
     if roamer is not None:
         await roamer.go(roamer.home_network)
     return RunResult(results)
+
+
+def phase_moves(roamer: Roamer | None, network: str | None) -> bool:
+    """Whether the phase for `network` (None: home) moves the bulbs."""
+    return roamer is not None and roamer.moves(network or roamer.home_network)
+
+
+def phase_stopped(budget: Budget, moving: bool) -> bool:
+    """Whether the budget stops the phase: a move needs MOVE_LEAD_S left, any other phase only some budget left."""
+    if moving and budget.left < MOVE_LEAD_S:
+        budget.stopped = True
+    return budget.stopped if moving else budget.stops()
 
 
 async def visit(roamer: Roamer | None, network: str | None, grouping: bool) -> None:
@@ -1775,6 +1794,37 @@ def report_saved(
         print(f"The cases that ran couldn't be reported: {err}")
 
 
+async def sheltered[T](coro: Coroutine[Any, Any, T]) -> tuple[T, bool]:
+    """Run `coro` to its end in a task of its own, and say whether a signal came meanwhile. A signal cancels the run's
+    task (cancel_on_signals), never this one, so the way home neither stops at a signal that comes during it nor at
+    an await that heeds the cancel the run's task still carries from one before it (issue #11): either would leave a
+    bulb a move released off its home network. A second signal still stops it: the first restored the default
+    handlers."""
+    task = asyncio.current_task()
+    inner = asyncio.create_task(coro)
+    signalled = False
+    while not inner.done():
+        try:
+            await asyncio.wait({inner})
+        except asyncio.CancelledError:
+            signalled = True
+            task.uncancel()
+    return inner.result(), signalled
+
+
+def end_abort(home: bool, signalled: bool, propagating: BaseException | None) -> None:
+    """Once all is put back: a run a signal stopped, before the way home (a CancelledError `propagating`) or during it
+    (`signalled`), with the bulbs not home exits saying so, not "Aborted." as though all is well; the journal keeps
+    where they are. A signal that came on the way home stops the run now, unless something else already is."""
+    if not home and (signalled or isinstance(propagating, asyncio.CancelledError)):
+        raise SystemExit(
+            "Aborted with the roaming bulbs not home: the journal keeps where they are, and "
+            "scripts/rig.py --recover tries again."
+        )
+    if signalled and propagating is None:
+        raise asyncio.CancelledError
+
+
 async def leave_lab(roamer: Roamer | None, stopped: Roamer | None) -> bool:
     """After the run: the bulbs home and the groups removed (go_home), or, after a RoamError, only the groups removed:
     a move that failed isn't retried here. Whether the bulbs are home with no group left."""
@@ -1788,9 +1838,13 @@ async def leave_lab(roamer: Roamer | None, stopped: Roamer | None) -> bool:
 async def go_home(roamer: Roamer) -> bool:
     """Remove the rig-made groups and move the roaming bulbs home after a run that stopped part way (a no-op after
     one that finished); whether that is all done, their homes put back included. A failure is printed: the journal
-    keeps where they are, and --recover tries again."""
+    keeps where they are, and --recover tries again. It runs sheltered from signals, so a cancel here is no signal's
+    but a stray one, or asyncio.run's after a second signal: a move that didn't finish, said as such."""
     try:
         await roamer.go(roamer.home_network)
+    except asyncio.CancelledError:
+        print("Could not move the roaming bulbs home: the move was cancelled. scripts/rig.py --recover tries again.")
+        return False
     except Exception as err:  # noqa: BLE001 - as resume: say so, and go on putting the rest back
         print(f"Could not move the roaming bulbs home: {err}. scripts/rig.py --recover tries again.")
         return False

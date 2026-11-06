@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import re
 import threading
 import time
@@ -2437,4 +2438,36 @@ async def test_an_unspent_budget_stops_nothing(tmp_path):
     ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
     result = await run_one(ha, suite(tmp_path, TWO_CASES), profile(switch_plug="switch.plug"), budget=budget)
     assert set(outcomes(result)) == {FIRST, SECOND}
+    assert not budget.stopped
+
+
+async def test_a_grant_goes_to_the_first_device_case_and_no_second(tmp_path):
+    budget = engine.Budget(time.monotonic() - 1)  # spent
+    budget.grant()
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    result = await run_one(ha, suite(tmp_path, TWO_CASES), profile(switch_plug="switch.plug"), budget=budget)
+    assert set(outcomes(result)) == {FIRST}
+    assert budget.stopped
+    assert not budget.granted
+
+
+async def test_a_spent_budget_without_a_grant_starts_no_device_case(tmp_path):
+    budget = engine.Budget(time.monotonic() - 1)
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    result = await run_one(ha, suite(tmp_path, TWO_CASES), profile(switch_plug="switch.plug"), budget=budget)
+    assert outcomes(result) == {}
+    assert budget.stopped
+
+
+async def test_skipped_cases_are_still_reported_after_the_budget_is_spent(tmp_path):
+    steps = suite(tmp_path, TWO_CASES)
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    budget = engine.Budget(time.monotonic() - 1)
+    reported = []
+    run_ = engine._Run(REGISTRY, TOLERANCE, {}, {}, None, lambda _: None, budget=budget)
+    run_.on_result = lambda s, r: reported.append((r.id, r.outcome))
+    case = engine.cases(steps, profile(switch_plug="switch.plug"), None, engine.adapters_for(steps, REGISTRY))[0]
+    skipped = dataclasses.replace(case, skip="no reason")
+    await run_.automated(steps, ha, [skipped])
+    assert reported == [(case.id, Outcome.SKIPPED)]
     assert not budget.stopped

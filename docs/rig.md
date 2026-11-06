@@ -97,7 +97,8 @@ you can try a branch's non-device features by hand. When HA already runs the che
   (`ha_rig/home.py`).
 - **Journal.** Each run journals what it changes, so Ctrl-C, a signal, or the next run after a crash puts the devices
   back, DeviceSide's options, a disabled entry and a Shelly device's persistent auto-off / auto-on included;
-  `--recover` puts back everything (`ha_rig/journal.py`).
+  `--recover` puts back everything (`ha_rig/journal.py`). One Ctrl-C or signal, even mid-move, still brings the
+  roaming bulbs home before the run stops; one that can't exits 1, saying so. A second leaves them where they are.
 - **Baseline.** Changes beyond the devices (paused automations, log levels, Z2M device options) are shared by runs
   side by side, and the last one out puts them back (`ha_rig/baseline.py`).
 - **Locks.** Runs share the rig through one lock per integration and one on HA, so runs on different integrations go
@@ -119,7 +120,9 @@ unfinished case, planning, locking, moving and estimating only what is left, and
 done`. So a 45-minute suite completes as 30 minutes one evening and 15 the next.
 
 - **`--for DURATION`** (`30m`, `90s`, `1h15m`): once spent, no case or phase starts; cases in flight finish, the bulbs
-  go home, and the run exits 75. Ctrl-C, SIGTERM and the blocker still stop at once: the cases in flight are
+  go home, and the run exits 75. The window counts from approval, so the deploy's restart eats into it. A move to
+  another network starts only with a minute left, and always runs its phase's first device case, whatever the budget.
+  Ctrl-C, SIGTERM and the blocker still stop at once: the cases in flight are
   cancelled and rerun on resume.
 - **The key.** Progress holds for one profile, branch, integration tree and selection (`--integration`, `--action`,
   `-k`, `--serial`, `--unattended`), on one HA version. Any change starts fresh and says why; so does `--fresh`.

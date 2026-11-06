@@ -346,6 +346,10 @@ class Roamer:
 
     # --- moving ---------------------------------------------------------------------------------------------------
 
+    def moves(self, to: str) -> bool:
+        """Whether going to `to` moves a bulb, by where the bulbs were last found (a bulb not yet found is at home)."""
+        return any(self.at.get(bulb.entity_id, bulb.home) != to for bulb in self.bulbs)
+
     async def go(self, to: str) -> None:
         """Remove the rig-made groups, then move every bulb not on `to` straight there, in one move, whichever
         networks they are on (after a crash, they may differ). On a bulb found on no network it raises RoamError."""

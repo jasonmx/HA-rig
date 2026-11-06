@@ -388,3 +388,14 @@ async def test_a_budget_spent_between_phases_moves_the_bulbs_no_further_and_brin
     assert [where for _, where, _ in ran] == [["hue", "hue"], ["hue", "hue"]]  # the lanes and home, no ZHA or Z2M
     assert budget.stopped
     assert [await finder.locate(bulb) for bulb in fakes.LAB_BULBS] == ["hue", "hue"]
+
+
+async def test_in_lanes_one_grant_buys_one_case_in_total(tmp_path):
+    ha = Overlapping({"light.a": ON, "light.b": ON})
+    suites, profile = two_lanes(tmp_path)
+    budget = engine.Budget(0.0)
+    budget.grant()
+
+    result = await run_two(ha, suites, profile, lanes=True, budget=budget)
+
+    assert sum(len(part.cases) for part in result.suites) == 1
