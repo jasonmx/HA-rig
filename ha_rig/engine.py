@@ -13,6 +13,7 @@ import logging
 import operator
 import re
 import threading
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -826,6 +827,25 @@ class SuiteResult:
         """Passed cases whose twin passed too: a case with a twin proves nothing alone."""
         passed = {case.id for case in self.cases if case.outcome is Outcome.PASS}
         return [case for case in self.cases if case.id in passed and (case.twin is None or case.twin in passed)]
+
+
+@dataclass(slots=True)
+class Budget:
+    """--for: the time a run may start cases until. Once spent, no case starts and in-flight ones finish; `stopped`
+    says a case or phase was left for that."""
+
+    deadline: float  # on time.monotonic()
+    stopped: bool = False
+
+    @property
+    def spent(self) -> bool:
+        return time.monotonic() >= self.deadline
+
+    def stops(self) -> bool:
+        """Whether to start nothing more, noting that something is left."""
+        if self.spent:
+            self.stopped = True
+        return self.stopped
 
 
 @dataclass(slots=True)
@@ -1798,6 +1818,10 @@ async def run(
     lanes: bool = False,
     busy: dict[str, float] | None = None,
     reloads: bool = True,
+    done: dict[tuple[str, str, str], CaseResult] | None = None,
+    on_result: Callable[[Suite, CaseResult], None] | None = None,
+    on_facts: Callable[[Suite, str | None, list[Device]], None] | None = None,
+    budget: Budget | None = None,
 ) -> RunResult:
     """Run every case and print the table; ADMIN_INTEGRATIONS run on `admin`. `ask=None` is --unattended.
 
@@ -1806,7 +1830,13 @@ async def run(
     incomplete (see merge). With `lanes`, each integration's automated cases run as one lane, the lanes side by side.
     `busy` (_CaseRun.busy) carries the predictions an earlier run's cases left, for a run that follows straight on.
     `reloads` False refuses to save DeviceSide's options (EntryOptions): the run holds HA shared, with other runs.
+
+    Resuming, `done` holds an earlier session's results by (integration, suite name, case id): those cases are left
+    out, as `only` leaves cases out, and an observed case whose saved twin failed is still skipped. `on_result` gets
+    each case's result as it finishes (a cancelled case has none), `on_facts` each part's facts, taken even when a
+    signal or the `budget` stops the part. Once the budget is spent no case starts; the rest get no result.
     """
+    only = unfinished(done, only)
     planned = _plan(suites, profile, registry, ha, admin, keyword, only, out)
     options = {
         id(suite): {name: name in suite.file.options for name in adapter.scope.options}
@@ -1824,32 +1854,58 @@ async def run(
         bridge=bridge,
         journal=journal,
         lanes=lanes,
+        on_result=on_result,
+        budget=budget,
     )
     if busy is not None:
         rig_run.busy = busy
+    rig_run.seed([suite for suite, *_ in planned], done or {})
+    suite_results: list[SuiteResult] = []
     try:
         waiting = await rig_run.all_automated([(suite, client, cases_) for suite, _, client, cases_ in planned])
         await rig_run.observed(waiting)
     finally:
+        # A failure here must not hide the one that ended the run.
         if rig_run.entry_options is not None:
-            # A failure here must not hide the one that ended the run.
             try:
                 await rig_run.entry_options.restore()
             except Exception as err:  # noqa: BLE001
                 out(f"Could not put DeviceSide's options back; the next run tries again: {err}")
-    suite_results = [
-        SuiteResult(
-            suite, [rig_run.results[id(suite), case.id] for case in suite_cases], complete=not keyword and only is None
-        )
-        for suite, _, _, suite_cases in planned
-    ]
+        # The cases that finished, and their facts, taken now while the bulbs are on this part's network, even when a
+        # signal or the budget stopped the part.
+        complete = not keyword and only is None
+        suite_results = await _finished(rig_run, [(s, c) for s, _, _, c in planned], ha, out, complete, on_facts)
     for suite_result in suite_results:
-        # Every part, recordable or not: a lanes part is incomplete until merge joins it to the phases part.
-        await _capture_facts(suite_result, ha, out)
         out("")
         out(f"{suite_result.suite.integration} / {suite_result.suite.name}")
         out("\n".join(table(suite_result, details=True)))
     return RunResult(suite_results)
+
+
+async def _finished(
+    rig_run: _Run,
+    planned: list[tuple[Suite, list[Case]]],
+    ha: HAClient,
+    out: Callable[[str], None],
+    complete: bool,
+    on_facts: Callable[[Suite, str | None, list[Device]], None] | None,
+) -> list[SuiteResult]:
+    """Each planned suite's finished cases, with their facts, handed to `on_facts`. Every part, recordable or not: a
+    lanes part is incomplete until merge joins it to the phases part. Saving the facts must not hide the error that
+    ended the run, so its failure is printed."""
+    parts = []
+    for suite, suite_cases in planned:
+        if not (finished := [result for case in suite_cases if (result := rig_run.results.get((id(suite), case.id)))]):
+            continue
+        part = SuiteResult(suite, finished, complete=complete)
+        parts.append(part)
+        await _capture_facts(part, ha, out)
+        if on_facts is not None:
+            try:
+                on_facts(suite, part.ha_version, part.devices)
+            except Exception as err:  # noqa: BLE001
+                out(f"Could not save the facts of {suite.name}: {err}")
+    return parts
 
 
 async def _capture_facts(suite_result: SuiteResult, ha: HAClient, out: Callable[[str], None]) -> None:
@@ -1859,6 +1915,15 @@ async def _capture_facts(suite_result: SuiteResult, ha: HAClient, out: Callable[
         suite_result.ha_version, suite_result.devices = await rig_facts(ha, entity_ids)
     except Exception as err:  # noqa: BLE001
         out(f"Could not read the devices behind {suite_result.suite.name}, so it writes no record: {err}")
+
+
+def unfinished(
+    done: dict[tuple[str, str, str], CaseResult] | None, only: Callable[[Case], bool] | None = None
+) -> Callable[[Case], bool] | None:
+    """`only`, narrowed to the cases `done` has no result for; `only` itself when nothing is done."""
+    if not done:
+        return only
+    return lambda case: (case.suite.integration, case.suite.name, case.id) not in done and (only is None or only(case))
 
 
 def _plan(
@@ -1914,6 +1979,15 @@ class _Run:
     bridge: HueBridge | None = None
     journal: Journal | None = None
     lanes: bool = False  # whether automated cases run in lanes: their lines then name their suite
+    on_result: Callable[[Suite, CaseResult], None] | None = None
+    budget: Budget | None = None
+
+    def seed(self, suites: list[Suite], done: dict[tuple[str, str, str], CaseResult]) -> None:
+        """An earlier session's results, under this run's suites, for the twin lookup in `automated`."""
+        for suite in suites:
+            for (integration, name, case_id), result in done.items():
+                if (integration, name) == (suite.integration, suite.name):
+                    self.results[id(suite), case_id] = result
 
     def case_run(self, case: Case, client: HAClient, ask: Callable[[str], str] | None, position: str = "") -> _CaseRun:
         integration = case.suite.integration
@@ -1945,6 +2019,8 @@ class _Run:
 
     def report(self, case: Case, result: CaseResult) -> None:
         self.results[id(case.suite), case.id] = result
+        if self.on_result is not None:
+            self.on_result(case.suite, result)
         # Lanes interleave their lines, so each names its suite.
         prefix = f"{case.suite.integration} / {case.suite.name}  " if self.lanes else "  "
         self.out(f"{prefix}{case.id}: {result.outcome}" + (f" ({result.detail})" if result.detail else ""))
@@ -1986,6 +2062,8 @@ class _Run:
             self.out(f"{suite.integration} / {suite.name}")
         waiting = []
         for case in suite_cases:
+            if self.budget is not None and self.budget.stops():
+                break
             twin = self.results.get((id(suite), case.twin or ""))
             if case.skip:
                 self.report(case, _not_run(case, Outcome.SKIPPED, case.skip))
@@ -2001,10 +2079,14 @@ class _Run:
 
     async def observed(self, waiting: list[tuple[Case, HAClient]]) -> None:
         """Run each observed case in turn; after an EOF at a prompt, the rest are not observed."""
+        if self.budget is not None and waiting and self.budget.stops():
+            return
         if waiting:
             self.out("")
             self.out(f"{len(waiting)} test{'s need' if len(waiting) > 1 else ' needs'} you")
         for number, (case, client) in enumerate(waiting, 1):
+            if self.budget is not None and self.budget.stops():
+                return
             if self.ask is None:
                 self.report(case, _not_run(case, Outcome.NOT_OBSERVED))
                 continue
