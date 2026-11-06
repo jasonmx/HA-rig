@@ -10,7 +10,7 @@ tokens stay in the gitignored `profiles/`, `.env.rig`, `.private-terms` and `CLA
 household check (`scripts/check_private.py`) enforces it.
 
 **The rig moves the household's real lights and restarts its HA.** Drive it only through `scripts/rig.py`, behind its
-gate; never answer the gate (`DEVICE_SIDE_RIG_APPROVED=1`) without Jason's yes for that run.
+gate (`--deploy-only` has none: it restarts HA but moves no device); never answer the gate (`DEVICE_SIDE_RIG_APPROVED=1`) without Jason's yes for that run.
 
 ## Layout
 

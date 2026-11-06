@@ -23,6 +23,10 @@ Ctrl-C, SIGTERM and SIGHUP stop a run, putting the devices back; a second one le
 journaled first, in a journal of its own next to the locks (ha_rig/journal.py), so whatever a killed run leaves
 changed, the next run whose locks cover it puts back before its gate, or --recover, holding every lock, does.
 
+--deploy-only deploys the checkout's branch and restarts HA onto it, holding HA exclusively until HA is back, then
+releases the locks: no profile, no tests, no gate (it moves no device), for trying a branch's non-device features by
+hand. Nothing happens when HA already runs the checkout's tree.
+
 --hold runs a probe's command holding the named integrations and HA (--exclusive: exclusively), with the profile's
 automations for them paused, passing signals on to it and returning its exit code; no case journal, and no gate but
 the clear one below.
@@ -67,6 +71,7 @@ Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] 
                       [--integration KEY ...] [--action NAME ...] [-k TEXT]
        scripts/rig.py [--profile NAME] --check [--integration KEY ...] [--action NAME ...] [-k TEXT]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
+       scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
        scripts/rig.py --wait-free [--integration KEY ...]
        scripts/rig.py [--profile NAME] --hold KEY [--hold KEY ...] [--exclusive] -- COMMAND [ARGS ...]
@@ -584,6 +589,11 @@ def main(argv: list[str] | None = None) -> int:
         help="run HA's DeviceSide and the run's integrations, and Z2M, at debug, and keep the run's captured logs "
         "(they are kept after a failure whatever this says)",
     )
+    parser.add_argument(
+        "--deploy-only",
+        action="store_true",
+        help="deploy this checkout's branch and restart HA, then release the locks: no profile, no tests, no gate",
+    )
     parser.add_argument("--recover", action="store_true", help="put back what an aborted run left changed, then stop")
     parser.add_argument(
         "--roam-check", action="store_true", help="move the profile's roam bulbs to every network and home, no suites"
@@ -608,6 +618,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     args.command = command
+    if args.deploy_only and (
+        args.profile
+        or args.no_deploy
+        or args.check
+        or args.roam_check
+        or args.recover
+        or args.wait_free
+        or args.hold
+        or args.exclusive
+        or command
+        or args.integration
+        or args.action
+        or args.keyword
+        or args.serial
+        or args.unattended
+        or args.debug_logs
+    ):
+        parser.error("--deploy-only takes only --dry-run: it needs no profile and runs no test")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
@@ -645,6 +673,8 @@ def wait_or_run(args: argparse.Namespace) -> int:
         return hold_command(args, directory)
     if args.recover:
         return recover_all(args, directory)
+    if args.deploy_only:
+        return deploy_only(args, directory)
     setup = prepare(args)
     held = None if args.dry_run else take(args, setup, directory)  # waits for the locks, then holds them until exit
     try:
@@ -656,6 +686,40 @@ def wait_or_run(args: argparse.Namespace) -> int:
     finally:
         if held is not None:
             held.close()
+
+
+def deploy_only(args: argparse.Namespace, directory: Path) -> int:
+    """--deploy-only: deploy the checkout's branch and wait for HA, holding HA exclusively with no integration, then
+    let go. No profile, journal or baseline: it moves no device, so it has no gate and leaves orphans to the next
+    test run's replay."""
+    env = load_env()
+    if not (env.get("HA_URL") and env.get("HA_TOKEN")):
+        raise SystemExit("HA_URL and HA_TOKEN must be set in .env.rig (see ha_rig/env.example)")
+    status = env.get("RIG_STATUS_CMD", "")
+    deploy = deploy_state(status)
+    print_deploy(deploy, deploy.needed)
+    if not deploy.needed:
+        print("HA already runs this checkout's tree; nothing to deploy.")
+        return 0
+    check_deploy(env, deploy)
+    if args.dry_run:
+        return 0
+    held = locks.hold(Claim("exclusive", frozenset()), deploy.branch, directory)
+    try:
+        deploy = deploy_state(status)  # another run may have deployed this tree while this one waited
+        if not deploy.needed:
+            print("Another run deployed this checkout's tree meanwhile; nothing to deploy.")
+            return 0
+        check_deploy(env, deploy)
+        with end_on_signals():
+            deploy_and_wait(env, deploy.branch)
+    except Aborted as err:
+        print(err)
+        return 1
+    finally:
+        held.close()
+    print(f"Deployed {deploy.branch} ({git('rev-parse', '--short', deploy.commit)}); HA is back. Locks released.")
+    return 0
 
 
 def prepare(args: argparse.Namespace) -> Setup:
@@ -1149,18 +1213,23 @@ def print_plan(
 ) -> None:
     print_profile(profile)
     print_phases(profile, suites, registry, keyword, roaming, grouping, lanes)
+    print_deploy(deploy, deploying)
+    if not deploying and deploy.needed and suites:
+        print("Deploy: skipped (--no-deploy); tests run the deployed tree, not this checkout, and write no record")
+    elif not deploying:
+        print("Deploy: not needed, no restart")
+    seconds = estimate(suites, registry, deploying, roaming, profile if lanes else None)
+    print(f"Estimated duration: {seconds} s. These are in-use household devices; they will visibly change state.")
+
+
+def print_deploy(deploy: Deploy, deploying: bool) -> None:
+    """The integration's trees, local, synced and loaded, and, when `deploying`, the deploy."""
     print(
         f"Integration: local {deploy.local_tree[:12]}, synced {(deploy.synced_tree or 'unknown')[:12]}, "
         f"loaded {(deploy.loaded_tree or 'unknown')[:12]}"
     )
     if deploying:
         print(f"Deploy: sync {deploy.branch}, then restart Home Assistant")
-    elif deploy.needed and suites:
-        print("Deploy: skipped (--no-deploy); tests run the deployed tree, not this checkout, and write no record")
-    else:
-        print("Deploy: not needed, no restart")
-    seconds = estimate(suites, registry, deploying, roaming, profile if lanes else None)
-    print(f"Estimated duration: {seconds} s. These are in-use household devices; they will visibly change state.")
 
 
 def print_profile(profile: Profile) -> None:
