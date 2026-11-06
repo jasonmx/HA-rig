@@ -993,3 +993,45 @@ def test_hold_refuses_a_bad_command_line(argv, capsys):
     with pytest.raises(SystemExit):
         rig.main(argv)
     assert "error:" in capsys.readouterr().err
+
+
+# --- A resumed run holds what its orphans need ----------------------------------------------------------------
+
+
+class SavedProgress:
+    """A stopped run's progress holding a case: truthy, with the tree the plan read."""
+
+    key = SimpleNamespace(tree="tree")
+
+    def __bool__(self) -> bool:
+        return True
+
+
+def resumed(tmp_path, monkeypatch, orphan_profile: str) -> locks.Held:
+    """take() for a resumed run on the shelly suite, with an orphan left by `orphan_profile` that needs ZHA."""
+    profile = fakes.profile("shelly", light_ct="light.a")
+    run = setup(tmp_path, profile, step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"))
+    run.progress = SavedProgress()
+    monkeypatch.setattr(rig, "deploy_state", lambda _cmd: rig.Deploy("c1", "tree", "tree", "tree", "wt"))
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
+    path = orphan(tmp_path, claim("zha"), cases=CASE)
+    Journal(path).update(profile=orphan_profile)
+    return rig.take(run_args(), run, tmp_path)
+
+
+def test_a_resumed_run_claims_what_its_orphans_need_and_puts_them_back(tmp_path, monkeypatch):
+
+    async def recover_rig(env, journal):
+        journal.clear(*journal.sections)
+
+    monkeypatch.setattr(rig, "recover_rig", recover_rig)
+    held = resumed(tmp_path, monkeypatch, "house")
+    with held:
+        assert held.claim == claim("shelly", "zha")
+        rig.replay({}, held, tmp_path)
+    assert orphans(tmp_path) == []
+
+
+def test_an_orphan_of_another_profile_does_not_widen_the_claim(tmp_path, monkeypatch):
+    with resumed(tmp_path, monkeypatch, "elsewhere") as held:
+        assert held.claim == claim("shelly")
