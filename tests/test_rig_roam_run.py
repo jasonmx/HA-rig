@@ -15,7 +15,7 @@ from ha_rig import engine, roam
 from ha_rig.engine import load_step_file
 from ha_rig.home import HomeRecord
 from ha_rig.journal import LEGACY_NAME, Journal
-from ha_rig.profile import Profile
+from ha_rig.profile import Profile, RigEntity
 from ha_rig.roam import Roamer
 from tests import rig_fakes as fakes
 
@@ -611,6 +611,13 @@ tests:
 """
 
 
+def plug_up(lab: fakes.Lab, platform: str = "shelly") -> None:
+    """The plug is on, and registered on `platform`."""
+    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "on", "attributes": {}}
+    lab.ha.entity_devices["switch.plug"] = "plug-device"
+    lab.ha.entity_meta["switch.plug"] = {"platform": platform, "unique_id": "plug", "disabled_by": None}
+
+
 def leave_hue(lab: fakes.Lab, device_id: str) -> None:
     """The bridge deletes the bulb, which then searches for a network."""
     lab.bridge._delete("device", lab.bridge.resources["device"], device_id)
@@ -629,7 +636,7 @@ async def check(tmp_path: Path, roaming: bool = True) -> list[str]:
 
 
 async def test_the_check_passes_with_every_fixed_entity_up_and_the_bulbs_home(tmp_path, lab, capsys):
-    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "on", "attributes": {}}
+    plug_up(lab)
 
     assert await check(tmp_path) == []
 
@@ -640,7 +647,8 @@ async def test_the_check_passes_with_every_fixed_entity_up_and_the_bulbs_home(tm
 
 
 async def test_the_check_names_an_unavailable_or_missing_entity_and_a_bulb_on_no_network(tmp_path, lab, capsys):
-    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "unavailable", "attributes": {}}
+    plug_up(lab)
+    lab.ha.states["switch.plug"]["state"] = "unavailable"
     leave_hue(lab, "hue-device-2")  # lab_b leaves Hue and joins nothing
 
     problems = await check(tmp_path)
@@ -655,7 +663,7 @@ async def test_the_check_names_an_unavailable_or_missing_entity_and_a_bulb_on_no
 
 
 async def test_the_check_says_a_bulb_away_from_hue_will_be_moved_and_finds_one_unpowered(tmp_path, lab, capsys):
-    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "on", "attributes": {}}
+    plug_up(lab)
     leave_hue(lab, "hue-device-2")
     lab.opened("zha")  # lab_b joins ZHA, under an entity ID of ZHA's own
 
@@ -667,7 +675,7 @@ async def test_the_check_says_a_bulb_away_from_hue_will_be_moved_and_finds_one_u
 
 
 async def test_the_check_says_a_run_puts_back_a_home_the_home_record_holds(tmp_path, lab, capsys):
-    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "on", "attributes": {}}
+    plug_up(lab)
     leave_hue(lab, "hue-device-2")
     lab.opened("zha")
     profile = Profile.load(lab_profile(tmp_path))
@@ -682,7 +690,7 @@ async def test_the_check_says_a_run_puts_back_a_home_the_home_record_holds(tmp_p
 
 
 async def test_the_check_reports_a_network_it_cannot_ask(tmp_path, lab):
-    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "on", "attributes": {}}
+    plug_up(lab)
 
     async def unreachable(ieee):
         raise fakes.BridgeError("bridge unreachable")
@@ -696,7 +704,7 @@ async def test_the_check_reports_a_network_it_cannot_ask(tmp_path, lab):
 
 
 async def test_the_check_looks_for_no_bulb_when_the_run_does_not_roam(tmp_path, lab, capsys):
-    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "on", "attributes": {}}
+    plug_up(lab)
     leave_hue(lab, "hue-device-2")
     assert await check(tmp_path, roaming=False) == []
     assert "Checking profile lab: 1 entities." in capsys.readouterr().out
@@ -862,3 +870,55 @@ async def test_connect_closes_the_first_session_when_the_admin_one_fails(monkeyp
     with pytest.raises(RuntimeError, match="auth failed"):
         await rig.connect(ENV)
     assert closed == ["t"]
+
+
+async def test_the_check_reports_an_entity_on_another_platform(tmp_path, lab):
+    plug_up(lab, "hue")
+
+    assert await check(tmp_path, roaming=False) == [
+        "switch.plug: a hue entity, not shelly; pair it back or fix profile lab"
+    ]
+
+
+async def test_the_check_reports_an_entity_the_registry_lacks(tmp_path, lab):
+    plug_up(lab)
+    lab.ha.entity_devices.pop("switch.plug")
+    lab.ha.entity_meta.pop("switch.plug")
+
+    problems = await check(tmp_path, roaming=False)
+
+    assert len(problems) == 1 and problems[0].startswith("switch.plug: not in the entity registry")
+
+
+WRAPPED = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: t
+    roles: [light_wrapped]
+    steps:
+      - set: {state: off}
+"""
+
+
+@pytest.mark.parametrize(
+    ("integration", "role", "platform", "problem"),
+    [
+        ("shelly", "light_wrapped", "switch_as_x", False),
+        ("shelly", "light_wrapped", "shelly", True),
+        ("zigbee2mqtt", "switch_plug", "mqtt", False),
+        ("zha", "switch_plug", "hue", True),
+        ("zha", "switch_plug", "zha", False),
+    ],
+)
+async def test_each_integrations_entity_must_be_on_its_ha_platform(tmp_path, lab, integration, role, platform, problem):
+    path = tmp_path / "steps.yaml"
+    path.write_text(WRAPPED.replace("light_wrapped", role))
+    profile = Profile({integration: [RigEntity("switch.plug", frozenset({role}))]}, name="lab")
+    plug_up(lab, platform)
+
+    problems = await rig.check_devices(
+        ENV, [rig.Suite(load_step_file(path), integration)], profile, AdapterRegistry.discover(), None, False
+    )
+
+    assert bool(problems) is problem
