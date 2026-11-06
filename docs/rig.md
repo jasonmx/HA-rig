@@ -82,6 +82,11 @@ tree, so a run queued behind another tests its own code. A record cites the comm
 committing mid-run is safe. `--no-deploy` tests whatever HA runs and, unless that is your checkout's tree, writes no
 record.
 
+`scripts/rig.py --deploy-only` deploys the branch and restarts HA with nothing else: no profile, no tests, no gate,
+since it moves no device. It holds HA exclusively, with no integration, until HA is back, then releases the locks, so
+you can try a branch's non-device features by hand. When HA already runs the checkout's tree it does nothing;
+`--dry-run` prints the deploy state and stops.
+
 ## Shared state
 
 - **Roaming.** A profile's `roam:` lists bulbs the run moves between Zigbee networks (Hue, ZHA, Z2M), so one set of

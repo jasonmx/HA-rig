@@ -1005,6 +1005,105 @@ def test_without_a_deploy_it_waits_briefly_and_a_signal_stops_at_once(monkeypatc
         rig.deploy_and_wait(DEPLOY_ENV, None)
 
 
+# --- --deploy-only ----------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--profile", "house"],
+        ["--no-deploy"],
+        ["--check"],
+        ["--roam-check"],
+        ["--recover"],
+        ["--wait-free"],
+        ["--integration", "hue"],
+        ["--action", "turn_on_for"],
+        ["-k", "x"],
+        ["--serial"],
+        ["--unattended"],
+        ["--debug-logs"],
+        ["--hold", "hue", "--", "true"],
+    ],
+)
+def test_deploy_only_takes_only_dry_run(extra, capsys):
+    with pytest.raises(SystemExit):
+        rig.main(["--deploy-only", *extra])
+    assert "--deploy-only takes only --dry-run" in capsys.readouterr().err
+
+
+def deploy_only(monkeypatch, tmp_path, *states: bool) -> list:
+    """main's --deploy-only with the deploy state needed or not at each read, in turn; returns what happened."""
+    happened: list = []
+    reads = iter(states)
+
+    def state(status_cmd):
+        return (
+            rig.Deploy(commit="c1", local_tree="tree1", synced_tree="old", loaded_tree="old", branch="wt/b")
+            if next(reads)
+            else rig.Deploy(commit="c1", local_tree="tree1", synced_tree="tree1", loaded_tree="tree1", branch="wt/b")
+        )
+
+    class Held:
+        def close(self):
+            happened.append("released")
+
+    def hold(claim, holder, directory):
+        happened.append(("hold", claim, holder))
+        return Held()
+
+    def no_profile(path):
+        raise AssertionError("--deploy-only loads no profile")
+
+    monkeypatch.setattr(rig, "load_env", lambda: DEPLOY_ENV)
+    monkeypatch.setattr(rig, "deploy_state", state)
+    monkeypatch.setattr(rig, "common_dir", lambda: tmp_path)
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    monkeypatch.setattr(rig.locks, "hold", hold)
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: happened.append(("deploy", branch)))
+    monkeypatch.setattr(rig.Profile, "load", no_profile)
+    return happened
+
+
+def test_deploy_only_does_nothing_when_ha_runs_the_tree(monkeypatch, tmp_path, capsys):
+    happened = deploy_only(monkeypatch, tmp_path, False)
+    assert rig.main(["--deploy-only"]) == 0
+    assert happened == []
+    assert "nothing to deploy" in capsys.readouterr().out
+
+
+def test_deploy_only_holds_ha_exclusively_deploys_and_releases(monkeypatch, tmp_path, capsys):
+    happened = deploy_only(monkeypatch, tmp_path, True, True)
+    assert rig.main(["--deploy-only"]) == 0
+    assert happened == [("hold", rig.Claim("exclusive", frozenset()), "wt/b"), ("deploy", "wt/b"), "released"]
+    out = capsys.readouterr().out
+    assert "Deploy: sync wt/b, then restart Home Assistant" in out
+    assert "Deployed wt/b (c1short); HA is back. Locks released." in out
+
+
+def test_deploy_only_skips_a_deploy_another_run_made_while_it_waited(monkeypatch, tmp_path, capsys):
+    happened = deploy_only(monkeypatch, tmp_path, True, False)
+    assert rig.main(["--deploy-only"]) == 0
+    assert happened == [("hold", rig.Claim("exclusive", frozenset()), "wt/b"), "released"]
+    assert "Another run deployed this checkout's tree meanwhile" in capsys.readouterr().out
+
+
+def test_deploy_only_dry_run_prints_the_state_and_takes_no_lock(monkeypatch, tmp_path, capsys):
+    happened = deploy_only(monkeypatch, tmp_path, True)
+    assert rig.main(["--deploy-only", "--dry-run"]) == 0
+    assert happened == []
+    assert "Integration: local tree1, synced old, loaded old" in capsys.readouterr().out
+
+
+def test_deploy_only_stops_on_a_deploy_blocker(monkeypatch, tmp_path):
+    happened = deploy_only(monkeypatch, tmp_path, True)
+    blocked = rig.Deploy("c1", "tree1", "old", "old", "wt/b", blocker="wt/b is not on origin; push it first")
+    monkeypatch.setattr(rig, "deploy_state", lambda status_cmd: blocked)
+    with pytest.raises(SystemExit, match="Cannot deploy: wt/b is not on origin"):
+        rig.main(["--deploy-only"])
+    assert happened == []
+
+
 def test_a_signal_before_the_tests_ends_the_run_on_one_line():
     before = signal.getsignal(signal.SIGHUP)
     with pytest.raises(rig.Aborted, match="^Aborted.$"), rig.end_on_signals():
