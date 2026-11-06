@@ -3,8 +3,10 @@
 # the setup's own entities. scripts/rig.py --profile <name> picks one; it can be left out while there is only one.
 # The name goes into every test record, which is public: name it for the setup (lab, house), never a person or place.
 #
-# pre_authorized: true lets this profile's unattended runs and probes go whatever .env.rig's RIG_BLOCKER_ENTITY reads,
-# for a setup whose lights nobody minds seeing move (a lab). Left out or false, they go only while it is off.
+# pre_authorized: true makes this profile's work unrestricted: its whole run (pauses, DeviceSide reloads and
+# disables, roaming, HA restarts), the recovery of what it leaves and its `--visual profile` probes go whatever
+# .env.rig's RIG_RESTRICTED_ENTITY reads, for a setup whose lights nobody minds seeing move (a lab). Left out or false,
+# they are restricted: they go while it is off, or with DEVICE_SIDE_RIG_RESTRICTED=1 (docs/rig.md, Authorization).
 #
 # pause: the automations and switches turned off while the rig runs, for whatever would fight the tests on these
 # entities (motion lighting, an Adaptive Lighting switch). Only those that were on are turned back on, once no run

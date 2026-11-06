@@ -371,6 +371,7 @@ def test_main_recover_builds_the_bridge_and_brings_the_bulbs_home(tmp_path, monk
     asyncio.run(aborted_on_zha(lab, tmp_path / LEGACY_NAME))
     monkeypatch.setattr(rig, "git", lambda *args, check=True: str(tmp_path) if "--git-common-dir" in args else "wt")
     monkeypatch.setattr(rig, "load_env", lambda: ENV)
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")  # the journal from before per-run ones is restricted
 
     assert rig.main(["--recover"]) == 0
     assert asyncio.run(where(lab)) == ["hue", "hue"]
@@ -766,7 +767,7 @@ def test_check_refuses_another_mode(capsys):
 
 def test_a_run_stops_before_the_gate_on_a_device_problem(tmp_path, monkeypatch):
     main_with(tmp_path, monkeypatch, ["switch.plug: unavailable; check it is powered"])
-    monkeypatch.setattr(rig, "gate", lambda: pytest.fail("asked to proceed"))
+    monkeypatch.setattr(rig, "proceed", lambda decision: pytest.fail("asked to proceed"))
 
     with pytest.raises(SystemExit, match="Power or fix the devices above, then run again."):
         rig.main([])
@@ -778,57 +779,90 @@ def test_a_dry_run_shows_the_check_and_still_passes(tmp_path, monkeypatch, capsy
     assert asked and asked[0][1] is True  # the lab's bulbs roam for its ZHA and Z2M suites
 
 
+SENSOR = "binary_sensor.rig_restricted"
+
+
 def clear_run(tmp_path, monkeypatch, state: str) -> list:
-    """main_with, with RIG_BLOCKER_ENTITY reading `state` and the approved run stubbed; returns the watcher's arming."""
+    """main_with, with RIG_RESTRICTED_ENTITY reading `state` and the approved run stubbed; returns the watcher's
+    arming."""
     main_with(tmp_path, monkeypatch, [])
-    monkeypatch.setattr(rig, "load_env", lambda: {**ENV, "RIG_BLOCKER_ENTITY": "binary_sensor.rig_blocker"})
+    monkeypatch.setattr(rig, "load_env", lambda: {**ENV, "RIG_RESTRICTED_ENTITY": SENSOR})
     monkeypatch.setattr(rig, "_get", lambda url, token: {"state": state})
     seen = []
     monkeypatch.setattr(
-        rig, "watching", lambda env, blocker: seen.append(blocker is not None) or contextlib.nullcontext()
+        rig,
+        "watching",
+        lambda env, sensor, clear=False: seen.append((sensor is not None, clear)) or contextlib.nullcontext(),
     )
     monkeypatch.setattr(rig, "run_approved", lambda *args: 0)
     return seen
 
 
-def test_a_dry_run_says_whether_the_rig_is_clear(tmp_path, monkeypatch, capsys):
+def pre_authorize(tmp_path) -> None:
+    with (tmp_path / "lab.yaml").open("a") as profile:
+        profile.write("pre_authorized: true\n")
+
+
+def test_a_dry_run_prints_the_decision(tmp_path, monkeypatch, capsys):
     clear_run(tmp_path, monkeypatch, "on")
     assert rig.main(["--dry-run"]) == 0
-    assert "Rig not clear: binary_sensor.rig_blocker is on." in capsys.readouterr().out
+    assert (
+        f"Authorization: Restricted, and {SENSOR} is on. Needs DEVICE_SIDE_RIG_RESTRICTED=1" in capsys.readouterr().out
+    )
+    monkeypatch.setattr(rig, "_get", lambda url, token: {"state": "off"})
+    assert rig.main(["--dry-run"]) == 0
+    assert f"Authorization: Restricted; {SENSOR} is off, so it may go." in capsys.readouterr().out
+    pre_authorize(tmp_path)
+    assert rig.main(["--dry-run"]) == 0
+    assert "Authorization: profile lab is pre-authorized. Unrestricted." in capsys.readouterr().out
 
 
-def test_an_env_approved_run_is_refused_while_the_rig_is_not_clear(tmp_path, monkeypatch, capsys):
+def test_an_agents_restricted_run_is_refused_while_the_sensor_is_not_off(tmp_path, monkeypatch, capsys):
     armed = clear_run(tmp_path, monkeypatch, "unavailable")
-    monkeypatch.setenv("DEVICE_SIDE_RIG_APPROVED", "1")
     assert rig.main([]) == 1
-    assert "Not approved; nothing changed." in capsys.readouterr().out
+    assert f"Restricted, and {SENSOR} is unavailable. Needs" in capsys.readouterr().out
     assert armed == []
 
 
-def test_an_env_approved_run_while_clear_is_watched(tmp_path, monkeypatch):
+def test_an_agents_restricted_run_goes_unasked_while_the_sensor_is_off_and_is_watched(tmp_path, monkeypatch, capsys):
     armed = clear_run(tmp_path, monkeypatch, "off")
-    monkeypatch.setenv("DEVICE_SIDE_RIG_APPROVED", "1")
     assert rig.main([]) == 0
-    assert armed == [True]
+    assert armed == [(True, True)]
+    assert "Proceed?" not in capsys.readouterr().out
 
 
-def test_a_run_a_human_let_past_a_rig_not_clear_is_not_watched(tmp_path, monkeypatch):
+def test_an_approved_run_goes_while_the_sensor_is_on_and_is_watched_for_it_turning_on(tmp_path, monkeypatch):
     armed = clear_run(tmp_path, monkeypatch, "on")
-    monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    assert rig.main([]) == 0
+    assert armed == [(True, False)]  # no read of off yet: it waits for one before an on counts
+
+
+def test_a_human_at_a_terminal_is_asked_and_a_yes_is_the_approval(tmp_path, monkeypatch, capsys):
+    armed = clear_run(tmp_path, monkeypatch, "on")
+    monkeypatch.setattr(rig, "tty", lambda: True)
     monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
     assert rig.main([]) == 0
-    assert armed == [False]
+    assert armed == [(True, False)]  # watched, as every restricted run is
+    assert f"Restricted: {SENSOR} is on. Proceed anyway? [y/N]" in capsys.readouterr().out
+
+
+def test_a_terminal_asks_a_readiness_question_of_a_clear_run(tmp_path, monkeypatch, capsys):
+    armed = clear_run(tmp_path, monkeypatch, "off")
+    monkeypatch.setattr(rig, "tty", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("n\n"))
+    assert rig.main([]) == 1
+    assert "Proceed? [y/N]" in capsys.readouterr().out
+    assert armed == []
 
 
 def test_a_pre_authorized_run_reads_no_sensor_and_is_not_watched(tmp_path, monkeypatch, capsys):
     armed = clear_run(tmp_path, monkeypatch, "on")
-    with (tmp_path / "lab.yaml").open("a") as profile:
-        profile.write("pre_authorized: true\n")
+    pre_authorize(tmp_path)
     monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
-    monkeypatch.setenv("DEVICE_SIDE_RIG_APPROVED", "1")
     assert rig.main([]) == 0
-    assert armed == [False]
-    assert "Rig not clear" not in capsys.readouterr().out
+    assert armed == [(False, False)]
+    assert "Proceed?" not in capsys.readouterr().out
 
 
 def test_a_run_plans_lanes_unless_serial(tmp_path, monkeypatch, capsys):

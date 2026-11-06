@@ -2,8 +2,9 @@
 
 The rig runs DeviceSide's actions against a live Home Assistant and its real devices, and writes the test records
 that clear an adapter's `experimental` flag. Its tests are YAML step files in `ha_rig/steps/`, one per action.
-`scripts/rig.py` runs each file against every integration in the profile that has an adapter for the action, after a
-y/N gate: the devices change state, so nothing moves until you say yes. `--dry-run` prints the plan and stops.
+`scripts/rig.py` runs each file against every integration in the profile that has an adapter for the action, after
+an authorization gate (below): the devices change state, so nothing moves until the work is authorized and, at a
+terminal, you say yes. `--dry-run` prints the plan and the decision, and stops.
 
 ## Setup
 
@@ -67,13 +68,29 @@ the caller's context through), Zigbee2MQTT (setting device options over MQTT), s
 (to set them), `lifecycle` (reloading and disabling DeviceSide's entry), and roaming. Without it, a run that
 includes them stops before the gate; `--integration` or `--action` leaves them out.
 
-### The blocker gate
+### Authorization
 
-`RIG_BLOCKER_ENTITY` in `.env.rig` names an HA binary_sensor that is on while someone might see the lights move. A
-run approved by `DEVICE_SIDE_RIG_APPROVED=1`, and any probe, starts only while it is off, and aborts, putting the
-devices back, once it reads on twice in a row; a yes typed at the prompt overrides it. A profile with
-`pre_authorized: true`, for a setup whose lights nobody minds seeing move, skips it. Leave the key unset to gate
-nothing.
+The rig classifies the work, not who runs it (`ha_rig/authorize.py`):
+
+- **Unrestricted** work goes at any time, whatever the sensor reads: a test run or `--recover` on a profile with
+  `pre_authorized: true` (it covers everything that run does: pauses, DeviceSide reloads and disables, roaming, HA
+  restarts); `--deploy-only`, as HA restarts are always allowed; a probe declared `--visual none`, or
+  `--visual profile` on a pre-authorized profile.
+- **Restricted** work is everything else. It goes when either `RIG_RESTRICTED_ENTITY` in `.env.rig`, an HA
+  binary_sensor that is on while someone might see the lights move, is off, or Jason has approved it:
+  `DEVICE_SIDE_RIG_RESTRICTED=1`, or a y at the terminal's `Restricted: <why>. Proceed anyway?`. With the key unset,
+  restricted work needs the approval. `RIG_BLOCKER_ENTITY`, the key's old name, is still read, with a note.
+
+At a terminal, every run asks `Proceed?` as a readiness check; an agent's call has no terminal, so it is never asked,
+and unrestricted work needs no variable. A restricted run or probe reads the sensor every 15 s and aborts, putting the
+devices back, when it turns on: two reads in a row of on, unknown or unavailable after a read of off. An approved run
+started while the sensor was on goes on until it goes off and on again. `DEVICE_SIDE_RIG_APPROVED`, the variable this
+replaced, is refused.
+
+An aborted run's changes are restricted by the profile that left it, and the journal from before per-run journals
+always is. `--recover`, and the replay before a run's gate, put back what the rig may now (never asking) and name the
+rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
+whose locks cover one it can't put back stops before its gate rather than test on top of it.
 
 ### Deploys
 
@@ -82,8 +99,8 @@ tree, so a run queued behind another tests its own code. A record cites the comm
 committing mid-run is safe. `--no-deploy` tests whatever HA runs and, unless that is your checkout's tree, writes no
 record.
 
-`scripts/rig.py --deploy-only` deploys the branch and restarts HA with nothing else: no profile, no tests, no gate,
-since it moves no device. It holds HA exclusively, with no integration, until HA is back, then releases the locks, so
+`scripts/rig.py --deploy-only` deploys the branch and restarts HA with nothing else: no profile and no tests. It
+moves no device, and HA restarts are always allowed, so it is unrestricted. It holds HA exclusively, with no integration, until HA is back, then releases the locks, so
 you can try a branch's non-device features by hand. When HA already runs the checkout's tree it does nothing;
 `--dry-run` prints the deploy state and stops.
 
@@ -109,7 +126,9 @@ you can try a branch's non-device features by hand. When HA already runs the che
 
 A probe takes the same locks through `--hold`, which runs a command while holding them and returns its exit code:
 `scripts/rig.py --hold zha -- <command>`, with `--exclusive` for one that restarts HA or reloads DeviceSide. It
-writes no journal, so the probe puts back what it changes.
+writes no journal, so the probe puts back what it changes. A probe is restricted unless it declares, trusted, what it
+changes that anyone could see: `--visual none`, nothing, or `--visual profile`, only what a pre-authorized profile
+covers. `--dry-run` prints whether it may go and runs nothing.
 
 ### Stopping and resuming
 
@@ -120,7 +139,7 @@ unfinished case, planning, locking, moving and estimating only what is left, and
 done`. So a 45-minute suite completes as 30 minutes one evening and 15 the next.
 
 - **`--for DURATION`** (`30m`, `90s`, `1h15m`): once spent, no case or phase starts; cases in flight finish, the bulbs
-  go home, and the run exits 75. Ctrl-C, SIGTERM and the blocker still stop at once: the cases in flight are
+  go home, and the run exits 75. Ctrl-C, SIGTERM and the restricted sensor still stop at once: the cases in flight are
   cancelled and rerun on resume.
 - **The key.** Progress holds for one profile, branch, integration tree and selection (`--integration`, `--action`,
   `-k`, `--serial`, `--unattended`), on one HA version. Any change starts fresh and says why; so does `--fresh`.

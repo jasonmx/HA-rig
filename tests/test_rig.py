@@ -202,23 +202,45 @@ def test_select_plan_lines_and_estimate(profile):
 
 
 @pytest.mark.parametrize(("answer", "approved"), [("y", True), ("YES", True), ("", False), ("n", False)])
-def test_gate_needs_an_explicit_yes(monkeypatch, answer, approved):
-    monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
-    assert rig.gate(prompt=lambda _: answer) is approved
+def test_a_prompt_needs_an_explicit_yes(answer, approved, capsys):
+    assert rig.proceed(rig.Decision(True, "Proceed?", False, ""), lambda _: answer) is approved
+    assert ("Not approved; nothing changed." in capsys.readouterr().out) is not approved
 
 
-def test_gate_refuses_without_a_terminal(monkeypatch):
-    monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
-
+def test_a_prompt_without_a_terminal_is_a_no():
     def no_tty(_):
         raise EOFError
 
-    assert rig.gate(prompt=no_tty) is False
+    assert rig.proceed(rig.Decision(True, "Proceed?", False, ""), no_tty) is False
 
 
-def test_gate_env_approval_skips_the_prompt(monkeypatch):
+def test_a_refusal_says_why_and_asks_nothing(capsys):
+    assert (
+        rig.proceed(rig.Decision(False, None, True, "Restricted, and x is on."), lambda _: pytest.fail("asked"))
+        is False
+    )
+    assert "Restricted, and x is on. Nothing changed." in capsys.readouterr().out
+
+
+def test_a_decision_with_no_prompt_goes_unasked():
+    assert rig.proceed(rig.Decision(True, None, False, ""), lambda _: pytest.fail("asked")) is True
+
+
+def test_the_approval_is_the_new_variable_and_the_old_one_is_refused(monkeypatch):
+    assert rig.approved() is False
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    assert rig.approved() is True
     monkeypatch.setenv("DEVICE_SIDE_RIG_APPROVED", "1")
-    assert rig.gate(prompt=lambda _: pytest.fail("prompted")) is True
+    with pytest.raises(SystemExit, match="DEVICE_SIDE_RIG_APPROVED is gone.*DEVICE_SIDE_RIG_RESTRICTED=1"):
+        rig.approved()
+
+
+def test_main_refuses_the_old_variable_in_every_mode(monkeypatch):
+    monkeypatch.setenv("DEVICE_SIDE_RIG_APPROVED", "1")
+    monkeypatch.setattr(rig, "wait_or_run", lambda args: pytest.fail("ran"))
+    for argv in ([], ["--deploy-only"], ["--recover"]):
+        with pytest.raises(SystemExit, match="DEVICE_SIDE_RIG_APPROVED is gone"):
+            rig.main(argv)
 
 
 def fake_ha(monkeypatch, replies):
@@ -233,8 +255,8 @@ def fake_ha(monkeypatch, replies):
     monkeypatch.setattr(rig, "_get", _get)
 
 
-BLOCKER = "binary_sensor.rig_blocker"
-CLEAR_ENV = {"HA_URL": "http://ha", "HA_TOKEN": "t", "RIG_BLOCKER_ENTITY": BLOCKER}
+SENSOR = "binary_sensor.rig_restricted"
+CLEAR_ENV = {"HA_URL": "http://ha", "HA_TOKEN": "t", "RIG_RESTRICTED_ENTITY": SENSOR}
 
 
 def not_found():
@@ -244,18 +266,18 @@ def not_found():
 @pytest.mark.parametrize(
     ("reply", "clear", "reason"),
     [
-        ({"state": "off"}, True, "binary_sensor.rig_blocker is off"),
-        ({"state": "on"}, False, "binary_sensor.rig_blocker is on"),
-        ({"state": "unknown"}, False, "binary_sensor.rig_blocker is unknown"),
-        ({"state": "unavailable"}, False, "binary_sensor.rig_blocker is unavailable"),
+        ({"state": "off"}, True, "binary_sensor.rig_restricted is off"),
+        ({"state": "on"}, False, "binary_sensor.rig_restricted is on"),
+        ({"state": "unknown"}, False, "binary_sensor.rig_restricted is unknown"),
+        ({"state": "unavailable"}, False, "binary_sensor.rig_restricted is unavailable"),
         ({"state": "off", "attributes": {"restored": True}}, False, "still being restored"),
-        (urllib.error.URLError("refused"), False, "can't read binary_sensor.rig_blocker"),
-        (None, False, "binary_sensor.rig_blocker is not in HA"),
+        (urllib.error.URLError("refused"), False, "can't read binary_sensor.rig_restricted"),
+        (None, False, "binary_sensor.rig_restricted is not in HA"),
     ],
 )
 def test_rig_clear_only_on_on(monkeypatch, reply, clear, reason):
     fake_ha(monkeypatch, [not_found() if reply is None else reply])
-    answer = rig.rig_clear(CLEAR_ENV, BLOCKER)
+    answer = rig.rig_clear(CLEAR_ENV, SENSOR)
     assert answer[0] is clear
     assert reason in answer[1]
 
@@ -263,26 +285,33 @@ def test_rig_clear_only_on_on(monkeypatch, reply, clear, reason):
 def test_rig_clear_reads_the_named_entity(monkeypatch):
     urls = []
     monkeypatch.setattr(rig, "_get", lambda url, token: urls.append((url, token)) or {"state": "off"})
-    rig.rig_clear(CLEAR_ENV, BLOCKER)
-    assert urls == [("http://ha/api/states/binary_sensor.rig_blocker", "t")]
-
-
-def test_an_ungated_run_reads_nothing(monkeypatch):
-    monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read"))
-    assert rig.clearance(CLEAR_ENV, None) is None
+    rig.rig_clear(CLEAR_ENV, SENSOR)
+    assert urls == [("http://ha/api/states/binary_sensor.rig_restricted", "t")]
 
 
 @pytest.mark.parametrize(
-    ("text", "env", "sensor"),
+    ("env", "sensor", "noted"),
     [
-        ("", CLEAR_ENV, BLOCKER),
-        ("pre_authorized: false\n", CLEAR_ENV, BLOCKER),
-        ("pre_authorized: true\n", CLEAR_ENV, None),
-        ("", {**CLEAR_ENV, "RIG_BLOCKER_ENTITY": ""}, None),
+        (CLEAR_ENV, SENSOR, False),
+        ({"RIG_BLOCKER_ENTITY": "binary_sensor.old"}, "binary_sensor.old", True),
+        ({**CLEAR_ENV, "RIG_BLOCKER_ENTITY": "binary_sensor.old"}, SENSOR, False),
+        ({"RIG_RESTRICTED_ENTITY": "", "RIG_BLOCKER_ENTITY": ""}, None, False),
     ],
 )
-def test_the_sensor_gates_a_profile_unless_it_is_pre_authorized(tmp_path, text, env, sensor):
-    assert rig.gate_sensor(env, Profile.load(write(tmp_path, "house.yaml", text + "shelly:\n"))) == sensor
+def test_the_restricted_sensor_falls_back_to_its_old_name(env, sensor, noted, capsys):
+    assert rig.restricted_sensor(env) == sensor
+    assert ("RIG_BLOCKER_ENTITY in .env.rig is now RIG_RESTRICTED_ENTITY" in capsys.readouterr().out) is noted
+
+
+def test_authority_reads_the_sensor_once_and_only_for_restricted_work(monkeypatch):
+    reads = []
+    monkeypatch.setattr(rig, "_get", lambda url, token: reads.append(url) or {"state": "off"})
+    authority = rig.Authority(CLEAR_ENV)
+    assert authority.decide(restricted=False).reason == "Unrestricted."
+    assert reads == []
+    assert authority.decide(restricted=True).go
+    assert authority.decide(restricted=True).watch
+    assert reads == ["http://ha/api/states/binary_sensor.rig_restricted"]
 
 
 def test_profile_pre_authorized_must_be_a_bool(tmp_path):
@@ -290,41 +319,7 @@ def test_profile_pre_authorized_must_be_a_bool(tmp_path):
         Profile.load(write(tmp_path, "house.yaml", "pre_authorized: yes please\nshelly:\n"))
 
 
-def test_env_approval_needs_the_rig_clear(monkeypatch, capsys):
-    monkeypatch.setenv("DEVICE_SIDE_RIG_APPROVED", "1")
-    assert rig.gate((False, "binary_sensor.rig_blocker is on"), lambda _: pytest.fail("prompted")) is False
-    assert "Rig not clear (binary_sensor.rig_blocker is on)" in capsys.readouterr().out
-    assert rig.gate((True, "binary_sensor.rig_blocker is off"), lambda _: pytest.fail("prompted")) is True
-
-
-@pytest.mark.parametrize(("answer", "approved"), [("y", True), ("", False)])
-def test_the_prompt_says_why_the_rig_is_not_clear_and_a_yes_overrides_it(monkeypatch, answer, approved):
-    monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
-    asked = []
-    assert rig.gate((False, "binary_sensor.rig_blocker is on"), lambda q: asked.append(q) or answer) is approved
-    assert asked == ["Rig not clear (binary_sensor.rig_blocker is on). Proceed anyway? [y/N] "]
-
-
-def test_a_clear_rig_still_asks_a_human(monkeypatch):
-    monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
-    asked = []
-    assert rig.gate((True, "off"), lambda q: asked.append(q) or "y") is True
-    assert asked == ["Proceed? [y/N] "]
-
-
-def test_a_probe_goes_while_clear_and_asks_a_human_otherwise(capsys):
-    assert rig.probe_approved(None, lambda _: pytest.fail("prompted"))
-    assert rig.probe_approved((True, "off"), lambda _: pytest.fail("prompted"))
-    assert rig.probe_approved((False, "on"), lambda _: "y")
-
-    def no_tty(_):
-        raise EOFError
-
-    assert not rig.probe_approved((False, "on"), no_tty)
-    assert "Not approved; nothing changed." in capsys.readouterr().out
-
-
-def watch(monkeypatch, replies, armed=True):
+def watch(monkeypatch, replies, armed=True, clear=False):
     """Run the watcher over `replies`, one per poll, until it signals or they run out; the signals it sent."""
     sent = []
     done = threading.Event()
@@ -345,7 +340,7 @@ def watch(monkeypatch, replies, armed=True):
 
     monkeypatch.setattr(rig, "_get", _get)
     monkeypatch.setattr(rig.os, "kill", kill)
-    with rig.watching(CLEAR_ENV, BLOCKER if armed else None, interval=0.001):
+    with rig.watching(CLEAR_ENV, SENSOR if armed else None, clear, interval=0.001):
         done.wait(0 if not armed else 5)
     return sent
 
@@ -354,20 +349,41 @@ def test_two_reads_not_clear_in_a_row_abort_the_run(monkeypatch, capsys):
     assert watch(monkeypatch, [{"state": "off"}, {"state": "on"}, {"state": "unknown"}]) == [
         (os.getpid(), signal.SIGTERM)
     ]
-    assert "Rig authorization revoked (binary_sensor.rig_blocker is unknown); aborting." in capsys.readouterr().out
+    assert "Rig authorization revoked (binary_sensor.rig_restricted is unknown); aborting." in capsys.readouterr().out
 
 
 def test_one_read_not_clear_does_not(monkeypatch):
     assert watch(monkeypatch, [{"state": "on"}, {"state": "off"}, {"state": "on"}, {"state": "off"}]) == []
 
 
+DOWN = urllib.error.URLError("refused")
+ABORTED = [(os.getpid(), signal.SIGTERM)]
+
+
+@pytest.mark.parametrize(
+    ("states", "aborts"),
+    [
+        (["off", "on", "on"], True),
+        (["on", "on", "on"], False),  # approved while on: it never turned on
+        (["on", "off", "on", "on"], True),
+        (["off", DOWN, "on", "on"], True),
+        (["off", "on", DOWN, "on"], True),  # a failed read doesn't reset the two
+        (["unknown", "unavailable", "on"], False),
+    ],
+)
+def test_the_watcher_aborts_when_the_sensor_turns_on(monkeypatch, states, aborts):
+    replies = [state if isinstance(state, Exception) else {"state": state} for state in states]
+    assert watch(monkeypatch, replies) == (ABORTED if aborts else [])
+
+
+def test_the_gates_read_of_off_counts_as_one_since_the_start(monkeypatch):
+    assert watch(monkeypatch, [{"state": "on"}, {"state": "on"}], clear=True) == ABORTED
+
+
 def test_failed_reads_neither_count_nor_reset(monkeypatch):
-    down = urllib.error.URLError("refused")
-    assert watch(monkeypatch, [down, down, down, {"state": "on"}, down, {"state": "on"}]) == [
-        (os.getpid(), signal.SIGTERM)
-    ]
+    assert watch(monkeypatch, [DOWN, DOWN, DOWN, {"state": "on"}, DOWN, {"state": "on"}], clear=True) == ABORTED
     restored = {"state": "unavailable", "attributes": {"restored": True}}
-    assert watch(monkeypatch, [restored, restored, not_found(), not_found()]) == []
+    assert watch(monkeypatch, [restored, restored, not_found(), not_found()], clear=True) == []
 
 
 def test_an_unarmed_watcher_reads_nothing(monkeypatch):
@@ -926,6 +942,11 @@ def test_main_recovers_before_the_plan_and_recover_alone_stops_there(tmp_path, m
     monkeypatch.setattr(rig, "git", lambda *args, check=True: str(tmp_path) if "--git-common-dir" in args else "wt/x")
     monkeypatch.setattr(rig, "load_env", lambda: {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok"})
 
+    assert rig.main(["--recover"]) == 1  # the journal from before per-run journals is restricted
+    assert (
+        "(profile lab, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it" in capsys.readouterr().out
+    )
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
     assert rig.main(["--dry-run", "--recover"]) == 1
     assert "--recover puts them back." in capsys.readouterr().out
     assert rig.main(["--recover"]) == 0

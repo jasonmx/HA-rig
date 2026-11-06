@@ -50,3 +50,10 @@ REAL_REFUSE_MOVED_FILES = target.refuse_moved_files  # the autouse fixture swaps
 def no_moved_files_check(monkeypatch) -> None:
     """The real deviceside checkout the tests import may still hold a household file the rig refuses."""
     monkeypatch.setattr(target, "refuse_moved_files", lambda repo, rig_checkout: None)
+
+
+@pytest.fixture(autouse=True)
+def no_approval(monkeypatch) -> None:
+    """No test inherits an approval for restricted work, or the variable it replaced, from the shell running it."""
+    monkeypatch.delenv("DEVICE_SIDE_RIG_RESTRICTED", raising=False)
+    monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)

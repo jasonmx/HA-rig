@@ -137,8 +137,9 @@ class Profile:
     roam: tuple[RoamBulb, ...] = ()
     roam_groups: tuple[RoamGroup, ...] = ()
     roam_networks: tuple[str, ...] = ()  # where the roaming bulbs may go, in CYCLE order, their home included
-    # Whether this profile's unattended runs and probes go whatever RIG_BLOCKER_ENTITY reads: a setup whose lights
-    # nobody minds seeing move. Off, they go only while it is off (scripts/rig.py).
+    # Whether this profile's work is unrestricted (ha_rig/authorize.py): its whole run, pauses, DeviceSide reloads and
+    # disables, roaming and HA restarts included, its recovery and its --visual profile probes go whatever
+    # RIG_RESTRICTED_ENTITY reads, for a setup whose lights nobody minds seeing move. Off, they are restricted.
     pre_authorized: bool = False
 
     @classmethod
@@ -383,7 +384,8 @@ def load_env(path: Path = ENV_FILE) -> dict[str, str]:
         "RIG_SYNC_CMD",
         "RIG_STATUS_CMD",
         "RIG_RESTART_CMD",
-        "RIG_BLOCKER_ENTITY",
+        "RIG_RESTRICTED_ENTITY",
+        "RIG_BLOCKER_ENTITY",  # its old name, still read
         "RIG_PAUSE",  # moved into the profile; still read, so a run set it in refuses rather than ignores it
         "HUE_BRIDGE_HOST",
         "HUE_APP_KEY",
