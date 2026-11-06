@@ -64,14 +64,14 @@ each and one straight home at the end. The run holds only the networks it visits
 next run's gate, move them home. --roam-check visits every declared network with no suites.
 
 Before the gate, and alone with --check, the run checks every phase's devices at once: each fixed entity its cases
-use is in HA and available, and each roaming bulb is on a network. Without that, a device left unpowered stops the run
-only when its phase comes, after the bulbs have moved.
+use is in HA, on its integration and available, and each roaming bulb is on a network. Without that, a device left
+unpowered stops the run only when its phase comes, after the bulbs have moved.
 
 A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the restricted
 sensor or --for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished
 across sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones
-finish. A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are
-kept.
+finish; it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first
+case. A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -165,7 +165,7 @@ from ha_rig.profile import (  # noqa: E402
 from ha_rig.progress import Done, Key, Progress  # noqa: E402
 from ha_rig.roam import BLUETOOTH_RESET, NAMES, Bulb, GroupError, Roamer, RoamError  # noqa: E402
 from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
-from ha_rig.runlogs import DebugLevels, RunLogs, ha_domains  # noqa: E402
+from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa: E402
 
 TEST_RECORDS_DIR = REPO / "docs" / "test-records"
 SERVICE = ("deviceside", "turn_on_for")
@@ -176,6 +176,7 @@ READY_TIMEOUT_S = 450
 # every case; the grace covers an integration whose entities come back just after the restart.
 TARGETS_TIMEOUT_S = 60
 RESTART_ESTIMATE_S = 90
+MOVE_LEAD_S = 60  # the budget a move needs left: one move's join, rename and HA wait
 ROAM_ESTIMATE_S = 180  # the three moves: the probe's joins took about 10 s each, plus releases, renames and HA
 ABORT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 CLEAR_POLL_S = 15
@@ -679,8 +680,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="check the run's devices are in HA and available, and where its roaming bulbs are, then stop: no lock, "
-        "no deploy, nothing changed",
+        help="check the run's devices are in HA, on their integration and available, and where its roaming bulbs "
+        "are, then stop: no lock, no deploy, nothing changed",
     )
     parser.add_argument("--no-deploy", action="store_true", help="test whatever HA already runs")
     parser.add_argument(
@@ -1074,7 +1075,7 @@ def print_resume(args: argparse.Namespace, setup: Setup) -> None:
         )
         print(f"Resuming: {len(done)} of {total} cases done (started {setup.progress.started}); --fresh to start over.")
     if args.budget:
-        print(f"Budget: no case starts after {args.budget:.0f} s; rerun the same way to resume.")
+        print(f"Budget: no case starts after {args.budget:.0f} s from approval, deploy included; rerun to resume.")
 
 
 def print_debug_logs(env: dict, suites: list[Suite], roaming: bool) -> None:
@@ -1785,7 +1786,8 @@ async def run_phases(
     with the bulbs at home; the phases then run only the rest (see merge).
 
     With `progress`, the cases it has saved are left out and each new one is saved as it finishes. Once the `budget`
-    is spent no phase starts, so the bulbs move no further than home."""
+    is spent no phase starts, so the bulbs move no further than home. A move starts only with MOVE_LEAD_S of it left,
+    and buys its phase one case, whatever the budget."""
     results = [] if results is None else results
     lanes = lanes and bool(suites)
     ask = None if unattended else input
@@ -1803,9 +1805,12 @@ async def run_phases(
     }
     only = tail(profile) if lanes else None
     for number, (network, phase_suites) in enumerate(phases(suites, profile, roaming)):
-        if budget is not None and budget.stops():
+        moving = phase_moves(roamer, network)
+        if budget is not None and phase_stopped(budget, moving):
             break
         await visit(roamer, network, bool(phase_suites or not suites))
+        if moving and budget is not None:
+            budget.grant()
         if number == 0 and lanes:
             await wait_for_targets(ha, suites, profile, registry, keyword, only=head(profile))
         if phase_suites:
@@ -1819,6 +1824,18 @@ async def run_phases(
     if roamer is not None:
         await roamer.go(roamer.home_network)
     return RunResult(results)
+
+
+def phase_moves(roamer: Roamer | None, network: str | None) -> bool:
+    """Whether the phase for `network` (None: home) moves the bulbs."""
+    return roamer is not None and roamer.moves(network or roamer.home_network)
+
+
+def phase_stopped(budget: Budget, moving: bool) -> bool:
+    """Whether the budget stops the phase: a move needs MOVE_LEAD_S left, any other phase only some budget left."""
+    if moving and budget.left < MOVE_LEAD_S:
+        budget.stopped = True
+    return budget.stopped if moving else budget.stops()
 
 
 async def visit(roamer: Roamer | None, network: str | None, grouping: bool) -> None:
@@ -2015,6 +2032,72 @@ def targets(
     )
 
 
+def platforms(
+    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None
+) -> dict[str, tuple[str, str]]:
+    """Each entity the cases will move (targets), with its integration and the platform HA must register it on: the
+    integration's HA domain (runlogs.HA_DOMAINS), or switch_as_x for a light_wrapped; a group's members count as the
+    group's integration."""
+    found: dict[str, tuple[str, str]] = {}
+    for suite in suites:
+        if not registry.adapter(suite.action, suite.integration):
+            continue
+        domain = HA_DOMAINS.get(suite.integration, suite.integration)
+        for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+            if case.skip:
+                continue
+            for role, entity in case.entities.items():
+                found.setdefault(entity, (suite.integration, "switch_as_x" if role == "light_wrapped" else domain))
+            for entity in case.members:
+                found.setdefault(entity, (suite.integration, domain))
+    return found
+
+
+async def check_platforms(
+    ha: HAClient, expected: dict[str, tuple[str, str]], entities: list[str], profile: Profile
+) -> list[str]:
+    """The problems among `entities` (already in HA) from the entity registry: one missing from it (YAML-defined, which
+    the run can't trust) or registered on another platform, as a bulb paired to another network is."""
+    registered = {entry["entity_id"]: entry["platform"] for entry in await ha.entity_registry()}
+    problems = []
+    for entity in entities:
+        integration, platform = expected[entity]
+        if entity not in registered:
+            problems.append(f"{entity}: not in the entity registry (YAML-defined?); the run can't trust it")
+        elif registered[entity] != platform:
+            now = registered[entity]
+            problems.append(f"{entity}: a {now} entity, not {integration}; pair it back or fix profile {profile.name}")
+    return problems
+
+
+async def check_fixed(
+    ha: HAClient,
+    admin: HAClient | None,
+    fixed: list[str],
+    suites: list[Suite],
+    profile: Profile,
+    registry: AdapterRegistry,
+    keyword: str | None,
+) -> list[str]:
+    """The problems among the fixed entities: one not in HA or unavailable, or, of those in HA, one on the wrong
+    platform."""
+    problems, present = [], []
+    for entity, state in zip(fixed, await asyncio.gather(*map(ha.get_state, fixed)), strict=True):
+        if state is None:
+            problems.append(f"{entity}: not in HA; check profile {profile.name}")
+            continue
+        present.append(entity)
+        if not available(state):
+            problems.append(f"{entity}: unavailable; check it is powered")
+    if present:
+        try:
+            expected = platforms(suites, profile, registry, keyword)
+            problems += await check_platforms(admin or ha, expected, present, profile)
+        except HAError as err:  # a token without admin rights can't list the registry
+            print(f"The platforms weren't checked: HA refused the entity registry ({err}).")
+    return problems
+
+
 async def check_devices(
     env: dict,
     suites: list[Suite],
@@ -2024,10 +2107,11 @@ async def check_devices(
     roaming: bool,
     homes: set[str] = frozenset(),
 ) -> list[str]:
-    """Before anything changes, for every phase at once: each fixed entity the selected cases use is in HA and
-    available, and, when the run roams, each roaming bulb is on a network with its light available. Prints what it
-    found; returns the problems, which would otherwise stop the run part way, after moves. Rig-made groups and scenes
-    don't exist yet, and a roaming bulb's light may still be under another ID, so neither is looked up as an entity.
+    """Before anything changes, for every phase at once: each fixed entity the selected cases use is in HA, on its
+    integration and available, and, when the run roams, each roaming bulb is on a network with its light available.
+    Prints what it found; returns the problems, which would otherwise stop the run part way, after moves. Rig-made
+    groups and scenes don't exist yet, and a roaming bulb's light may still be under another ID, so neither is looked
+    up as an entity.
     `homes` are the bulbs whose Hue home the home record holds, which a run puts back."""
     fixed = [entity for entity in targets(suites, profile, registry, keyword) if entity not in profile.made_entities]
     bulbs = list(profile.roam) if roaming else []
@@ -2040,11 +2124,7 @@ async def check_devices(
     except (OSError, aiohttp.ClientError, RuntimeError) as err:
         return [f"Can't reach HA at {env.get('HA_URL')}: {err or type(err).__name__}"]
     try:
-        for entity, state in zip(fixed, await asyncio.gather(*map(ha.get_state, fixed)), strict=True):
-            if state is None:
-                problems.append(f"{entity}: not in HA; check profile {profile.name}")
-            elif not available(state):
-                problems.append(f"{entity}: unavailable; check it is powered")
+        problems += await check_fixed(ha, admin, fixed, suites, profile, registry, keyword)
         if bulbs:
             problems += await check_roaming(env, admin, bulbs, ha, homes)
     finally:

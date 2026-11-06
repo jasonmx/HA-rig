@@ -836,13 +836,26 @@ class Budget:
 
     deadline: float  # on time.monotonic()
     stopped: bool = False
+    granted: bool = False  # a move's one case, whatever the budget
 
     @property
     def spent(self) -> bool:
         return time.monotonic() >= self.deadline
 
-    def stops(self) -> bool:
-        """Whether to start nothing more, noting that something is left."""
+    @property
+    def left(self) -> float:
+        """Seconds to the deadline, never below 0."""
+        return max(0.0, self.deadline - time.monotonic())
+
+    def grant(self) -> None:
+        """Let the next device case start though the budget is spent: a move has bought it. Used once."""
+        self.granted = True
+
+    def stops(self, device_case: bool = False) -> bool:
+        """Whether to start nothing more, noting that something is left. A `device_case` spends a grant instead."""
+        if device_case and self.granted:
+            self.granted = False
+            return False
         if self.spent:
             self.stopped = True
         return self.stopped
@@ -2062,12 +2075,12 @@ class _Run:
             self.out(f"{suite.integration} / {suite.name}")
         waiting = []
         for case in suite_cases:
-            if self.budget is not None and self.budget.stops():
-                break
             twin = self.results.get((id(suite), case.twin or ""))
             if case.skip:
                 self.report(case, _not_run(case, Outcome.SKIPPED, case.skip))
             elif not case.observed:
+                if self.budget is not None and self.budget.stops(device_case=True):
+                    continue
                 self.report(case, await self.run_case(case, client, None))
             elif self.ask is None:
                 self.report(case, _not_run(case, Outcome.NOT_OBSERVED))
@@ -2079,17 +2092,18 @@ class _Run:
 
     async def observed(self, waiting: list[tuple[Case, HAClient]]) -> None:
         """Run each observed case in turn; after an EOF at a prompt, the rest are not observed."""
-        if self.budget is not None and waiting and self.budget.stops():
+        if self.budget is not None and waiting and self.budget.spent and not self.budget.granted:
+            self.budget.stopped = True
             return
         if waiting:
             self.out("")
             self.out(f"{len(waiting)} test{'s need' if len(waiting) > 1 else ' needs'} you")
         for number, (case, client) in enumerate(waiting, 1):
-            if self.budget is not None and self.budget.stops():
-                return
             if self.ask is None:
                 self.report(case, _not_run(case, Outcome.NOT_OBSERVED))
                 continue
+            if self.budget is not None and self.budget.stops(device_case=True):
+                return
             result = await self.run_case(case, client, self.ask, f"{number} of {len(waiting)}")
             self.report(case, result)
             if result.outcome is Outcome.NOT_OBSERVED:
