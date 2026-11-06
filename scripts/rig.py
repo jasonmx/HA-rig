@@ -898,7 +898,7 @@ def take(args: argparse.Namespace, setup: Setup, directory: Path) -> Held:
     if the run now needs more (it must deploy after all), it lets go and waits for that, once: HA held exclusively,
     nothing can change it again."""
     holder = git("rev-parse", "--abbrev-ref", "HEAD")
-    held = locks.hold(claim(args, setup), holder, directory)
+    held = locks.hold(claim(args, setup) | orphaned(setup, directory), holder, directory)
     setup.deploy = deploy_state(setup.env.get("RIG_STATUS_CMD", ""))
     if not held.claim.covers(needed := claim(args, setup)):
         held.close()
@@ -911,6 +911,22 @@ def take(args: argparse.Namespace, setup: Setup, directory: Path) -> Held:
             raise SystemExit("The checkout's integration tree changed while this run waited; run it again.")
         setup.progress.key = replace(setup.progress.key, tree=setup.deploy.local_tree)
     return held
+
+
+def orphaned(setup: Setup, directory: Path) -> Claim:
+    """What a resumed run must also hold to put back the aborted runs of its own profile: the stopped run that saved
+    its progress left changes the remaining suites may not touch, and replay only puts back what the run's claim
+    covers. Nothing for a fresh run. The journals are read, then released at once."""
+    wanted = Claim("shared", frozenset())
+    if not setup.progress:
+        return wanted
+    for orphan in orphans(directory):
+        try:
+            if orphan.get("profile") == setup.profile.name:
+                wanted |= needs(orphan)
+        finally:
+            orphan.release()
+    return wanted
 
 
 def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, directory: Path) -> int:
