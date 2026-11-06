@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -862,3 +863,57 @@ async def test_connect_closes_the_first_session_when_the_admin_one_fails(monkeyp
     with pytest.raises(RuntimeError, match="auth failed"):
         await rig.connect(ENV)
     assert closed == ["t"]
+
+
+def budget_run(tmp_path, lab, budget):
+    return rig.run_rig(
+        ENV,
+        suites(tmp_path, "zha"),
+        lab_with_pause(tmp_path),
+        None,
+        None,
+        True,
+        None,
+        None,
+        roaming=True,
+        budget=budget,
+    )
+
+
+async def test_a_budget_with_under_a_minute_left_makes_no_move(tmp_path, monkeypatch, lab):
+    ran = fake_phases(monkeypatch, lab)
+    budget = engine.Budget(time.monotonic() + rig.MOVE_LEAD_S - 10)
+
+    await budget_run(tmp_path, lab, budget)
+
+    assert budget.stopped
+    assert all("zha" not in integrations for integrations, _ in ran)
+    assert await where(lab) == ["hue", "hue"]
+
+
+async def test_a_budget_spent_during_a_move_still_runs_the_phases_first_case(tmp_path, monkeypatch, lab):
+    budget = engine.Budget(time.monotonic() + rig.MOVE_LEAD_S + 5)
+    seen = []
+
+    async def run(phase_suites, *args, **kwargs):
+        seen.append(([s.integration for s in phase_suites], await where(lab), budget.stops(device_case=True)))
+        return engine.RunResult([])
+
+    async def wait_for_targets(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(rig, "run", run)
+    monkeypatch.setattr(rig, "wait_for_targets", wait_for_targets)
+    monkeypatch.setattr(rig, "write_report", lambda result, directory, title: directory / "report.md")
+    real_go = Roamer.go
+
+    async def slow_go(self, to):
+        await real_go(self, to)
+        if to == "zha":
+            budget.deadline = time.monotonic() - 1  # spent during the move
+
+    monkeypatch.setattr(Roamer, "go", slow_go)
+
+    await budget_run(tmp_path, lab, budget)
+
+    assert ("zha" in str(seen)) and seen[-1][2] is False

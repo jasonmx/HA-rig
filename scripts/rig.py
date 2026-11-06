@@ -63,7 +63,8 @@ only when its phase comes, after the bulbs have moved.
 
 A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the blocker or
 --for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished across
-sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish.
+sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish;
+it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case.
 A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
@@ -167,6 +168,7 @@ READY_TIMEOUT_S = 450
 # every case; the grace covers an integration whose entities come back just after the restart.
 TARGETS_TIMEOUT_S = 60
 RESTART_ESTIMATE_S = 90
+MOVE_LEAD_S = 60  # the budget a move needs left: one move's join, rename and HA wait
 ROAM_ESTIMATE_S = 180  # the three moves: the probe's joins took about 10 s each, plus releases, renames and HA
 ABORT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 CLEAR_POLL_S = 15
@@ -982,7 +984,7 @@ def print_resume(args: argparse.Namespace, setup: Setup) -> None:
         )
         print(f"Resuming: {len(done)} of {total} cases done (started {setup.progress.started}); --fresh to start over.")
     if args.budget:
-        print(f"Budget: no case starts after {args.budget:.0f} s; rerun the same way to resume.")
+        print(f"Budget: no case starts after {args.budget:.0f} s from approval, deploy included; rerun to resume.")
 
 
 def print_debug_logs(env: dict, suites: list[Suite], roaming: bool) -> None:
@@ -1657,7 +1659,8 @@ async def run_phases(
     with the bulbs at home; the phases then run only the rest (see merge).
 
     With `progress`, the cases it has saved are left out and each new one is saved as it finishes. Once the `budget`
-    is spent no phase starts, so the bulbs move no further than home."""
+    is spent no phase starts, so the bulbs move no further than home. A move starts only with MOVE_LEAD_S of it left,
+    and buys its phase one case, whatever the budget."""
     results = [] if results is None else results
     lanes = lanes and bool(suites)
     ask = None if unattended else input
@@ -1675,9 +1678,12 @@ async def run_phases(
     }
     only = tail(profile) if lanes else None
     for number, (network, phase_suites) in enumerate(phases(suites, profile, roaming)):
-        if budget is not None and budget.stops():
+        moving = phase_moves(roamer, network)
+        if budget is not None and phase_stopped(budget, moving):
             break
         await visit(roamer, network, bool(phase_suites or not suites))
+        if moving and budget is not None:
+            budget.grant()
         if number == 0 and lanes:
             await wait_for_targets(ha, suites, profile, registry, keyword, only=head(profile))
         if phase_suites:
@@ -1691,6 +1697,18 @@ async def run_phases(
     if roamer is not None:
         await roamer.go(roamer.home_network)
     return RunResult(results)
+
+
+def phase_moves(roamer: Roamer | None, network: str | None) -> bool:
+    """Whether the phase for `network` (None: home) moves the bulbs."""
+    return roamer is not None and roamer.moves(network or roamer.home_network)
+
+
+def phase_stopped(budget: Budget, moving: bool) -> bool:
+    """Whether the budget stops the phase: a move needs MOVE_LEAD_S left, any other phase only some budget left."""
+    if moving and budget.left < MOVE_LEAD_S:
+        budget.stopped = True
+    return budget.stopped if moving else budget.stops()
 
 
 async def visit(roamer: Roamer | None, network: str | None, grouping: bool) -> None:

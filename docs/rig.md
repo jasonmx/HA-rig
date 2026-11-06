@@ -119,7 +119,9 @@ unfinished case, planning, locking, moving and estimating only what is left, and
 done`. So a 45-minute suite completes as 30 minutes one evening and 15 the next.
 
 - **`--for DURATION`** (`30m`, `90s`, `1h15m`): once spent, no case or phase starts; cases in flight finish, the bulbs
-  go home, and the run exits 75. Ctrl-C, SIGTERM and the blocker still stop at once: the cases in flight are
+  go home, and the run exits 75. The window counts from approval, so the deploy's restart eats into it. A move to
+  another network starts only with a minute left, and always runs its phase's first device case, whatever the budget.
+  Ctrl-C, SIGTERM and the blocker still stop at once: the cases in flight are
   cancelled and rerun on resume.
 - **The key.** Progress holds for one profile, branch, integration tree and selection (`--integration`, `--action`,
   `-k`, `--serial`, `--unattended`), on one HA version. Any change starts fresh and says why; so does `--fresh`.
