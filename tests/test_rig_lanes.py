@@ -295,3 +295,96 @@ def test_the_plan_shows_the_lanes_then_the_phases_and_estimates_the_longest_lane
     # hue's 60 s run whole in its lane, beside zha's 30; zha's other 30 s come after.
     assert rig.estimate(suites, fakes.OPTION_REGISTRY, False, profile=profile) == 90
     assert rig.estimate(suites, fakes.OPTION_REGISTRY, False) == 120
+
+
+def roaming_run(tmp_path, monkeypatch) -> tuple:
+    """The lab profile's suites on shelly, ZHA and Z2M, with run faked to record where the bulbs were and which
+    cases it was given, `done` ones left out."""
+    ha = fakes.FakeHA({})
+    lab = fakes.Lab(ha, fakes.FakeBridge(), {fakes.LAB_A: "light.lab_a", fakes.LAB_B: "light.lab_b"})
+    monkeypatch.setattr(roam, "POLL_S", 0)
+    profile = Profile.load(fakes.lab_profile(tmp_path))
+    path = tmp_path / "steps.yaml"
+    path.write_text(LAB_STEPS)
+    suites = [Suite(load_step_file(path), integration) for integration in ("shelly", "zha", "zigbee2mqtt")]
+    finder = roam.Roamer(ha, lab.bridge, fakes.LAB_BULBS, out=lambda _: None)
+    ran = []
+
+    async def recorded(run_suites, run_profile, *args, only=None, lanes=False, done=None, budget=None, **kwargs):
+        where = [await finder.locate(bulb) for bulb in fakes.LAB_BULBS]
+        accepted = engine.unfinished(done, only)
+        ran.append(
+            (
+                lanes,
+                where,
+                [
+                    f"{suite.integration} {case.id}"
+                    for suite in run_suites
+                    for case in cases(suite, run_profile)
+                    if accepted is None or accepted(case)
+                ],
+            )
+        )
+        return engine.RunResult([])
+
+    async def no_wait(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(rig, "run", recorded)
+    monkeypatch.setattr(rig, "wait_for_targets", no_wait)
+    return ha, lab, profile, suites, finder, ran
+
+
+async def test_a_resume_with_only_one_networks_cases_left_visits_only_it(tmp_path, monkeypatch):
+    ha, lab, profile, suites, finder, ran = roaming_run(tmp_path, monkeypatch)
+    progress = rig.Progress(tmp_path / "progress.json", rig.Key("lab", "tree"))
+    for suite in suites:
+        for case in cases(suite, profile):
+            if case.id != "t[light_ct]" or suite.integration != "zigbee2mqtt":
+                progress.record(suite, CaseResult(case.id, case.role, "light", Outcome.PASS))
+    remaining = [suite for suite in suites if rig.left(suite, profile, fakes.OPTION_REGISTRY, progress.done(), None)]
+    assert [suite.integration for suite in remaining] == ["zigbee2mqtt"]
+    assert [network for network, _ in rig.phases(remaining, profile, roaming=True)] == ["hue", "zigbee2mqtt"]
+
+    roamer = roam.Roamer(ha, lab.bridge, fakes.LAB_BULBS)
+    await rig.run_phases(
+        ha,
+        ha,
+        lab.bridge,
+        roamer,
+        True,
+        remaining,
+        profile,
+        None,
+        None,
+        True,
+        None,
+        None,
+        lanes=True,
+        progress=progress,
+    )
+    assert [(where, accepted) for _, where, accepted in ran if accepted] == [
+        (["zigbee2mqtt"] * 2, ["zigbee2mqtt t[light_ct]"])
+    ]
+    assert "zha" not in {where for _, wheres, _ in ran for where in wheres}
+    assert [await finder.locate(bulb) for bulb in fakes.LAB_BULBS] == ["hue", "hue"]
+
+
+async def test_a_budget_spent_between_phases_moves_the_bulbs_no_further_and_brings_them_home(tmp_path, monkeypatch):
+    ha, lab, profile, suites, finder, ran = roaming_run(tmp_path, monkeypatch)
+    budget = engine.Budget(float("inf"))
+    recorded = rig.run
+
+    async def spending(*args, **kwargs):
+        result = await recorded(*args, **kwargs)
+        budget.deadline = 0.0  # spent as the home phase's cases end
+        return result
+
+    monkeypatch.setattr(rig, "run", spending)
+    roamer = roam.Roamer(ha, lab.bridge, fakes.LAB_BULBS)
+    await rig.run_phases(
+        ha, ha, lab.bridge, roamer, True, suites, profile, None, None, True, None, None, lanes=True, budget=budget
+    )
+    assert [where for _, where, _ in ran] == [["hue", "hue"], ["hue", "hue"]]  # the lanes and home, no ZHA or Z2M
+    assert budget.stopped
+    assert [await finder.locate(bulb) for bulb in fakes.LAB_BULBS] == ["hue", "hue"]

@@ -110,6 +110,25 @@ A probe takes the same locks through `--hold`, which runs a command while holdin
 `scripts/rig.py --hold zha -- <command>`, with `--exclusive` for one that restarts HA or reloads DeviceSide. It
 writes no journal, so the probe puts back what it changes.
 
+### Stopping and resuming
+
+A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's parts took, in
+`deviceside-rig-progress/<profile>--<branch>.json` in deviceside's git common dir (`ha_rig/progress.py`). A run that
+stops part way puts everything back as always and exits 75; rerun the same command and it resumes at the first
+unfinished case, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
+done`. So a 45-minute suite completes as 30 minutes one evening and 15 the next.
+
+- **`--for DURATION`** (`30m`, `90s`, `1h15m`): once spent, no case or phase starts; cases in flight finish, the bulbs
+  go home, and the run exits 75. Ctrl-C, SIGTERM and the blocker still stop at once: the cases in flight are
+  cancelled and rerun on resume.
+- **The key.** Progress holds for one profile, branch, integration tree and selection (`--integration`, `--action`,
+  `-k`, `--serial`, `--unattended`), on one HA version. Any change starts fresh and says why; so does `--fresh`.
+  `--no-deploy` saves nothing, as it writes no record.
+- **Failures are kept.** A finished case is finished: the resumed run reports a saved failure and ends failed.
+  `--fresh` retries it.
+- **Records.** The report joins the saved cases to the session's, so a suite finished across sessions writes its
+  record, dated the finishing session, citing the one tree the key pins. Once every case has a result the file goes.
+
 ## Writing a step file
 
 ```yaml

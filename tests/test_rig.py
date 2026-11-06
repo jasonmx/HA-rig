@@ -19,6 +19,7 @@ from ha_rig import baseline, engine
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
+from ha_rig.progress import path_for
 from tests import rig_fakes as fakes
 
 RIG_HOME = Path(__file__).parents[1]
@@ -1204,3 +1205,167 @@ def test_a_bad_profile_leaves_the_terms_stale_but_stops_no_mode(tmp_path, monkey
 def test_the_runner_tests_a_deviceside_checkout():
     assert (rig.REPO / rig.COMPONENT / "manifest.json").is_file()
     assert rig.TEST_RECORDS_DIR == rig.REPO / "docs" / "test-records"
+
+
+# --- stopping and resuming -----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"), [("30m", 1800), ("90s", 90), ("1h15m", 4500), ("1h", 3600), ("2m5s", 125)]
+)
+def test_for_reads_hours_minutes_and_seconds(text, seconds):
+    assert rig.duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["", "15", "m", "0m", "5m1h", "1.5h", "-5m"])
+def test_for_refuses_anything_else(text):
+    with pytest.raises(rig.argparse.ArgumentTypeError):
+        rig.duration(text)
+
+
+@pytest.mark.parametrize("extra", [["--check"], ["--roam-check"], ["--recover"], ["--wait-free"], ["--deploy-only"]])
+@pytest.mark.parametrize("flag", [["--for", "5m"], ["--fresh"]])
+def test_for_and_fresh_are_for_a_test_run(extra, flag, capsys):
+    with pytest.raises(SystemExit):
+        rig.main([*flag, *extra])
+    err = capsys.readouterr().err
+    assert "--for and --fresh are for a test run" in err or "--deploy-only takes only --dry-run" in err
+
+
+TWO_SUITES = """
+action: raise_brightness
+rig_seconds: 60
+tests:
+  - name: t
+    roles: [light_ct]
+    steps:
+      - set: {state: off}
+  - name: u
+    roles: [light_ct]
+    steps:
+      - set: {state: off}
+"""
+
+
+def resumable(tmp_path: Path) -> tuple[Profile, list[rig.Suite]]:
+    profile = Profile(
+        {
+            "shelly": [RigEntity("light.a", frozenset({"light_ct"}))],
+            "zha": [RigEntity("light.b", frozenset({"light_ct"}))],
+        },
+        {},
+        name="house",
+    )
+    step_file = load_step_file(write(tmp_path, "steps.yaml", TWO_SUITES))
+    return profile, [rig.Suite(step_file, "shelly"), rig.Suite(step_file, "zha")]
+
+
+def run_args(**kwargs) -> types.SimpleNamespace:
+    defaults = {"integration": None, "action": None, "keyword": None, "serial": False, "unattended": True}
+    return types.SimpleNamespace(**(defaults | {"fresh": False, "no_deploy": False, "roam_check": False} | kwargs))
+
+
+def resumed(tmp_path, monkeypatch, done_ids: dict[str, list[str]], **kwargs) -> rig.Setup:
+    """resume() after a stopped run that finished `done_ids` by integration, on HA 2026.10.1."""
+    profile, suites = resumable(tmp_path)
+    deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
+    key = rig.Key("house", "tree1", (), (), None, False, True)
+    saved = rig.Progress.load(tmp_path, "house", "wt/x", key)
+    for suite in suites:
+        for case_id in done_ids.get(suite.integration, []):
+            saved.record(suite, engine.CaseResult(case_id, "light_ct", "light", engine.Outcome.PASS))
+        saved.facts(suite, "2026.10.1", [])
+    monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
+    setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
+    rig.resume(run_args(**kwargs), setup, tmp_path)
+    return setup
+
+
+def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypatch, capsys):
+    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]", "u[light_ct]"], "zha": ["t[light_ct]"]})
+    assert [suite.integration for suite in setup.suites] == ["zha"]
+    assert rig.claim(types.SimpleNamespace(no_deploy=False, roam_check=False), setup) == rig.Claim(
+        "shared", frozenset({"zha"})
+    )
+    assert rig.estimate(setup.suites, fakes.OPTION_REGISTRY, False, done=setup.done, resumed=setup.profile) == 30
+    rig.print_resume(types.SimpleNamespace(budget=None, keyword=None), setup)
+    assert "Resuming: 3 of 4 cases done" in capsys.readouterr().out
+
+
+def test_a_resume_with_nothing_left_starts_fresh(tmp_path, monkeypatch, capsys):
+    every = ["t[light_ct]", "u[light_ct]"]
+    setup = resumed(tmp_path, monkeypatch, {"shelly": every, "zha": every})
+    assert setup.suites == setup.selected and not setup.done
+    assert "every case finished; starting fresh" in capsys.readouterr().out
+
+
+def test_another_selection_starts_fresh(tmp_path, monkeypatch, capsys):
+    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]}, serial=True)
+    assert not setup.done and "selection changed" in capsys.readouterr().out
+
+
+def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path, monkeypatch, capsys):
+    ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
+    ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 200}}
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    written: list[list[str]] = []
+
+    async def write_records(result, registry, records_dir, date, source, profile):
+        written.append([part.suite.integration for part in result.suites if part.recordable])
+        return []
+
+    monkeypatch.setattr(rig, "write_records", write_records)
+    profile, suites = resumable(tmp_path)
+    key = rig.Key("house", "tree1", (), (), None, False, True)
+
+    def session(budget=None) -> int:
+        progress = rig.Progress.load(tmp_path, "house", "wt/x", key)
+        done = progress.done()
+        left = [suite for suite in suites if rig.left(suite, profile, fakes.OPTION_REGISTRY, done, None)] or suites
+        return asyncio.run(
+            rig.run_rig(
+                {},
+                left,
+                profile,
+                fakes.OPTION_REGISTRY,
+                None,
+                True,
+                "c1",
+                progress=progress,
+                selected=suites,
+                budget=budget,
+            )
+        )
+
+    record = rig.Progress.record
+
+    def spent_after(count: int) -> engine.Budget:
+        """A budget spent once `count` cases have finished."""
+        budget = engine.Budget(float("inf"))
+
+        def counting(self, suite, result):
+            record(self, suite, result)
+            if len(self.cases) >= count:
+                budget.deadline = 0.0
+
+        monkeypatch.setattr(rig.Progress, "record", counting)
+        return budget
+
+    assert session(spent_after(3)) == rig.RESUMABLE
+    assert "Stopped with 1 cases left (budget spent); rerun the same command to resume." in capsys.readouterr().out
+    assert written == [["shelly"]]  # zha is one case short
+    assert path_for(tmp_path, "house", "wt/x").exists()
+
+    monkeypatch.setattr(rig.Progress, "record", record)
+    assert session() == 0
+    assert "Resuming" not in capsys.readouterr().out
+    assert written == [["shelly"], ["zha"]]  # shelly's record isn't written again
+    assert not path_for(tmp_path, "house", "wt/x").exists()
+
+
+def test_a_signal_stops_a_run_with_progress_resumable(capsys):
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    assert rig.run_tests(cancelled(), aborted=lambda: rig.RESUMABLE) == rig.RESUMABLE
+    assert capsys.readouterr().out == "Aborted.\n"

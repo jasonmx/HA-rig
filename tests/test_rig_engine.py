@@ -2321,3 +2321,120 @@ async def test_a_restore_that_fails_stays_journaled_past_the_next_case_until_rec
         await engine.Snapshot(ha, taken=entry["taken"], journal=journal, journal_key=key).restore()
     assert ha.states["light.a"]["state"] == "on"
     assert not journal.path.exists()
+
+
+# --- resuming and the budget ----------------------------------------------------------------------------------------
+
+TWO_CASES = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: first
+    roles: [switch_plug]
+    steps:
+      - set: {state: off}
+      - wait: 0.3
+      - expect_state: {state: off}
+  - name: second
+    roles: [switch_plug]
+    steps:
+      - set: {state: off}
+      - expect_state: {state: off}
+"""
+FIRST, SECOND = "first[switch_plug]", "second[switch_plug]"
+
+
+def saved(steps: Suite, case_id: str, outcome: Outcome = Outcome.PASS) -> dict:
+    return {(steps.integration, steps.name, case_id): CaseResult(case_id, "switch_plug", "switch", outcome)}
+
+
+async def test_done_cases_are_left_out_and_each_new_one_is_handed_on(tmp_path):
+    steps, reported = suite(tmp_path, TWO_CASES), []
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    result = await run_one(
+        ha,
+        steps,
+        profile(switch_plug="switch.plug"),
+        done=saved(steps, FIRST),
+        on_result=lambda s, r: reported.append((s.name, r.id, r.outcome)),
+    )
+    assert outcomes(result) == {SECOND: (Outcome.PASS, "")}
+    assert reported == [("turn_on_for", SECOND, Outcome.PASS)]
+    assert not result.suites[0].complete  # merge joins it to the saved part
+
+
+async def test_an_observed_case_whose_saved_twin_failed_is_still_skipped(tmp_path):
+    steps = suite(tmp_path, OBSERVED)
+    asked, ask = answers()
+    ha = FakeHA({"switch.plug": {}}, timer_on)
+    done = saved(steps, AUTOMATED, Outcome.FAIL)
+    result = await run_one(ha, steps, profile(switch_plug="switch.plug"), ask=ask, done=done)
+    assert outcomes(result) == {WATCHED: (Outcome.SKIPPED, "automated case failed")}
+    assert asked == []
+    assert not [call for call in ha.calls if call[0] == "deviceside"]
+
+
+async def test_a_cancelled_run_still_takes_its_facts_and_never_reports_the_cancelled_case(tmp_path):
+    steps, reported, facts = suite(tmp_path, TWO_CASES), [], []
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    task = asyncio.create_task(
+        run_one(
+            ha,
+            steps,
+            profile(switch_plug="switch.plug"),
+            done=saved(steps, SECOND),
+            on_result=lambda s, r: reported.append(r.id),
+            on_facts=lambda s, version, devices: facts.append((s.name, version)),
+        )
+    )
+    await asyncio.sleep(0.1)  # mid-way through the first case's wait
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reported == []
+    assert facts == []  # no case finished, so no part to take facts for
+    assert ha.states["switch.plug"]["state"] == "on"  # put back
+
+
+async def test_a_cancelled_part_takes_the_facts_of_the_cases_that_finished(tmp_path):
+    text = TWO_CASES.replace("wait: 0.3", "wait: 0").replace(
+        "      - set: {state: off}\n      - expect_state: {state: off}\n",
+        "      - set: {state: off}\n      - wait: 5\n",
+    )
+    steps, reported, facts = suite(tmp_path, text), [], []
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    task = asyncio.create_task(
+        run_one(
+            ha,
+            steps,
+            profile(switch_plug="switch.plug"),
+            on_result=lambda s, r: reported.append(r.id),
+            on_facts=lambda s, version, devices: facts.append((s.name, version)),
+        )
+    )
+    await asyncio.sleep(0.3)  # the first case done, the second mid-wait
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reported == [FIRST]
+    assert facts == [("turn_on_for", "2026.10.1")]
+
+
+async def test_a_spent_budget_lets_the_case_in_flight_finish_and_starts_no_other(tmp_path):
+    steps, reported = suite(tmp_path, TWO_CASES), []
+    budget = engine.Budget(time.monotonic() + 0.1)  # spent during the first case's wait
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    result = await run_one(
+        ha, steps, profile(switch_plug="switch.plug"), budget=budget, on_result=lambda s, r: reported.append(r.id)
+    )
+    assert reported == [FIRST]
+    assert outcomes(result) == {FIRST: (Outcome.PASS, "")}
+    assert budget.stopped
+
+
+async def test_an_unspent_budget_stops_nothing(tmp_path):
+    budget = engine.Budget(time.monotonic() + 60)
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    result = await run_one(ha, suite(tmp_path, TWO_CASES), profile(switch_plug="switch.plug"), budget=budget)
+    assert set(outcomes(result)) == {FIRST, SECOND}
+    assert not budget.stopped
