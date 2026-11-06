@@ -1,9 +1,9 @@
 #!/usr/bin/env -S uv run python
-"""Run the rig tests against the live HA, behind a human approval gate.
+"""Run the rig tests against the live HA, behind an authorization gate.
 
 The rig is the household's own Home Assistant and its in-use lights. Nothing changes state before the gate:
-preflight reads the profile, the adapter registry and the deployed tree hash, prints what will run, then asks.
-DEVICE_SIDE_RIG_APPROVED=1 answers the gate for a non-interactive caller that already has a human's yes.
+preflight reads the profile, the adapter registry and the deployed tree hash, prints what will run and whether it may
+go (Authorization, below), then, at a terminal, asks.
 
 The rig tests the deviceside checkout it is run from, or DEVICE_SIDE_REPO (ha_rig/target.py): it deploys that
 checkout's code, records into its docs/test-records, and keeps its locks and journals in its git common dir. The
@@ -24,19 +24,25 @@ journaled first, in a journal of its own next to the locks (ha_rig/journal.py), 
 changed, the next run whose locks cover it puts back before its gate, or --recover, holding every lock, does.
 
 --deploy-only deploys the checkout's branch and restarts HA onto it, holding HA exclusively until HA is back, then
-releases the locks: no profile, no tests, no gate (it moves no device), for trying a branch's non-device features by
-hand. Nothing happens when HA already runs the checkout's tree.
+releases the locks: no profile and no tests, for trying a branch's non-device features by hand. Nothing happens when HA
+already runs the checkout's tree.
 
 --hold runs a probe's command holding the named integrations and HA (--exclusive: exclusively), with the profile's
-automations for them paused, passing signals on to it and returning its exit code; no case journal, and no gate but
-the clear one below.
+automations for them paused, passing signals on to it and returning its exit code; no case journal. --visual declares
+what it changes that anyone could see, and --dry-run says whether it may go.
 
-RIG_BLOCKER_ENTITY in .env.rig names an HA binary_sensor that is on while someone is near enough to see the lights;
-unless the profile has `pre_authorized: true`, the rig is clear only while it is off. DEVICE_SIDE_RIG_APPROVED=1 is
-refused otherwise, and so is a probe, though a human at the prompt may still say yes. A run or probe that started clear
-reads it every 15 s and, on two reads in a row of on, unknown or unavailable, aborts as on a SIGTERM, putting the
-devices back. Reads that fail, as during the deploy's restart, don't count. Without the key, or on a pre-authorized
-profile, nothing gates on it.
+Authorization (ha_rig/authorize.py) classifies the work, not the caller. Unrestricted work goes at any time: a test run
+or a recovery on a profile with `pre_authorized: true`, which covers everything that run does; --deploy-only, as HA
+restarts are always allowed; a probe declared --visual none, or --visual profile on a pre-authorized profile.
+Everything else is restricted, and goes when either RIG_RESTRICTED_ENTITY in .env.rig, an HA binary_sensor that is on
+while someone is near enough to see the lights, reads off, or Jason has approved it: DEVICE_SIDE_RIG_RESTRICTED=1, or a
+y at the prompt `Restricted: <why>. Proceed anyway?`. Without the key, restricted work needs the approval. At a
+terminal the run asks `Proceed?` as a readiness check; an agent's call, with none, isn't asked. An aborted run's
+changes are restricted by the profile that left them: one the rig may not put back is left and named, and a run whose
+locks cover it stops before its gate. A restricted run or probe reads the sensor every 15 s and aborts as on a SIGTERM,
+putting the devices back, when it turns on: two reads in a row of on, unknown or unavailable after a read of off, so an
+approved run started while it was on goes on until it goes off and on again. Reads that fail, as during the deploy's
+restart, don't count. DEVICE_SIDE_RIG_APPROVED, the variable this replaced, is refused.
 
 Under cmux the run colors its workspace: green holding its locks, amber waiting for them.
 
@@ -61,11 +67,11 @@ Before the gate, and alone with --check, the run checks every phase's devices at
 use is in HA, on its integration and available, and each roaming bulb is on a network. Without that, a device left
 unpowered stops the run only when its phase comes, after the bulbs have moved.
 
-A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the blocker or
---for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished across
-sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish;
-it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case.
-A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
+A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the restricted
+sensor or --for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished
+across sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones
+finish; it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first
+case. A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -80,7 +86,8 @@ Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] 
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
        scripts/rig.py --wait-free [--integration KEY ...]
-       scripts/rig.py [--profile NAME] --hold KEY [--hold KEY ...] [--exclusive] -- COMMAND [ARGS ...]
+       scripts/rig.py [--profile NAME] --hold KEY [--hold KEY ...] [--exclusive] [--visual none|profile]
+                      [--dry-run] -- COMMAND [ARGS ...]
 """
 
 import argparse
@@ -116,6 +123,7 @@ sys.path.append(str(REPO))
 from custom_components.deviceside.core.registry import AdapterRegistry  # noqa: E402
 
 from ha_rig import locks, target, terms  # noqa: E402
+from ha_rig.authorize import APPROVAL, SENSOR_KEY, Decision, authorize  # noqa: E402
 from ha_rig.baseline import NAME as BASELINE_NAME  # noqa: E402
 from ha_rig.baseline import Baseline  # noqa: E402
 from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
@@ -172,7 +180,7 @@ MOVE_LEAD_S = 60  # the budget a move needs left: one move's join, rename and HA
 ROAM_ESTIMATE_S = 180  # the three moves: the probe's joins took about 10 s each, plus releases, renames and HA
 ABORT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 CLEAR_POLL_S = 15
-BLOCKED = ("on", "unknown", "unavailable")  # blocker states that revoke a run; an unread one doesn't
+BLOCKED = ("on", "unknown", "unavailable")  # restricted-sensor states that revoke a run; an unread one doesn't
 # Run reports go where the OS clears old files: they are for reviewing a run, not for keeping.
 REPORT_DIR = Path(tempfile.gettempdir()) / "deviceside-rig"
 RESUMABLE = 75  # EX_TEMPFAIL: the run stopped with cases left, saved to resume from
@@ -392,16 +400,89 @@ def check_deploy(env: dict, deploy: Deploy) -> None:
         raise SystemExit(f"Cannot deploy: {deploy.blocker}.")
 
 
-def gate(clear: tuple[bool, str] | None = None, prompt: Callable[[str], str] = input) -> bool:
-    """A human's yes, or DEVICE_SIDE_RIG_APPROVED=1 while the rig is clear (`clear`: rig_clear's answer, None when the
-    profile isn't gated). A rig not clear refuses the env var; at the prompt, a yes overrides it."""
-    if os.environ.get("DEVICE_SIDE_RIG_APPROVED") == "1":
-        if clear is not None and not clear[0]:
-            print(f"Rig not clear ({clear[1]}); DEVICE_SIDE_RIG_APPROVED=1 doesn't override that.")
-            return False
-        print("Approved by DEVICE_SIDE_RIG_APPROVED=1.")
-        return True
-    return ask(f"Rig not clear ({clear[1]}). Proceed anyway?" if clear and not clear[0] else "Proceed?", prompt)
+def approved() -> bool:
+    """Whether the caller carries an explicit approval for restricted work, DEVICE_SIDE_RIG_RESTRICTED=1. The
+    variable it replaced is refused, so it never quietly means something else."""
+    if "DEVICE_SIDE_RIG_APPROVED" in os.environ:
+        raise SystemExit(
+            f"DEVICE_SIDE_RIG_APPROVED is gone. Unrestricted work needs no variable; restricted work goes while the "
+            f"restricted sensor is off, or with {APPROVAL}=1, Jason's yes for that run (docs/rig.md, Authorization)."
+        )
+    return os.environ.get(APPROVAL) == "1"
+
+
+def tty() -> bool:
+    """Whether a human can be asked: stdin is a terminal."""
+    try:
+        return sys.stdin.isatty()
+    except ValueError, AttributeError:  # closed or replaced
+        return False
+
+
+def proceed(decision: Decision, prompt: Callable[[str], str] = input) -> bool:
+    """Whether the work goes on `decision`: asking its question, if any (no terminal answers no), and saying why
+    not."""
+    if not decision.go:
+        print(f"{decision.reason} Nothing changed.")
+        return False
+    if decision.prompt is not None and not ask(decision.prompt, prompt):
+        print("Not approved; nothing changed.")
+        return False
+    return True
+
+
+class Authority:
+    """What the rig may do now, from authorize: it reads the restricted sensor at most once, and only when restricted
+    work asks."""
+
+    def __init__(self, env: dict) -> None:
+        self.env = env
+        self.entity = restricted_sensor(env)
+        self._sensor: tuple[bool, str] | None = None
+        self._read = False
+
+    def sensor(self) -> tuple[bool, str] | None:
+        """rig_clear's answer on the restricted sensor, None when none is configured."""
+        if not self._read:
+            self._sensor, self._read = (rig_clear(self.env, self.entity) if self.entity else None), True
+        return self._sensor
+
+    def clear(self) -> bool:
+        """Whether the sensor read off."""
+        return bool((sensor := self.sensor()) and sensor[0])
+
+    def watching(self, decision: Decision) -> contextlib.AbstractContextManager[None]:
+        """The watcher `decision` arms, counting the gate's read of off as one since the run started; none for
+        unrestricted work, which reads no sensor."""
+        if not decision.watch:
+            return watching(self.env, None)
+        return watching(self.env, self.entity, self.clear())
+
+    def decide(self, restricted: bool) -> Decision:
+        return authorize(
+            restricted=restricted, sensor=self.sensor() if restricted else None, approved=approved(), tty=tty()
+        )
+
+    def withholds(self, journal: Journal) -> str | None:
+        """Why an orphan may not be put back now, None when it may: restoring it is restricted unless the profile
+        that left it is pre-authorized (the journal from before per-run journals never is), and then it needs the
+        sensor off or the approval; never a prompt."""
+        name = journal.get("profile")
+        if journal.path.name != LEGACY_NAME and pre_authorized(name, self.env):
+            return None
+        if authorize(restricted=True, sensor=self.sensor(), approved=approved(), tty=False).go:
+            return None
+        return f"profile {name or 'unknown'}, restricted"
+
+
+def pre_authorized(name: str | None, env: dict) -> bool:
+    """Whether the profile `name` is pre-authorized; one that is gone or won't load isn't."""
+    if not name:
+        return False
+    try:
+        return Profile.load(choose_profile(name, env)).pre_authorized
+    except SystemExit, ValueError, OSError:
+        return False
 
 
 def ask(question: str, prompt: Callable[[str], str] = input) -> bool:
@@ -418,26 +499,26 @@ def _get(url: str, token: str) -> Any:
         return json.load(response)
 
 
-def gate_sensor(env: dict, profile: Profile) -> str | None:
-    """The sensor that gates the profile's runs: RIG_BLOCKER_ENTITY, or None when it is unset or the profile is
-    pre-authorized."""
-    return None if profile.pre_authorized else env.get("RIG_BLOCKER_ENTITY") or None
+def restricted_sensor(env: dict) -> str | None:
+    """The restricted sensor, RIG_RESTRICTED_ENTITY, or RIG_BLOCKER_ENTITY, its old name, saying so; None when
+    neither is set."""
+    if entity := env.get(SENSOR_KEY):
+        return entity
+    if entity := env.get("RIG_BLOCKER_ENTITY"):
+        print(f"RIG_BLOCKER_ENTITY in .env.rig is now {SENSOR_KEY}; rename it.")
+        return entity
+    return None
 
 
-def clearance(env: dict, blocker: str | None) -> tuple[bool, str] | None:
-    """rig_clear's answer on `blocker`, or None when nothing gates the run."""
-    return rig_clear(env, blocker) if blocker else None
-
-
-def rig_clear(env: dict, blocker: str) -> tuple[bool, str]:
-    """Whether the rig may run unattended: `blocker`, an HA binary_sensor the household defines, is off. Any other
+def rig_clear(env: dict, sensor: str) -> tuple[bool, str]:
+    """Whether the rig may run unattended: `sensor`, an HA binary_sensor the household defines, is off. Any other
     state, the entity missing or HA unreachable is not clear. The reason says which."""
-    state, reason = read_blocker(env, blocker)
+    state, reason = read_sensor(env, sensor)
     return state == "off", reason
 
 
-def read_blocker(env: dict, entity: str) -> tuple[str | None, str]:
-    """The blocker's state, None when it can't be read, and a reason naming it. A state HA restored at startup, before
+def read_sensor(env: dict, entity: str) -> tuple[str | None, str]:
+    """The sensor's state, None when it can't be read, and a reason naming it. A state HA restored at startup, before
     the template has evaluated, counts as unread."""
     try:
         reply = _get(f"{env.get('HA_URL', '')}/api/states/{entity}", env.get("HA_TOKEN", ""))
@@ -452,33 +533,36 @@ def read_blocker(env: dict, entity: str) -> tuple[str | None, str]:
 
 
 @contextlib.contextmanager
-def watching(env: dict, blocker: str | None, interval: float = CLEAR_POLL_S) -> Iterator[None]:
-    """Read `blocker` (None: nothing to watch) every `interval` seconds and, on two reads in a row of a state in
-    BLOCKED, stop the run with one SIGTERM, which the run's own handlers take from there: the deploy finishes, the
-    tests put the devices back, a probe's command gets it. A read that fails neither counts nor breaks the run of
-    two: HA is unreachable during a deploy's restart."""
+def watching(env: dict, sensor: str | None, clear: bool = False, interval: float = CLEAR_POLL_S) -> Iterator[None]:
+    """Read `sensor` (None: nothing to watch) every `interval` seconds and, when it turns on, stop the run with one
+    SIGTERM, which the run's own handlers take from there: the deploy finishes, the tests put the devices back, a
+    probe's command gets it. Turning on is two reads in a row of a state in BLOCKED after a read of off since the run
+    started (`clear`: the gate's read was off), so a run approved while it was on keeps going until it goes off and
+    on again. A read that fails neither counts nor breaks the run of two: HA is unreachable during a deploy's
+    restart."""
     stop = threading.Event()
 
     def watch() -> None:
-        misses = 0
+        misses, seen_off = 0, clear
         while not stop.wait(interval):
-            state, reason = read_blocker(env, blocker)
+            state, reason = read_sensor(env, sensor)
             if state is None:
                 continue
+            seen_off |= state == "off"
             misses = misses + 1 if state in BLOCKED else 0
-            if misses == 2:
+            if misses >= 2 and seen_off:
                 print(f"\nRig authorization revoked ({reason}); aborting.", flush=True)
                 os.kill(os.getpid(), signal.SIGTERM)
                 return
 
     thread = threading.Thread(target=watch, name="rig-clear", daemon=True)
-    if blocker:
+    if sensor:
         thread.start()
     try:
         yield
     finally:
         stop.set()
-        if blocker:
+        if sensor:
             thread.join()
 
 
@@ -573,7 +657,6 @@ class Setup:
     roaming: bool
     grouping: bool
     deploy: Deploy | None = None  # None for --check, which deploys nothing
-    gated: str | None = None  # gate_sensor's answer: the sensor that gates the run, if the profile is gated
     progress: Progress | None = None  # None where no record is possible: --no-deploy, --roam-check, --check
     selected: list[Suite] = field(default_factory=list)  # every suite selected; `suites` are those with cases left
 
@@ -624,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--deploy-only",
         action="store_true",
-        help="deploy this checkout's branch and restart HA, then release the locks: no profile, no tests, no gate",
+        help="deploy this checkout's branch and restart HA, then release the locks: no profile, no tests; unrestricted",
     )
     parser.add_argument(
         "--for",
@@ -657,8 +740,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with a command after --: hold HA exclusively, for a probe that restarts HA or reloads DeviceSide",
     )
+    parser.add_argument(
+        "--visual",
+        choices=("none", "profile"),
+        help="with a command after --: declare what the probe changes that anyone could see, making it unrestricted: "
+        "none, nothing; profile, only what the pre-authorized profile covers. Left out, the probe is restricted",
+    )
     args = parser.parse_args(argv)
     args.command = command
+    approved()  # refuses the variable it replaced, in every mode
     if args.deploy_only and (
         args.profile
         or args.no_deploy
@@ -685,10 +775,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
         parser.error("--debug-logs is for a run or --roam-check")
+    if args.visual and not command:
+        parser.error("--visual is for a probe, with a command after --")
     if bool(args.hold or args.exclusive) != bool(command):
         parser.error("--hold and --exclusive need a command after --, and a command after -- needs one of them")
-    if command and (args.dry_run or args.check or args.recover or args.roam_check or args.wait_free):
-        parser.error("a command after -- can't be combined with a run's modes")
+    if command and (args.check or args.recover or args.roam_check or args.wait_free):
+        parser.error("a command after -- can't be combined with a run's modes; --dry-run only says if it may go")
     args.dry_run |= args.check  # like a dry run, it holds no lock and changes nothing
     colors = args.wait_free or not args.dry_run  # a dry run holds no lock and sets no color, so it clears none
     try:
@@ -746,7 +838,7 @@ def wait_or_run(args: argparse.Namespace) -> int:
 
 def deploy_only(args: argparse.Namespace, directory: Path) -> int:
     """--deploy-only: deploy the checkout's branch and wait for HA, holding HA exclusively with no integration, then
-    let go. No profile, journal or baseline: it moves no device, so it has no gate and leaves orphans to the next
+    let go. No profile, journal or baseline: it moves no device, so it is unrestricted and leaves orphans to the next
     test run's replay."""
     env = load_env()
     if not (env.get("HA_URL") and env.get("HA_TOKEN")):
@@ -800,7 +892,6 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     )
     if args.check:
         return setup
-    setup.gated = gate_sensor(env, profile)
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
     if directory is not None and not args.no_deploy and not args.roam_check:
         resume(args, setup, directory)
@@ -934,8 +1025,10 @@ def orphaned(setup: Setup, directory: Path) -> Claim:
 def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, directory: Path) -> int:
     """The run, once its locks are held (none for a dry run or --check)."""
     env, profile, registry, suites = setup.env, setup.profile, setup.registry, setup.suites
-    gated = setup.gated
-    homes = replay(env, held, directory)
+    authority = Authority(env)
+    # Decided before the replay, which restores only what the rig may put back now; asked after the plan.
+    decision = None if args.check else authority.decide(restricted=not profile.pre_authorized)
+    homes = replay(env, held, directory, authority)
     if args.check:
         return check_only(setup, args.keyword, homes, claim(args, setup), directory)
     deploy = setup.deploy
@@ -956,18 +1049,16 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
         ready = not asyncio.run(check_devices(env, suites, profile, registry, args.keyword, setup.roaming, homes))
         if not (ready or args.dry_run):
             raise SystemExit("Power or fix the devices above, then run again.")
-    clear = clearance(env, gated)
-    if clear is not None:
-        print(f"Rig {'clear' if clear[0] else 'not clear'}: {clear[1]}.")
+    whose = f"profile {profile.name} is pre-authorized. " if profile.pre_authorized else ""
+    print(f"Authorization: {whose}{decision.reason}")
     if args.dry_run:
         return 0
-    if not gate(clear):
-        print("Not approved; nothing changed.")
+    if not proceed(decision):
         return 1
 
     journal = Journal.start(directory)
     try:
-        with watching(env, gated if clear and clear[0] else None):
+        with authority.watching(decision):
             return run_approved(args, setup, held, journal, deploying, lanes)
     finally:
         journal.release()
@@ -1101,28 +1192,38 @@ def check_only(setup: Setup, keyword: str | None, homes: set[str], wanted: Claim
 def hold_command(args: argparse.Namespace, directory: Path) -> int:
     """A command after --: run a probe holding the integrations --hold names and HA, shared or with --exclusive
     exclusively, with the profile's automations for them paused, and return its exit code. No case journal: the
-    probe puts back what it changes. Its only gate is the clear one (probe_approved), checked before and after the
-    wait for the locks. A journal is started all the same, never written, as the name the baseline knows the probe
-    by, alive while it runs: a crashed probe's pauses are pruned like a run's."""
+    probe puts back what it changes. It is restricted unless --visual declares it isn't (probe_restricted), and a
+    restricted probe that went because the sensor was off is checked again once it holds its locks. A journal is
+    started all the same, never written, as the name the baseline knows the probe by, alive while it runs: a crashed
+    probe's pauses are pruned like a run's."""
     wanted = Claim("exclusive" if args.exclusive else "shared", frozenset(args.hold or ()))
     env = load_env()
     try:
         profile = Profile.load(choose_profile(args.profile, env))
     except ValueError as err:
         raise SystemExit(f"Fix the profile: {err}") from err
-    pausing, gated = profile.paused_by(wanted.integrations), gate_sensor(env, profile)
+    restricted = probe_restricted(args.visual, profile)
+    pausing = profile.paused_by(wanted.integrations)
     if pausing and not (env.get("HA_URL") and env.get("HA_TOKEN")):
         raise SystemExit("HA_URL and HA_TOKEN must be set in .env.rig to pause the profile's automations")
     holder = f"{git('rev-parse', '--abbrev-ref', 'HEAD')} (probe: {shlex.join(args.command)})"
-    if not probe_approved(clear := clearance(env, gated)):
+    authority = Authority(env)
+    decision = authority.decide(restricted)
+    if args.dry_run:
+        print(f"Authorization: {decision.reason}")
+        return 0
+    if not proceed(decision):
         return 1
     with locks.hold(wanted, holder, directory):
-        # a probe may wait long for its locks; a human who let it past a rig not clear isn't asked again
-        if clear and clear[0] and not probe_approved(clear := clearance(env, gated)):
-            return 1
+        # A probe may wait long for its locks. One that went on the sensor alone reads it again; one approved, by the
+        # variable or a human's yes, isn't asked again.
+        if restricted and authority.clear() and not approved():
+            authority = Authority(env)
+            if not authority.clear() and not proceed(decision := authority.decide(restricted)):
+                return 1
         journal = Journal.start(directory)
         try:
-            with watching(env, gated if clear and clear[0] else None):
+            with authority.watching(decision):
                 if pausing:
                     asyncio.run(with_ha(env, lambda ha: Baseline.of(ha, journal, "pause").pause(pausing)))
                 return run_command(args.command)
@@ -1132,13 +1233,16 @@ def hold_command(args: argparse.Namespace, directory: Path) -> int:
             journal.release()
 
 
-def probe_approved(clear: tuple[bool, str] | None, prompt: Callable[[str], str] = input) -> bool:
-    """A probe's gate, its only one: through while the rig is clear or nothing gates on it (`clear` None), else only
-    on a human's yes; an agent's call, which has no terminal, is refused."""
-    if clear is None or clear[0] or ask(f"Rig not clear ({clear[1]}). Proceed anyway?", prompt):
-        return True
-    print("Not approved; nothing changed.")
-    return False
+def probe_restricted(visual: str | None, profile: Profile) -> bool:
+    """Whether a probe is restricted work, as its --visual declares, trusted: `none` moves nothing anyone sees,
+    `profile` only what the pre-authorized profile covers; undeclared, it is restricted."""
+    if visual == "none":
+        return False
+    if visual == "profile":
+        if not profile.pre_authorized:
+            raise SystemExit(f"--visual profile needs a pre-authorized profile, and {profile.name} isn't")
+        return False
+    return True
 
 
 async def with_ha(env: dict, call: Callable[[HAClient], Awaitable[None]]) -> None:
@@ -1167,8 +1271,11 @@ def run_command(command: list[str]) -> int:
 
 def recover_all(args: argparse.Namespace, directory: Path) -> int:
     """--recover: hold everything, so no run is going, and put back what every aborted run left, the journal from
-    before per-run journals included, then what the baseline holds for no live run. Nonzero while something is left."""
+    before per-run journals included, then what the baseline holds for no live run. Each orphan is restricted work
+    unless the profile that left it is pre-authorized (Authority.withholds); one the rig may not put back now is left,
+    and named. Nonzero while something is left."""
     env = load_env()
+    authority = Authority(env)
     held = None if args.dry_run else locks.hold(Claim.everything(), git("rev-parse", "--abbrev-ref", "HEAD"), directory)
     try:
         with end_on_signals():
@@ -1178,7 +1285,9 @@ def recover_all(args: argparse.Namespace, directory: Path) -> int:
                 print("No aborted run left anything to put back.")
             for journal in journals:
                 try:
-                    if args.dry_run:
+                    if why := authority.withholds(journal):
+                        print(left_restricted(journal, why))
+                    elif args.dry_run:
                         print(f"An aborted run left changes in {journal.path}; --recover puts them back.")
                     else:
                         asyncio.run(recover_rig(env, journal))
@@ -1319,15 +1428,27 @@ def run_tests(rig_run: Coroutine[Any, Any, int], aborted: Callable[[], int] | No
     return 1
 
 
-def replay(env: dict, held: Held | None, directory: Path) -> set[str]:
-    """Put back what aborted runs left changed, each whose claim the run holds (needs); say how to put back the rest.
-    A dry run holds nothing, so it only says what is there. Returns the roaming bulbs whose Hue home the home record
-    or a journal from before it still holds, which a run puts back."""
+def left_restricted(journal: Journal, why: str) -> str:
+    return f"left {journal.path} ({why}): sensor off or {APPROVAL}=1 restores it"
+
+
+def replay(env: dict, held: Held | None, directory: Path, authority: Authority) -> set[str]:
+    """Put back what aborted runs left changed, each whose claim the run holds (needs) and that `authority` lets the
+    rig put back now; say how to put back the rest. A run whose claim covers an orphan it may not put back stops
+    here, before its gate, rather than test on top of what that orphan left. A dry run holds nothing, so it only says
+    what is there. Returns the roaming bulbs whose Hue home the home record or a journal from before it still holds,
+    which a run puts back."""
     homes: set[str] = set()
+    stale: list[str] = []
     for orphan in orphans(directory):
         try:
             needed = needs(orphan)
-            if held is not None and held.claim.covers(needed):
+            covered = held is None or held.claim.covers(needed)
+            if covered and (why := authority.withholds(orphan)):
+                print(left_restricted(orphan, why))
+                if held is not None:
+                    stale.append(str(orphan.path))
+            elif held is not None and covered:
                 asyncio.run(recover_rig(env, orphan))
             elif held is None:
                 print(f"An aborted run left changes in {orphan.path}; a run holding {needed} puts them back first.")
@@ -1340,6 +1461,11 @@ def replay(env: dict, held: Held | None, directory: Path) -> set[str]:
             homes |= set((orphan.get("roam") or {}).get("home", {}))
         finally:
             orphan.release()
+    if stale:
+        raise SystemExit(
+            f"This run's locks cover what {', '.join(stale)} left changed, which it may not put back now, so it would "
+            "test on top of it. Not started."
+        )
     if legacy := Journal(directory / LEGACY_NAME):
         print(f"A run from before per-run journals left changes in {legacy.path}; --recover puts them back.")
         homes |= set((legacy.get("roam") or {}).get("home", {}))

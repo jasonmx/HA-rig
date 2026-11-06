@@ -568,6 +568,9 @@ def test_needs_is_the_orphans_integrations_and_ha_exclusive_for_options(tmp_path
     assert Claim("shared", Claim.everything().integrations) in needed
 
 
+MAY = SimpleNamespace(withholds=lambda journal: None)  # an authority that lets the rig put back every orphan
+
+
 def replayed(tmp_path, monkeypatch, held: Claim | None) -> list[str]:
     """Run replay holding `held`; the journals recover_rig was asked to put back."""
     put_back: list[str] = []
@@ -578,7 +581,7 @@ def replayed(tmp_path, monkeypatch, held: Claim | None) -> list[str]:
 
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
     holding = locks.Held(held) if held is not None else None
-    rig.replay({}, holding, tmp_path)
+    rig.replay({}, holding, tmp_path, MAY)
     return put_back
 
 
@@ -601,7 +604,7 @@ def test_an_orphan_with_options_needs_ha_exclusive(tmp_path, monkeypatch):
 
 def test_a_dry_run_only_says_what_orphans_there_are(tmp_path, monkeypatch, capsys):
     path = orphan(tmp_path, claim("hue"), cases=CASE, roam={"home": {"light.lab_a": {}}})
-    assert rig.replay({}, None, tmp_path) == {"light.lab_a"}
+    assert rig.replay({}, None, tmp_path, MAY) == {"light.lab_a"}
     assert f"left changes in {path}; a run holding HA shared, hue puts them back first" in capsys.readouterr().out
     assert path.exists()
 
@@ -621,6 +624,10 @@ def test_the_legacy_journal_is_replayed_only_by_recover(tmp_path, monkeypatch, c
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
+    monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1  # restricted, whatever its profile
+    assert put_back == []
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
     assert put_back == [LEGACY_NAME]
 
@@ -637,6 +644,7 @@ def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypat
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
+    monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
     args = argparse.Namespace(dry_run=True)
     assert rig.recover_all(args, tmp_path) == 1
     assert put_back == []
@@ -645,6 +653,110 @@ def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypat
     assert sorted(put_back) == names
     assert rig.recover_all(args, tmp_path) == 0
     assert "No aborted run left anything to put back." in capsys.readouterr().out
+
+
+def profiles(tmp_path, monkeypatch, **pre_authorized: bool) -> None:
+    """Profiles by name, each pre-authorized or not, for choose_profile to find; any other name is gone."""
+    paths = {}
+    for name, trusted in pre_authorized.items():
+        paths[name] = tmp_path / "profiles" / f"{name}.yaml"
+        paths[name].parent.mkdir(exist_ok=True)
+        paths[name].write_text(f"pre_authorized: {str(trusted).lower()}\nshelly:\n")
+
+    def choose_profile(name, env):
+        if name not in paths:
+            raise SystemExit(f"No profile {name!r}")
+        return paths[name]
+
+    monkeypatch.setattr(rig, "choose_profile", choose_profile)
+
+
+SENSOR_ON = {"HA_URL": "http://ha", "HA_TOKEN": "t", "RIG_RESTRICTED_ENTITY": "binary_sensor.rig_restricted"}
+
+
+def sensor_reads(monkeypatch, state: str) -> list[str]:
+    reads: list[str] = []
+    monkeypatch.setattr(rig, "_get", lambda url, token: reads.append(url) or {"state": state})
+    return reads
+
+
+def labelled(directory: Path, profile: str | None, integration: str) -> Path:
+    path = orphan(directory, claim(integration), cases=CASE)
+    Journal(path).update(profile=profile)
+    return path
+
+
+def recovering(tmp_path, monkeypatch, env: dict) -> list[str]:
+    put_back: list[str] = []
+
+    async def recover_rig(env, journal):
+        put_back.append(journal.path.name)
+        journal.clear(*journal.sections)
+
+    monkeypatch.setattr(rig, "recover_rig", recover_rig)
+    monkeypatch.setattr(rig, "load_env", lambda: env)
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
+    return put_back
+
+
+def test_recover_puts_back_a_pre_authorized_profiles_orphan_with_the_sensor_on_and_names_the_rest(
+    tmp_path, monkeypatch, capsys
+):
+    profiles(tmp_path, monkeypatch, bench=True, house=False)
+    bench = labelled(tmp_path, "bench", "hue")
+    house = labelled(tmp_path, "house", "zha")
+    gone = labelled(tmp_path, "gone", "shelly")
+    unnamed = labelled(tmp_path, None, "zwave")
+    reads = sensor_reads(monkeypatch, "on")
+    put_back = recovering(tmp_path, monkeypatch, SENSOR_ON)
+
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert put_back == [bench.name]
+    assert len(reads) == 1  # read once, for the first restricted orphan
+    out = capsys.readouterr().out
+    assert f"left {house} (profile house, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it" in out
+    assert f"left {gone} (profile gone, restricted)" in out
+    assert f"left {unnamed} (profile unknown, restricted)" in out
+
+    sensor_reads(monkeypatch, "off")
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
+    assert sorted(put_back) == sorted([bench.name, house.name, gone.name, unnamed.name])
+
+
+def test_recover_reads_no_sensor_when_every_orphan_is_pre_authorized(tmp_path, monkeypatch):
+    profiles(tmp_path, monkeypatch, bench=True)
+    labelled(tmp_path, "bench", "hue")
+    monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
+    recovering(tmp_path, monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
+
+
+def test_an_approval_lets_recover_put_back_a_restricted_orphan_with_the_sensor_on(tmp_path, monkeypatch):
+    profiles(tmp_path, monkeypatch, house=False)
+    house = labelled(tmp_path, "house", "zha")
+    sensor_reads(monkeypatch, "on")
+    put_back = recovering(tmp_path, monkeypatch, SENSOR_ON)
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
+    assert put_back == [house.name]
+
+
+def test_a_run_whose_claim_covers_a_restricted_orphan_it_may_not_put_back_stops(tmp_path, monkeypatch, capsys):
+    profiles(tmp_path, monkeypatch, bench=True, house=False)
+    bench = labelled(tmp_path, "bench", "hue")
+    house = labelled(tmp_path, "house", "zha")
+    labelled(tmp_path, "house", "zwave")  # not covered: left for a run that holds it
+    sensor_reads(monkeypatch, "on")
+    put_back = recovering(tmp_path, monkeypatch, SENSOR_ON)
+
+    with pytest.raises(SystemExit, match=f"This run's locks cover what {house} left changed"):
+        rig.replay(SENSOR_ON, locks.Held(claim("hue", "zha")), tmp_path, rig.Authority(SENSOR_ON))
+    assert put_back == [bench.name]
+    assert f"left {house} (profile house, restricted)" in capsys.readouterr().out
+
+    put_back.clear()
+    rig.replay(SENSOR_ON, locks.Held(claim("hue", "shelly")), tmp_path, rig.Authority(SENSOR_ON))
+    assert put_back == []  # what it covers is put back already, and the rest it doesn't hold
 
 
 # --- main -----------------------------------------------------------------------------------------------------
@@ -833,7 +945,7 @@ def test_hold_pauses_its_integrations_entries_while_the_command_runs(probe, monk
     seen = []
     monkeypatch.setattr(rig, "run_command", lambda command: seen.append(dict(ProbeHA.states)) or 3)
 
-    assert rig.main(["--hold", "zha", "--", "true"]) == 3  # zha pauses only the `all` list
+    assert rig.main(["--hold", "zha", "--visual", "none", "--", "true"]) == 3  # zha pauses only the `all` list
 
     assert seen == [{"automation.motion": "off", "switch.al": "on"}]
     assert ProbeHA.calls == [("turn_off", "automation.motion"), ("turn_on", "automation.motion")]
@@ -844,7 +956,7 @@ def test_hold_pauses_its_integrations_entries_while_the_command_runs(probe, monk
 def test_hold_pausing_nothing_needs_no_ha(probe, monkeypatch):
     (probe / "lab.yaml").write_text("shelly:\n")
     monkeypatch.setattr(rig, "load_env", dict)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
+    assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
 
 
 def test_recover_puts_back_a_crashed_probes_pauses_with_no_orphan_journal(probe, capsys):
@@ -863,7 +975,7 @@ def test_recover_puts_back_a_crashed_probes_pauses_with_no_orphan_journal(probe,
 def test_hold_pausing_needs_ha_settings(probe, monkeypatch):
     monkeypatch.setattr(rig, "load_env", dict)
     with pytest.raises(SystemExit, match="HA_URL and HA_TOKEN must be set"):
-        rig.main(["--hold", "hue", "--", "true"])
+        rig.main(["--hold", "hue", "--visual", "none", "--", "true"])
 
 
 def test_hold_runs_the_command_holding_its_claim_and_returns_its_exit_code(probe):
@@ -872,7 +984,7 @@ def test_hold_runs_the_command_holding_its_claim_and_returns_its_exit_code(probe
         f"handle = open({str(probe / locks.integration_lock('hue'))!r})\n"
         "try:\n    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n    sys.exit(7)\n"
     )
-    assert rig.main(["--hold", "hue", "--", sys.executable, "-c", script]) == 7  # it found hue held
+    assert rig.main(["--hold", "hue", "--visual", "none", "--", sys.executable, "-c", script]) == 7  # it found hue held
     assert "wt/probe (probe: " in (probe / locks.integration_lock("hue")).read_text()
     assert not blocked(probe, claim("hue", ha="exclusive"))  # all let go
 
@@ -880,103 +992,147 @@ def test_hold_runs_the_command_holding_its_claim_and_returns_its_exit_code(probe
 def test_hold_exclusive_holds_ha_exclusively(probe, monkeypatch):
     seen = []
     monkeypatch.setattr(rig, "run_command", lambda command: seen.append(blocked(probe, SHARED)) or 0)
-    assert rig.main(["--exclusive", "--", "true"]) == 0
+    assert rig.main(["--exclusive", "--visual", "none", "--", "true"]) == 0
     assert seen == [True]
 
 
 def test_hold_passes_a_signal_on_and_lets_go(probe):
     script = "import os, signal, time\nos.kill(os.getppid(), signal.SIGTERM)\ntime.sleep(30)\n"
-    assert rig.main(["--hold", "zha", "--", sys.executable, "-c", script]) == 128 + signal.SIGTERM
+    assert rig.main(["--hold", "zha", "--visual", "none", "--", sys.executable, "-c", script]) == 128 + signal.SIGTERM
     assert not blocked(probe, claim("zha", ha="exclusive"))
 
 
-def clear_states(monkeypatch, *states):
-    """The rig's clear sensor reads each state in turn; the probe's env names it."""
-    env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok", "RIG_BLOCKER_ENTITY": "binary_sensor.rig_blocker"}
+PROBE_SENSOR = "binary_sensor.rig_restricted"
+
+
+def clear_states(monkeypatch, *states, key=True):
+    """The restricted sensor reads each state in turn (none left: the read fails the test); the probe's env names it
+    unless `key` is false. Returns the watcher's arming, one entry per probe that got that far."""
+    env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok", **({"RIG_RESTRICTED_ENTITY": PROBE_SENSOR} if key else {})}
     monkeypatch.setattr(rig, "load_env", lambda: env)
     replies = [{"state": state} for state in states]
-    monkeypatch.setattr(rig, "_get", lambda url, token: replies.pop(0))
+    monkeypatch.setattr(rig, "_get", lambda url, token: replies.pop(0) if replies else pytest.fail("read again"))
     seen = []
     monkeypatch.setattr(
-        rig, "watching", lambda env, blocker: seen.append(blocker is not None) or contextlib.nullcontext()
+        rig, "watching", lambda env, sensor, clear=False: seen.append(sensor is not None) or contextlib.nullcontext()
     )
     return seen
 
 
-def test_an_agents_probe_is_refused_while_the_rig_is_not_clear(probe, monkeypatch, capsys):
+def at_a_terminal(monkeypatch, answer: str) -> None:
+    monkeypatch.setattr(rig, "tty", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
+
+
+def test_an_agents_probe_is_refused_while_the_sensor_is_on(probe, monkeypatch, capsys):
     clear_states(monkeypatch, "on")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(""))  # an agent's call: no terminal
     monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
     assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert "Rig not clear (binary_sensor.rig_blocker is on). Proceed anyway?" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"Restricted, and {PROBE_SENSOR} is on. Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)" in out
+    assert "Proceed" not in out  # an agent is never asked
     assert ProbeHA.calls == []
     assert not blocked(probe, claim("hue", ha="exclusive"))
 
 
+def test_an_agents_probe_without_the_key_is_refused(probe, monkeypatch, capsys):
+    clear_states(monkeypatch, key=False)
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    assert rig.main(["--hold", "hue", "--", "true"]) == 1
+    assert "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig." in capsys.readouterr().out
+
+
 def test_a_probe_is_checked_again_once_it_holds_its_locks(probe, monkeypatch):
     clear_states(monkeypatch, "off", "on")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
     monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
     assert rig.main(["--hold", "hue", "--", "true"]) == 1
     assert ProbeHA.calls == []
 
 
-def test_a_clear_probe_runs_watched(probe, monkeypatch):
+def test_a_clear_probe_runs_watched_and_unasked(probe, monkeypatch, capsys):
     armed = clear_states(monkeypatch, "off", "off")
+    monkeypatch.setattr(rig, "run_command", lambda command: 0)
+    assert rig.main(["--hold", "hue", "--", "true"]) == 0
+    assert armed == [True]
+    assert "Proceed" not in capsys.readouterr().out
+
+
+def test_a_probe_a_human_let_past_is_watched_and_not_asked_again(probe, monkeypatch, capsys):
+    armed = clear_states(monkeypatch, "on")  # one read: a second would fail the test
+    at_a_terminal(monkeypatch, "y\n")
+    monkeypatch.setattr(rig, "run_command", lambda command: 0)
+    assert rig.main(["--hold", "hue", "--", "true"]) == 0
+    assert armed == [True]
+    assert f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]" in capsys.readouterr().out
+
+
+def test_an_approved_probe_goes_while_the_sensor_is_on_and_is_watched(probe, monkeypatch):
+    armed = clear_states(monkeypatch, "on")
+    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
     monkeypatch.setattr(rig, "run_command", lambda command: 0)
     assert rig.main(["--hold", "hue", "--", "true"]) == 0
     assert armed == [True]
 
 
-def test_a_probe_a_human_let_past_is_not_watched_or_asked_again(probe, monkeypatch):
-    armed = clear_states(monkeypatch, "on")
-    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+def test_a_non_visual_probe_reads_no_sensor_and_is_not_watched(probe, monkeypatch):
+    armed = clear_states(monkeypatch)  # no reply: reading the sensor would fail
     monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
+    assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
     assert armed == [False]
 
 
-def test_a_probe_without_the_key_is_not_watched(probe, monkeypatch):
-    seen = []
-    monkeypatch.setattr(
-        rig, "watching", lambda env, blocker: seen.append(blocker is not None) or contextlib.nullcontext()
-    )
+def test_a_visual_profile_probe_needs_a_pre_authorized_profile(probe, monkeypatch):
+    armed = clear_states(monkeypatch)
     monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert seen == [False]
-
-
-def test_a_pre_authorized_probe_is_not_watched_or_asked(probe, monkeypatch):
-    seen = clear_states(monkeypatch)  # no reply: reading the sensor would fail
+    with pytest.raises(SystemExit, match="--visual profile needs a pre-authorized profile, and lab isn't"):
+        rig.main(["--hold", "hue", "--visual", "profile", "--", "true"])
     with (probe / "lab.yaml").open("a") as profile:
         profile.write("pre_authorized: true\n")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert seen == [False]
+    assert rig.main(["--hold", "hue", "--visual", "profile", "--", "true"]) == 0
+    assert armed == [False]
 
 
-def test_a_probe_aborts_when_the_rig_stops_being_clear(probe, monkeypatch, capsys):
+def test_an_undeclared_probe_on_a_pre_authorized_profile_is_still_restricted(probe, monkeypatch, capsys):
+    clear_states(monkeypatch, "on")
+    with (probe / "lab.yaml").open("a") as profile:
+        profile.write("pre_authorized: true\n")
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    assert rig.main(["--hold", "hue", "--", "true"]) == 1
+    assert f"Restricted, and {PROBE_SENSOR} is on." in capsys.readouterr().out
+
+
+def test_a_probes_dry_run_says_whether_it_may_go_and_runs_nothing(probe, monkeypatch, capsys):
+    clear_states(monkeypatch, "on")
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    monkeypatch.setattr(rig.locks, "hold", lambda *args, **kwargs: pytest.fail("took a lock"))
+    assert rig.main(["--hold", "hue", "--dry-run", "--", "true"]) == 0
+    assert rig.main(["--hold", "hue", "--visual", "none", "--dry-run", "--", "true"]) == 0
+    out = capsys.readouterr().out
+    assert f"Authorization: Restricted, and {PROBE_SENSOR} is on." in out
+    assert "Authorization: Unrestricted." in out
+
+
+def test_a_probe_aborts_when_the_sensor_turns_on(probe, monkeypatch, capsys):
     states = ["off", "off", "on", "on"]  # the gate's two reads, then the watcher's
-    env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok", "RIG_BLOCKER_ENTITY": "binary_sensor.rig_blocker"}
+    env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok", "RIG_RESTRICTED_ENTITY": PROBE_SENSOR}
     monkeypatch.setattr(rig, "load_env", lambda: env)
     monkeypatch.setattr(rig, "_get", lambda url, token: {"state": states.pop(0) if states else "on"})
     watching = rig.watching
     monkeypatch.setattr(
-        rig, "watching", lambda env, blocker: watching(env, blocker, interval=0.2)
+        rig, "watching", lambda env, sensor, clear=False: watching(env, sensor, clear, interval=0.2)
     )  # time to start the command
 
     assert (
         rig.main(["--hold", "hue", "--", sys.executable, "-c", "import time; time.sleep(30)"]) == 128 + signal.SIGTERM
     )
-    assert "Rig authorization revoked (binary_sensor.rig_blocker is on); aborting." in capsys.readouterr().out
+    assert f"Rig authorization revoked ({PROBE_SENSOR} is on); aborting." in capsys.readouterr().out
     assert ProbeHA.states == {"automation.motion": "on", "switch.al": "on"}  # resumed
     assert not blocked(probe, claim("hue", ha="exclusive"))
 
 
 def test_hold_reports_a_command_it_cannot_run(probe):
     with pytest.raises(SystemExit, match="Can't run /no/such/probe"):
-        rig.main(["--hold", "hue", "--", "/no/such/probe"])
+        rig.main(["--hold", "hue", "--visual", "none", "--", "/no/such/probe"])
 
 
 @pytest.mark.parametrize(
@@ -985,7 +1141,9 @@ def test_hold_reports_a_command_it_cannot_run(probe):
         ["--hold", "hue"],
         ["--", "true"],
         ["--exclusive"],
-        ["--hold", "hue", "--dry-run", "--", "true"],
+        ["--hold", "hue", "--check", "--", "true"],
+        ["--visual", "none", "--dry-run"],
+        ["--hold", "hue", "--visual", "all", "--", "true"],
         ["--hold", "nowhere", "--", "true"],
     ],
 )
@@ -1028,7 +1186,7 @@ def test_a_resumed_run_claims_what_its_orphans_need_and_puts_them_back(tmp_path,
     held = resumed(tmp_path, monkeypatch, "house")
     with held:
         assert held.claim == claim("shelly", "zha")
-        rig.replay({}, held, tmp_path)
+        rig.replay({}, held, tmp_path, MAY)
     assert orphans(tmp_path) == []
 
 
