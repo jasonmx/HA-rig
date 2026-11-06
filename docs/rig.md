@@ -30,7 +30,7 @@ rig kept them before it moved: move them here.
 
 ## Before a run
 
-The run first checks every device it will use: each fixed entity must be in HA and available, and each roaming bulb
+The run first checks every device it will use: each fixed entity must be in HA, on its integration and available, and each roaming bulb
 must be on a network. An unpowered device stops the run there, before anything moves. `--check` runs only this
 check, taking no lock and deploying nothing, so you can power devices up until it passes; it names the runs holding
 locks it would need.
