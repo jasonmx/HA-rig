@@ -61,6 +61,11 @@ Before the gate, and alone with --check, the run checks every phase's devices at
 use is in HA and available, and each roaming bulb is on a network. Without that, a device left unpowered stops the run
 only when its phase comes, after the bulbs have moved.
 
+A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the blocker or
+--for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished across
+sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish.
+A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
+
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
 in HA's log that no step file expects is listed and fails the run. --debug-logs also raises HA's
@@ -68,7 +73,7 @@ DeviceSide and the run's integrations, and Z2M, to debug for the run, keeps the 
 baseline, so --recover too).
 
 Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] [--serial] [--debug-logs]
-                      [--integration KEY ...] [--action NAME ...] [-k TEXT]
+                      [--integration KEY ...] [--action NAME ...] [-k TEXT] [--for DURATION] [--fresh]
        scripts/rig.py [--profile NAME] --check [--integration KEY ...] [--action NAME ...] [-k TEXT]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
@@ -83,6 +88,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -93,7 +99,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +121,7 @@ from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
 from ha_rig.client import HAClient, HAError  # noqa: E402
 from ha_rig.engine import (  # noqa: E402
     ADMIN_INTEGRATIONS,
+    Budget,
     Case,
     EntryOptions,
     RunResult,
@@ -128,6 +135,7 @@ from ha_rig.engine import (  # noqa: E402
     load_step_files,
     merge,
     run,
+    unfinished,
     write_records,
     write_report,
 )
@@ -145,6 +153,7 @@ from ha_rig.profile import (  # noqa: E402
     load_env,
     profile_paths,
 )
+from ha_rig.progress import Done, Key, Progress  # noqa: E402
 from ha_rig.roam import BLUETOOTH_RESET, NAMES, Bulb, GroupError, Roamer, RoamError  # noqa: E402
 from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
 from ha_rig.runlogs import DebugLevels, RunLogs, ha_domains  # noqa: E402
@@ -164,6 +173,7 @@ CLEAR_POLL_S = 15
 BLOCKED = ("on", "unknown", "unavailable")  # blocker states that revoke a run; an unread one doesn't
 # Run reports go where the OS clears old files: they are for reviewing a run, not for keeping.
 REPORT_DIR = Path(tempfile.gettempdir()) / "deviceside-rig"
+RESUMABLE = 75  # EX_TEMPFAIL: the run stopped with cases left, saved to resume from
 
 
 class Aborted(Exception):
@@ -291,20 +301,34 @@ def estimate(
     restarting: bool,
     roaming: bool = False,
     profile: Profile | None = None,
+    done: Done | None = None,
+    resumed: Profile | None = None,
 ) -> int:
     """Each suite's rig_seconds, summed; with `profile`, the run is in lanes, so each suite's seconds are split by its
-    share of cases in the lanes, which count as the longest lane, and the phases, which add up."""
+    share of cases in the lanes, which count as the longest lane, and the phases, which add up. Resuming (`done`, with
+    the profile as `resumed`), each suite's seconds shrink to its share of cases left."""
     runnable = [suite for suite in suites if registry.adapter(suite.action, suite.integration)]
+    profile_for = profile or resumed
+
+    def seconds_left(suite: Suite) -> float:
+        if not done or profile_for is None:
+            return float(suite.file.rig_seconds)
+        suite_cases = cases(suite, profile_for, None, adapters_for(suite, registry))
+        unfinished_cases = [c for c in suite_cases if (suite.integration, suite.name, c.id) not in done]
+        return suite.file.rig_seconds * (len(unfinished_cases) / len(suite_cases) if suite_cases else 1.0)
+
     if profile is None:
-        seconds = float(sum(suite.file.rig_seconds for suite in runnable))
+        seconds = float(sum(seconds_left(suite) for suite in runnable))
     else:
         lanes: dict[str, float] = {}
         seconds = 0.0
         for suite in runnable:
             suite_cases = cases(suite, profile, None, adapters_for(suite, registry))
+            if done:
+                suite_cases = [c for c in suite_cases if (suite.integration, suite.name, c.id) not in done]
             share = sum(in_head(case, profile) for case in suite_cases) / len(suite_cases) if suite_cases else 0.0
-            lanes[suite.integration] = lanes.get(suite.integration, 0.0) + suite.file.rig_seconds * share
-            seconds += suite.file.rig_seconds * (1 - share)
+            lanes[suite.integration] = lanes.get(suite.integration, 0.0) + seconds_left(suite) * share
+            seconds += seconds_left(suite) * (1 - share)
         seconds += max(lanes.values(), default=0.0)
     return round(seconds) + (RESTART_ESTIMATE_S if restarting else 0) + (ROAM_ESTIMATE_S if roaming else 0)
 
@@ -548,6 +572,12 @@ class Setup:
     grouping: bool
     deploy: Deploy | None = None  # None for --check, which deploys nothing
     gated: str | None = None  # gate_sensor's answer: the sensor that gates the run, if the profile is gated
+    progress: Progress | None = None  # None where no record is possible: --no-deploy, --roam-check, --check
+    selected: list[Suite] = field(default_factory=list)  # every suite selected; `suites` are those with cases left
+
+    @property
+    def done(self) -> Done:
+        return self.progress.done() if self.progress is not None else {}
 
     def deploying(self, args: argparse.Namespace) -> bool:
         """--roam-check deploys nothing, as it runs none of our code."""
@@ -594,6 +624,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="deploy this checkout's branch and restart HA, then release the locks: no profile, no tests, no gate",
     )
+    parser.add_argument(
+        "--for",
+        dest="budget",
+        type=duration,
+        metavar="DURATION",
+        help="start no case after this long (30m, 90s, 1h15m), let in-flight ones finish, put back and exit 75; "
+        "rerun the same way to resume",
+    )
+    parser.add_argument("--fresh", action="store_true", help="drop a stopped run's saved progress and start over")
     parser.add_argument("--recover", action="store_true", help="put back what an aborted run left changed, then stop")
     parser.add_argument(
         "--roam-check", action="store_true", help="move the profile's roam bulbs to every network and home, no suites"
@@ -634,8 +673,12 @@ def main(argv: list[str] | None = None) -> int:
         or args.serial
         or args.unattended
         or args.debug_logs
+        or args.budget
+        or args.fresh
     ):
         parser.error("--deploy-only takes only --dry-run: it needs no profile and runs no test")
+    if (args.budget or args.fresh) and (args.check or args.roam_check or args.recover or args.wait_free or command):
+        parser.error("--for and --fresh are for a test run")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
@@ -652,6 +695,17 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if colors:
             locks.workspace_color(None)
+
+
+def duration(text: str) -> float:
+    """--for's DURATION, in seconds: hours, minutes and seconds, each optional, in that order (1h15m, 30m, 90s)."""
+    match = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", text.strip())
+    if not text.strip() or match is None or not any(match.groups()):
+        raise argparse.ArgumentTypeError(f"not a duration: {text!r} (try 30m, 90s or 1h15m)")
+    hours, minutes, seconds = (int(group or 0) for group in match.groups())
+    if not (total := hours * 3600 + minutes * 60 + seconds):
+        raise argparse.ArgumentTypeError("the duration must be more than 0")
+    return float(total)
 
 
 def leave(signum: int, _frame: object) -> None:
@@ -675,7 +729,7 @@ def wait_or_run(args: argparse.Namespace) -> int:
         return recover_all(args, directory)
     if args.deploy_only:
         return deploy_only(args, directory)
-    setup = prepare(args)
+    setup = prepare(args, directory)
     held = None if args.dry_run else take(args, setup, directory)  # waits for the locks, then holds them until exit
     try:
         with end_on_signals():
@@ -722,8 +776,10 @@ def deploy_only(args: argparse.Namespace, directory: Path) -> int:
     return 0
 
 
-def prepare(args: argparse.Namespace) -> Setup:
-    """The profile, the suites, and, but for --check, the deploy state; a run also checks .env.rig has its tokens."""
+def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
+    """The profile, the suites, and, but for --check, the deploy state and the saved progress (in `directory`, for a
+    run that can write records), which narrows the suites to those with cases left; a run also checks .env.rig has
+    its tokens."""
     env = load_env()
     try:
         profile = Profile.load(choose_profile(args.profile, env))
@@ -738,14 +794,62 @@ def prepare(args: argparse.Namespace) -> Setup:
         suites,
         roams(profile, suites, args.roam_check),
         makes_groups(profile, suites, args.roam_check),
+        selected=suites,
     )
     if args.check:
         return setup
     setup.gated = gate_sensor(env, profile)
-    if not args.dry_run:
-        check_tokens(env, suites, registry, setup.roaming or setup.grouping)
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
+    if directory is not None and not args.no_deploy and not args.roam_check:
+        resume(args, setup, directory)
+    if not args.dry_run:
+        check_tokens(env, setup.suites, registry, setup.roaming or setup.grouping)
     return setup
+
+
+def resume(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
+    """Load the progress a stopped run saved under this run's key, and plan only the suites with cases left: what the
+    run holds, moves, checks and estimates shrinks with it. A progress with nothing left starts fresh."""
+    key = Key(
+        setup.profile.name,
+        setup.deploy.local_tree,
+        tuple(sorted(args.integration or ())),
+        tuple(sorted(args.action or ())),
+        args.keyword,
+        args.serial,
+        args.unattended,
+    )
+    progress = Progress.load(directory, setup.profile.name, setup.deploy.branch, key, fresh=args.fresh)
+    if progress:
+        progress.check_ha(ha_version(setup.env))
+    setup.progress = progress
+    if not (done := progress.done()):
+        return
+    remaining = [suite for suite in setup.selected if left(suite, setup.profile, setup.registry, done, args.keyword)]
+    if not remaining:
+        print("The saved progress has every case finished; starting fresh.")
+        progress.reset()
+        return
+    setup.suites = remaining
+    setup.roaming = roams(setup.profile, remaining)
+    setup.grouping = makes_groups(setup.profile, remaining)
+
+
+def left(suite: Suite, profile: Profile, registry: AdapterRegistry, done: Done, keyword: str | None) -> list[str]:
+    """The ids of the suite's cases (those `keyword` keeps) with no saved result; none for a suite with no adapter,
+    which runs nothing."""
+    if not runnable_suite(suite, registry):
+        return []
+    suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry))
+    return [case.id for case in suite_cases if (suite.integration, suite.name, case.id) not in done]
+
+
+def ha_version(env: dict) -> str | None:
+    """HA's version, or None when HA can't be read."""
+    try:
+        return _get(f"{env.get('HA_URL', '').rstrip('/')}/api/config", env.get("HA_TOKEN", "")).get("version")
+    except urllib.error.URLError, OSError, ValueError, TypeError, AttributeError:
+        return None
 
 
 def claim(args: argparse.Namespace, setup: Setup) -> Claim:
@@ -765,7 +869,11 @@ def claim(args: argparse.Namespace, setup: Setup) -> Claim:
 
 def runnable(setup: Setup) -> list[Suite]:
     """The suites with an adapter, which the run can run."""
-    return [suite for suite in setup.suites if setup.registry.adapter(suite.action, suite.integration)]
+    return [suite for suite in setup.suites if runnable_suite(suite, setup.registry)]
+
+
+def runnable_suite(suite: Suite, registry: AdapterRegistry) -> bool:
+    return registry.adapter(suite.action, suite.integration) is not None
 
 
 def reloads(setup: Setup) -> bool:
@@ -797,6 +905,11 @@ def take(args: argparse.Namespace, setup: Setup, directory: Path) -> Held:
         print(f"HA changed while this run waited; it now needs {needed}.")
         held = locks.hold(held.claim | needed, holder, directory)
         setup.deploy = deploy_state(setup.env.get("RIG_STATUS_CMD", ""))
+    if setup.progress is not None and setup.deploy.local_tree != setup.progress.key.tree:
+        if setup.progress:  # its saved cases ran on the tree the plan read
+            held.close()
+            raise SystemExit("The checkout's integration tree changed while this run waited; run it again.")
+        setup.progress.key = replace(setup.progress.key, tree=setup.deploy.local_tree)
     return held
 
 
@@ -810,7 +923,10 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
     deploy = setup.deploy
     deploying = setup.deploying(args)
     lanes = not args.serial
-    print_plan(profile, suites, registry, args.keyword, deploy, deploying, setup.roaming, setup.grouping, lanes)
+    print_plan(
+        profile, suites, registry, args.keyword, deploy, deploying, setup.roaming, setup.grouping, lanes, setup.done
+    )
+    print_resume(args, setup)
     print(f"Locks: {held.claim if held else claim(args, setup)}")
     if args.debug_logs:
         print_debug_logs(env, suites, setup.roaming)
@@ -837,6 +953,20 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
             return run_approved(args, setup, held, journal, deploying, lanes)
     finally:
         journal.release()
+
+
+def print_resume(args: argparse.Namespace, setup: Setup) -> None:
+    """How many cases a resumed run has done, and the budget."""
+    if done := setup.done:
+        registry = setup.registry
+        total = sum(
+            len(cases(suite, setup.profile, args.keyword, adapters_for(suite, registry)))
+            for suite in setup.selected
+            if runnable_suite(suite, registry)
+        )
+        print(f"Resuming: {len(done)} of {total} cases done (started {setup.progress.started}); --fresh to start over.")
+    if args.budget:
+        print(f"Budget: no case starts after {args.budget:.0f} s; rerun the same way to resume.")
 
 
 def print_debug_logs(env: dict, suites: list[Suite], roaming: bool) -> None:
@@ -884,6 +1014,7 @@ def run_approved(
 ) -> int:
     """The deploy and the tests, once the run is approved."""
     env, deploy = setup.env, setup.deploy
+    budget = Budget(time.monotonic() + args.budget) if args.budget else None
     deploy_and_wait(env, deploy.branch if deploying else None)
     if deploying and not reloads(setup):  # HA is back, and nothing left restarts or reloads it under other runs
         held.share_ha()
@@ -903,8 +1034,37 @@ def run_approved(
             lanes=lanes,
             claim=held.claim,
             debug_logs=args.debug_logs,
-        )
+            progress=setup.progress,
+            selected=setup.selected,
+            budget=budget,
+        ),
+        aborted=aborted(setup, args.keyword) if setup.progress is not None else None,
     )
+
+
+def aborted(setup: Setup, keyword: str | None) -> Callable[[], int]:
+    """What a run with progress does once a signal stopped it: the report of every case saved so far (no records,
+    as it is unfinished), what is left, and RESUMABLE."""
+
+    def stop() -> int:
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        report_saved(setup.progress, setup.selected, setup.registry, setup.profile, keyword, stamp)
+        return say_stopped(setup.progress, setup.selected, setup.profile, setup.registry, "aborted")
+
+    return stop
+
+
+def say_stopped(
+    progress: Progress | None, selected: list[Suite], profile: Profile, registry: AdapterRegistry, why: str
+) -> int:
+    """Say the run stopped with cases left, and how to resume; RESUMABLE."""
+    if progress is None:
+        print(f"Stopped ({why}); with --no-deploy nothing is saved to resume from.")
+        return RESUMABLE
+    done = progress.done()
+    count = sum(len(left(suite, profile, registry, done, progress.key.keyword)) for suite in selected)
+    print(f"Stopped with {count} cases left ({why}); rerun the same command to resume.")
+    return RESUMABLE
 
 
 def check_only(setup: Setup, keyword: str | None, homes: set[str], wanted: Claim, directory: Path) -> int:
@@ -1127,12 +1287,15 @@ def common_dir() -> Path:
     return Path(git("rev-parse", "--path-format=absolute", "--git-common-dir"))
 
 
-def run_tests(rig_run: Coroutine[Any, Any, int]) -> int:
-    """Run run_rig, ending on one line rather than a traceback when a signal stops it (cancel_on_signals)."""
+def run_tests(rig_run: Coroutine[Any, Any, int], aborted: Callable[[], int] | None = None) -> int:
+    """Run run_rig, ending on one line rather than a traceback when a signal stops it (cancel_on_signals); `aborted`
+    then says what is left and gives the exit code, for a run that saved its progress."""
     try:
         return asyncio.run(rig_run)
     except asyncio.CancelledError:
         print("Aborted.")
+        if aborted is not None:
+            return aborted()
     except KeyboardInterrupt:  # a second Ctrl-C, mid-cleanup
         print("Aborted before putting everything back; the next run puts back the rest.")
     return 1
@@ -1210,15 +1373,16 @@ def print_plan(
     roaming: bool = False,
     grouping: bool = False,
     lanes: bool = False,
+    done: Done | None = None,
 ) -> None:
     print_profile(profile)
-    print_phases(profile, suites, registry, keyword, roaming, grouping, lanes)
+    print_phases(profile, suites, registry, keyword, roaming, grouping, lanes, done)
     print_deploy(deploy, deploying)
     if not deploying and deploy.needed and suites:
         print("Deploy: skipped (--no-deploy); tests run the deployed tree, not this checkout, and write no record")
     elif not deploying:
         print("Deploy: not needed, no restart")
-    seconds = estimate(suites, registry, deploying, roaming, profile if lanes else None)
+    seconds = estimate(suites, registry, deploying, roaming, profile if lanes else None, done, profile)
     print(f"Estimated duration: {seconds} s. These are in-use household devices; they will visibly change state.")
 
 
@@ -1260,9 +1424,10 @@ def print_phases(
     roaming: bool,
     grouping: bool = False,
     lanes: bool = False,
+    done: Done | None = None,
 ) -> None:
     """The moves, if the run roams, and the groups it makes, then the lanes' cases, then each phase's adapters and
-    the cases left for it."""
+    the cases left for it; resuming, only the cases `done` has no result for."""
     if not roaming and profile.roam:
         where = " or ".join(NAMES[network] for network in away(profile)) or "another network"
         print(f"Roaming: none, as no {where} suite runs; the bulbs stay on {NAMES[profile.roam_home]}.")
@@ -1280,11 +1445,11 @@ def print_phases(
     if lanes and suites:
         print("In parallel, one lane per integration:")
         for integration, lane in lane_order(suites).items():
-            lines = plan_lines(lane, profile, registry, keyword, head(profile))
+            lines = plan_lines(lane, profile, registry, keyword, unfinished(done, head(profile)))
             print(f"  {integration}:" + ("" if lines else " none"))
             for line in lines:
                 print(f"    {line}")
-    only = tail(profile) if lanes else None
+    only = unfinished(done, tail(profile) if lanes else None)
     for network, phase_suites in phases(suites, profile, roaming):
         print(f"Adapters on {NAMES[network]}:" if network else "Adapters:")
         for line in plan_lines(phase_suites, profile, registry, keyword, only) or ["none"]:
@@ -1306,6 +1471,9 @@ async def run_rig(
     claim: Claim | None = None,
     debug_logs: bool = False,
     logs_dir: Path | None = None,
+    progress: Progress | None = None,
+    selected: list[Suite] | None = None,
+    budget: Budget | None = None,
 ) -> int:
     """Run the step files, in lanes first when `lanes` (run_phases), then phase by phase, moving the roaming bulbs
     before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then write a
@@ -1316,8 +1484,13 @@ async def run_rig(
     after a clean run, kept and printed after any other, or with `debug_logs`, which also runs HA's DeviceSide and the
     run's integrations, and Z2M, at debug until the run ends (RunLogs, DebugLevels). A DeviceSide warning or error in
     HA's log that no step file's `expected_log` matches is printed and fails the run; the records already written
-    stand."""
+    stand.
+
+    With `progress`, each case is saved as it finishes and the report joins the saved results of every `selected`
+    suite to this session's, so a suite finished across sessions writes its record; the progress goes once nothing
+    is left. A run the `budget` stopped says what is left and returns RESUMABLE, unless the logs flag it."""
     lab = roaming or grouping
+    selected = selected or suites
     if lab and not (env.get("HA_ADMIN_TOKEN") and env.get("HUE_BRIDGE_HOST") and env.get("HUE_APP_KEY")):
         raise SystemExit("Roaming needs HA_ADMIN_TOKEN, HUE_BRIDGE_HOST and HUE_APP_KEY in .env.rig")
     cancel_on_signals()
@@ -1360,9 +1533,12 @@ async def run_rig(
                 results,
                 lanes,
                 reloads=claim is None or claim.ha == "exclusive",  # holding HA shared, it may not reload the entry
+                progress=progress,
+                budget=budget,
             )
+            result, touched = joined(result, progress, selected)
             if suites:
-                await report(result, ha, registry, commit, profile, keyword, stamp)
+                await report(result, ha, registry, commit, profile, keyword, stamp, touched)
         except RoamError as err:
             # A move that failed isn't retried here; the journal keeps where the bulbs are, for --recover. The groups
             # made so far still go, and after a group that couldn't be made, the bulbs still go home. The phases that
@@ -1382,10 +1558,39 @@ async def run_rig(
             await ha.close()
             if admin:
                 await admin.close()
-        code = 1 if result.failed or not home else 0
+        code = end_code(result, home, budget, progress, selected, profile, registry)
     finally:
         flagged = logs.settle(code == 0)
     return 1 if flagged else code
+
+
+def joined(
+    result: RunResult, progress: Progress | None, selected: list[Suite]
+) -> tuple[RunResult, set[tuple[str, str]]]:
+    """The run's result to report, and the suites this session ran a case of: with progress, every case saved for the
+    `selected` suites, this session's among them."""
+    touched = {(part.suite.integration, part.suite.name) for part in result.suites}
+    return (result if progress is None else RunResult(progress.parts(selected))), touched
+
+
+def end_code(
+    result: RunResult,
+    home: bool,
+    budget: Budget | None,
+    progress: Progress | None,
+    selected: list[Suite],
+    profile: Profile,
+    registry: AdapterRegistry,
+) -> int:
+    """The run's exit code before its logs are read: 1 with the bulbs not home; RESUMABLE when the budget left cases,
+    saying so; else 1 on a failure, saved or new, and 0 otherwise, the progress done with."""
+    if not home:
+        return 1
+    if budget is not None and budget.stopped:
+        return say_stopped(progress, selected, profile, registry, "budget spent")
+    if progress is not None:
+        progress.discard()
+    return 1 if result.failed else 0
 
 
 async def begin_logging(
@@ -1424,6 +1629,8 @@ async def run_phases(
     results: list[SuiteResult] | None = None,
     lanes: bool = False,
     reloads: bool = True,
+    progress: Progress | None = None,
+    budget: Budget | None = None,
 ) -> RunResult:
     """Each phase: move the bulbs there and make its groups, wait for its targets, then run its cases, automated then
     observed. `pause` pauses the automations, once, after the first phase's targets are all there. A run with no suites
@@ -1431,7 +1638,10 @@ async def run_phases(
     `results` as it finishes, so a caller keeps them when a later move raises.
 
     With `lanes`, the first phase starts with every suite's in_head cases, one lane per integration side by side,
-    with the bulbs at home; the phases then run only the rest (see merge)."""
+    with the bulbs at home; the phases then run only the rest (see merge).
+
+    With `progress`, the cases it has saved are left out and each new one is saved as it finishes. Once the `budget`
+    is spent no phase starts, so the bulbs move no further than home."""
     results = [] if results is None else results
     lanes = lanes and bool(suites)
     ask = None if unattended else input
@@ -1444,13 +1654,14 @@ async def run_phases(
         "journal": journal,
         "busy": {},
         "reloads": reloads,
+        "budget": budget,
+        **saving(progress),
     }
     only = tail(profile) if lanes else None
     for number, (network, phase_suites) in enumerate(phases(suites, profile, roaming)):
-        if roamer is not None:
-            await roamer.go(network or roamer.home_network)  # removes the last phase's groups first
-            if phase_suites or not suites:
-                await roamer.make_groups(network or roamer.home_network)
+        if budget is not None and budget.stops():
+            break
+        await visit(roamer, network, bool(phase_suites or not suites))
         if number == 0 and lanes:
             await wait_for_targets(ha, suites, profile, registry, keyword, only=head(profile))
         if phase_suites:
@@ -1464,6 +1675,23 @@ async def run_phases(
     if roamer is not None:
         await roamer.go(roamer.home_network)
     return RunResult(results)
+
+
+async def visit(roamer: Roamer | None, network: str | None, grouping: bool) -> None:
+    """Move the bulbs to the phase's network (None: home), removing the last phase's groups first, and make this
+    one's when `grouping`."""
+    if roamer is None:
+        return
+    await roamer.go(network or roamer.home_network)
+    if grouping:
+        await roamer.make_groups(network or roamer.home_network)
+
+
+def saving(progress: Progress | None) -> dict:
+    """run's arguments that leave out the cases `progress` saved and save each new one."""
+    if progress is None:
+        return {}
+    return {"done": progress.done(), "on_result": progress.record, "on_facts": progress.facts}
 
 
 async def report_ran(
@@ -1493,9 +1721,11 @@ async def report(
     profile: Profile,
     keyword: str | None = None,
     stamp: str | None = None,
+    touched: set[tuple[str, str]] | None = None,
 ):
     """The run's report, and a test record per fully passed suite when a commit names the tree HA ran. A suite whose
-    cases ran in parts (lanes, then phases) is joined first; one missing a part writes no record."""
+    cases ran in parts (lanes, then phases, or sessions) is joined first; one missing a part writes no record. With
+    `touched`, only the suites with a case in this session write theirs: an earlier session wrote the rest."""
     result = merge(result.suites, profile, registry, keyword)
     stamp = stamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
@@ -1504,8 +1734,29 @@ async def report(
         return
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
     today = datetime.date.today().isoformat()
+    if touched is not None:
+        result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     for path in await write_records(result, registry, TEST_RECORDS_DIR, today, source, profile.name):
         print(f"Wrote {path.relative_to(REPO)}; review the diff before committing it.")
+
+
+def report_saved(
+    progress: Progress | None,
+    suites: list[Suite],
+    registry: AdapterRegistry,
+    profile: Profile,
+    keyword: str | None,
+    stamp: str,
+) -> None:
+    """The report of every case `progress` has saved, after a signal: no records, as the run is unfinished. Nothing
+    without progress."""
+    if progress is None:
+        return
+    try:
+        result = merge(progress.parts(suites), profile, registry, keyword)
+        print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
+    except Exception as err:  # noqa: BLE001 - the report is a courtesy; the devices go back regardless
+        print(f"The cases that ran couldn't be reported: {err}")
 
 
 async def leave_lab(roamer: Roamer | None, stopped: Roamer | None) -> bool:

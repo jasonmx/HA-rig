@@ -479,8 +479,10 @@ def approved(tmp_path, monkeypatch, run, deploying: bool) -> tuple[locks.Held, l
     monkeypatch.setattr(rig, "deploy_and_wait", lambda _env, _branch: None)
     monkeypatch.setattr(rig, "tested_commit", lambda *_args: "c1")
     monkeypatch.setattr(rig, "run_rig", lambda *_args, claim, **_kw: given.append(claim))
-    monkeypatch.setattr(rig, "run_tests", lambda _run: 0)
-    rig.run_approved(SimpleNamespace(keyword=None, unattended=True, debug_logs=False), run, held, None, deploying, True)
+    monkeypatch.setattr(rig, "run_tests", lambda _run, aborted=None: 0)
+    rig.run_approved(
+        SimpleNamespace(keyword=None, unattended=True, debug_logs=False, budget=None), run, held, None, deploying, True
+    )
     return held, given
 
 
@@ -652,7 +654,7 @@ def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypat
 def no_run(monkeypatch, tmp_path):
     """main with nothing to read or run: prepare, take and run_held stubbed."""
     monkeypatch.setattr(rig, "common_dir", lambda: tmp_path)
-    monkeypatch.setattr(rig, "prepare", lambda args: None)
+    monkeypatch.setattr(rig, "prepare", lambda args, directory=None: None)
     monkeypatch.setattr(rig, "take", lambda args, setup, directory: locks.Held(SHARED))
     monkeypatch.setattr(rig, "run_held", lambda *_args: 0)
 
