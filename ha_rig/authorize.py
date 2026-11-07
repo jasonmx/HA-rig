@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 APPROVAL = "DEVICE_SIDE_RIG_RESTRICTED"
 SENSOR_KEY = "RIG_RESTRICTED_ENTITY"
+OLD_SENSOR_KEY = "RIG_BLOCKER_ENTITY"  # still read
 
 
 @dataclass(frozen=True, slots=True)

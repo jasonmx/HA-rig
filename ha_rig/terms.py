@@ -1,25 +1,30 @@
 """The household's terms, for deviceside's household check, which can't read the rig's files itself.
 
 deviceside is public, so its check (scripts/check_private.py there) refuses a commit naming a household detail. Its
-own blocklist is .private-terms; the rig adds every profile's entity IDs and roaming bulbs' IEEEs, and .env.rig's HA
-host and token, by writing them to TERMS_FILE in the deviceside main checkout on each rig invocation, as
-`term<TAB>label` lines. A secret is reported by its label, never echoed. `python -m ha_rig.terms` writes it by hand,
-after editing a profile.
+own blocklist is .private-terms; the rig adds every profile's entity IDs and roaming bulbs' IEEEs, and from .env.rig
+the HA and Hue bridge hosts, both tokens and the Hue app key, and the restricted sensor's entity ID, by writing them
+to TERMS_FILE in the deviceside main checkout on each rig invocation, as `term<TAB>label` lines. A secret is reported
+by its label, never echoed. `python -m ha_rig.terms` writes it by hand, after editing a profile.
 """
 
+import ipaddress
 import os
 import sys
 from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .authorize import OLD_SENSOR_KEY, SENSOR_KEY
 from .profile import ENV_FILE, Profile, colon_ieee, load_env, profile_paths
 from .target import deviceside_repo, main_checkout
 
 TERMS_FILE = ".private-terms.rig"  # gitignored in deviceside
 HEADER = "# Written by ha-rig on each run (python -m ha_rig.terms); edits are overwritten.\n"
-# Hosts the docs and examples name on purpose.
-GENERIC_HOSTS = frozenset({"homeassistant.local", "localhost", "127.0.0.1"})
+# Hosts and the restricted sensor's name that the docs, examples and tests name on purpose.
+GENERIC_TERMS = frozenset({"homeassistant.local", "localhost", "127.0.0.1", "binary_sensor.rig_restricted"})
+SECRET_KEYS = ("HA_TOKEN", "HA_ADMIN_TOKEN", "HUE_APP_KEY")  # reported as "<KEY> from .env.rig"
+# The restricted sensor, under its name and its old one: reported as itself, like a profile's entities.
+ENTITY_KEYS = (SENSOR_KEY, OLD_SENSOR_KEY)
 
 
 def private_terms(profiles: Iterable[Path] | None = None, env_file: Path = ENV_FILE) -> dict[str, str]:
@@ -30,11 +35,21 @@ def private_terms(profiles: Iterable[Path] | None = None, env_file: Path = ENV_F
             terms.update((entity_id.lower(), entity_id) for entity_id in profile_entities(Profile.load(path)))
     if env_file.exists():
         env = load_env(env_file)
-        if (host := urlparse(env.get("HA_URL", "")).hostname) and host not in GENERIC_HOSTS:
-            terms[host.lower()] = host
-        if token := env.get("HA_TOKEN"):
-            terms[token.lower()] = "HA_TOKEN from .env.rig"
+        named = [urlparse(env.get("HA_URL", "")).hostname, hostname(env.get("HUE_BRIDGE_HOST", ""))]
+        named += [env.get(key) for key in ENTITY_KEYS]
+        terms.update((term.lower(), term) for term in filter(None, named) if term.lower() not in GENERIC_TERMS)
+        terms.update((secret.lower(), f"{key} from .env.rig") for key in SECRET_KEYS if (secret := env.get(key)))
     return terms
+
+
+def hostname(host: str) -> str | None:
+    """The host in HUE_BRIDGE_HOST: a bare address (IPv6 too), `host:port`, or a URL."""
+    if not host:
+        return None
+    try:
+        return str(ipaddress.ip_address(host.strip("[]")))
+    except ValueError:
+        return urlparse(host if "://" in host else f"//{host}").hostname
 
 
 def profile_entities(profile: Profile) -> set[str]:
