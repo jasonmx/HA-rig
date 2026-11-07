@@ -63,15 +63,21 @@ integrations', then each other declared network's in that order, each only if it
 each and one straight home at the end. The run holds only the networks it visits. --recover, and the replay before the
 next run's gate, move them home. --roam-check visits every declared network with no suites.
 
-Before the gate, and alone with --check, the run checks every phase's devices at once: each fixed entity its cases
-use is in HA, on its integration and available, and each roaming bulb is on a network. Without that, a device left
-unpowered stops the run only when its phase comes, after the bulbs have moved.
+Before the gate, and alone with --check, the run checks every phase's devices at once: each fixed entity the cases
+it will run use is in HA, on its integration and available, and each roaming bulb is on a network. Without that, a
+device left unpowered stops the run only when its phase comes, after the bulbs have moved. With
+--ignore-unreachables an unavailable fixed entity skips its cases instead (engine.unreachable), and while any is,
+those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
-A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the restricted
-sensor or --for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished
-across sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones
-finish; it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first
-case. A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
+A run builds coverage (ha_rig/coverage.py): it leaves out each selected suite with a fresh record, one citing a commit
+at which the suite's adapter code is unchanged, as deviceside's release gate judges it, or a saved result for every
+case, and runs only the cases of the rest with no saved result. It saves each case as it finishes in the profile's
+ledger (ha_rig/progress.py), keyed by the suite's code, so one that stops part way, on a signal, the restricted sensor
+or --for's budget, exits 75 and, rerun, picks up where it stopped; a suite finished across runs still writes its
+record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish; it counts from approval,
+the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case. A suite with a failed
+case, or saved on another HA version, reruns whole; --fresh reruns the selected suites whatever is recorded or saved.
+--coverage prints each selected suite's coverage at HEAD and the devices its missing cases need, changing nothing.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -81,7 +87,10 @@ baseline, so --recover too).
 
 Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] [--serial] [--debug-logs]
                       [--integration KEY ...] [--action NAME ...] [-k TEXT] [--for DURATION] [--fresh]
-       scripts/rig.py [--profile NAME] --check [--integration KEY ...] [--action NAME ...] [-k TEXT]
+                      [--ignore-unreachables]
+       scripts/rig.py [--profile NAME] --check [--ignore-unreachables] [--integration KEY ...] [--action NAME ...]
+                      [-k TEXT]
+       scripts/rig.py [--profile NAME] --coverage [--unattended] [--integration KEY ...] [--action NAME ...] [-k TEXT]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
@@ -1778,8 +1787,9 @@ async def run_rig(
     stand.
 
     With `progress`, each case is saved as it finishes and the report joins the saved results of every `selected`
-    suite to this session's, so a suite finished across sessions writes its record; the progress goes once nothing
-    is left. A run the `budget` stopped says what is left and returns RESUMABLE, unless the logs flag it."""
+    suite to this session's, so a suite finished across sessions writes its record, which takes it out of the ledger;
+    a suite that failed a case leaves it when the run ends. A run the `budget` stopped says what is left and returns
+    RESUMABLE, unless the logs flag it."""
     lab = roaming or grouping
     selected = selected or suites
     if lab and not (env.get("HA_ADMIN_TOKEN") and env.get("HUE_BRIDGE_HOST") and env.get("HUE_APP_KEY")):
