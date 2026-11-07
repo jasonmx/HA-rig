@@ -34,7 +34,19 @@ rig kept them before it moved: move them here.
 The run first checks every device it will use: each fixed entity must be in HA, on its integration and available, and each roaming bulb
 must be on a network. An unpowered device stops the run there, before anything moves. `--check` runs only this
 check, taking no lock and deploying nothing, so you can power devices up until it passes; it names the runs holding
-locks it would need.
+locks it would need. The check, and the wait for devices after a deploy, cover only the cases the run will run, so a
+run that completes a suite needs only the devices its missing cases use.
+
+**`--ignore-unreachables`** runs what the devices that are up allow, so testing needn't wait for the whole rig. An
+unavailable fixed entity no longer stops the run: its cases skip as `<entity> unreachable`, and so do those of a group
+it is a member of or a device it powers. While anything is offline, cases on a fixed group whose `members` the
+profile doesn't list skip too (`group: members not listed`), and so do those on fixed scenes (`scene: contents
+unknown`), since the rig can't tell which devices they hold. An entity not in HA or on the wrong platform still stops
+the run, and so does an offline roaming bulb, which is checked strictly: a bulb that passes counts as up on every
+network, so the rig-made groups and scenes stay in scope. The plan lists the skipped cases. Unreachable skips are
+never saved, and their suite writes no record until a later run with the devices up runs them: the summary shows it
+as `partial: N of M cases; K unreachable`. An entity that was up at the check and drops out after the deploy's
+restart still stops the run.
 
 ### Lanes
 
@@ -132,26 +144,52 @@ sensor on) is named in a warning, with its journal and profile, and the probe st
 changes that anyone could see: `--visual none`, nothing, or `--visual profile`, only what a pre-authorized profile
 covers. `--dry-run` prints whether it may go and runs nothing.
 
-### Stopping and resuming
+### Coverage, stopping and resuming
 
-A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's parts took, in
-`deviceside-rig-progress/<profile>--<branch>.json` in deviceside's git common dir (`ha_rig/progress.py`). A run that
-stops part way puts everything back as always and exits 75; rerun the same command and it resumes at the first
-unfinished case, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
-done`. So a 45-minute suite completes as 30 minutes one evening and 15 the next.
+The rig treats the full-suite run before an RC as **coverage**: every test has a result at code unchanged since,
+built up over any number of runs. A suite's code is that of each adapter its tests call on its integration (its own
+action's, and those its `call` steps name), as deviceside's `check_release.py --records` defines an adapter's code:
+`core/` and `actions/` don't count, and nor does HA's version. Editing a suite's step file counts too. How:
+`ha_rig/coverage.py`.
+
+A suite is **covered** when its record (`docs/test-records/<integration>/<suite>.md`) cites a commit at which that
+code is unchanged and lists exactly the cases the suite plans now, or when the ledger holds a result for every case
+it plans. A run leaves a selected suite that is covered out, saying `covered (record <date>, commit <c>), skipped`,
+and runs only the cases of the rest with no saved result; a run whose every selected suite is covered says so and
+stops. `--fresh` ignores the records and the saved cases of the selected suites and reruns them whole. The selection
+(`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so a `-k` run's cases count towards their
+suite's record.
+
+**`--coverage`** prints each selected suite's coverage at the checkout's HEAD, as `--check` does the devices: no
+lock, no deploy, nothing written. A suite is `covered`, `partial N/M` with its missing cases and the entities they
+need, or `uncovered`, with its record stale (naming the files changed since) or missing. It ends with the total and
+every device the missing cases need: what to power up for the next run. With no selection it covers the whole
+profile, which is the RC view, and exits 0 only when every suite is covered.
+
+**The ledger.** A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's
+parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). Its
+entries are per suite, keyed by the suite's code at the commit tested, so runs from worktrees with different code
+sit side by side, and a run on one integration never discards another's. A saved case holds while it planned the
+same entities (a profile change reruns it), and a `not observed` one only for an `--unattended` run. An entry goes
+when HA runs another version (a record names one), when its suite's record is written (the record carries it from
+then on), when the run that saved a failure of one of its cases ends (the suite reruns whole, so a record never
+covers up a failure; the run's report keeps it), or after 30 days untouched. `--no-deploy` saves nothing, as it
+writes no record.
+
+A run that stops part way puts everything back as always and exits 75; rerun it and it picks up at the cases with no
+saved result, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
+saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next.
 
 - **`--for DURATION`** (`30m`, `90s`, `1h15m`): once spent, no case or phase starts; cases in flight finish, the bulbs
   go home, and the run exits 75. The window counts from approval, so the deploy's restart eats into it. A move to
   another network starts only with a minute left, and always runs its phase's first device case, whatever the budget.
   Ctrl-C, SIGTERM and the restricted sensor still stop at once: the cases in flight are
   cancelled and rerun on resume.
-- **The key.** Progress holds for one profile, branch, integration tree and selection (`--integration`, `--action`,
-  `-k`, `--serial`, `--unattended`), on one HA version. Any change starts fresh and says why; so does `--fresh`.
-  `--no-deploy` saves nothing, as it writes no record.
-- **Failures are kept.** A finished case is finished: the resumed run reports a saved failure and ends failed.
-  `--fresh` retries it.
 - **Records.** The report joins the saved cases to the session's, so a suite finished across sessions writes its
-  record, dated the finishing session, citing the one tree the key pins. Once every case has a result the file goes.
+  record, dated the finishing session and citing its commit. Its cases may have run at earlier commits, all with the
+  same code for the suite, which is what deviceside's gate checks.
+- **Not covered by a record:** a step-file edit that keeps every case ID. The record doesn't name the step file's
+  version, so such an edit reruns a suite only while it is in the ledger; use `--fresh` to rerun a recorded one.
 
 ## Writing a step file
 
@@ -290,9 +328,11 @@ rig never sets it.
 ### Test records
 
 When every test of an adapter passes, the run writes `docs/test-records/<integration>/<action>.md` in the deviceside
-checkout: the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed or
-partial (`-k`) run writes nothing. The PR that clears an adapter's `experimental` flag cites one, and
+checkout: the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
+suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run
+completes it (Coverage, above). The PR that clears an adapter's `experimental` flag cites one, and
 `cut-release-candidate` and `cut-release` refuse a head where a released adapter's code (its module and the modules it
 imports from its integration package) differs from the commit one of its records cites: deviceside's
 `scripts/check_release.py --records`. The record's Source row names `scripts/rig.py` and the deviceside commit HA
-loaded, never one of this repo's. So every adapter changed since its last run needs a new run before the next RC.
+loaded, never one of this repo's. So every adapter changed since its last run needs a new run before the next RC:
+`scripts/rig.py --coverage` lists them.

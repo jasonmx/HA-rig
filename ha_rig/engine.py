@@ -614,6 +614,9 @@ class Case:
     skip: str | None = None
     observed: bool = False
     members: tuple[str, ...] = ()  # the profile's members for the group role, if it lists them
+    # The skip is for a device that is offline now (--ignore-unreachables), not for the profile: never saved, and the
+    # suite stays incomplete.
+    unreachable: bool = False
 
     @property
     def id(self) -> str:
@@ -663,8 +666,29 @@ def cases(
                     outside = [name for name in lights if members and entities[name] not in members]
                     skip = f"{outside[0]} is not one of the group's members" if outside else None
                     case = Case(suite, test, role, entities, skip, observed, members)
+                    if skip is None and (why := unreachable(case, profile)):
+                        case = replace(case, skip=why, unreachable=True)
                 result.append(case)
     return result
+
+
+def unreachable(case: Case, profile: Profile) -> str | None:
+    """Why the case can't run while some of the profile's fixed entities are offline (--ignore-unreachables), or None:
+    one of its entities, a group member or a supply is offline; or, as the profile can't say which devices they
+    hold, it targets a fixed group whose members it doesn't list, or a fixed scene. Rig-made groups and scenes are
+    made of roaming bulbs, which a run checks strictly, so they stay in scope."""
+    if not profile.offline:
+        return None
+    power = profile.power()
+    devices = [*case.entities.values(), *case.members]
+    if down := next((e for e in [*devices, *filter(None, map(power.get, devices))] if e in profile.offline), None):
+        return f"{down} unreachable"
+    fixed = {name: entity for name, entity in case.entities.items() if entity not in profile.made_entities}
+    if any(name in GROUP_ROLES for name in fixed) and not case.members:
+        return "group: members not listed"
+    if "scene" in fixed:
+        return "scene: contents unknown"
+    return None
 
 
 def in_head(case: Case, profile: Profile) -> bool:
@@ -823,18 +847,33 @@ class CaseResult:
     detail: str = ""
     entity_ids: tuple[str, ...] = ()
     twin: str | None = None  # Case.twin
+    unreachable: bool = False  # Case.unreachable
 
 
 @dataclass(slots=True)
 class SuiteResult:
     suite: Suite
     cases: list[CaseResult]
-    # False when -k left tests out: a partial run writes no record.
+    # False when a case it plans has no result, or only an unreachable skip: a partial run writes no record.
     complete: bool
     # Taken when the suite ends, while its bulbs are on the integration under test: a roaming profile moves them
     # home before the records are written. None when the registry lookup failed.
     ha_version: str | None = None
     devices: list[Device] = field(default_factory=list)
+    planned: int | None = None  # how many cases the suite plans, once merge has joined it
+
+    @property
+    def unreachable(self) -> int:
+        return sum(case.unreachable for case in self.cases)
+
+    @property
+    def partial(self) -> str | None:
+        """`partial: N of M cases; K unreachable` for a joined suite short of cases, else None."""
+        if self.planned is None or self.complete:
+            return None
+        ran = sum(not case.unreachable for case in self.cases)
+        unreachable = f"; {self.unreachable} unreachable" if self.unreachable else ""
+        return f"partial: {ran} of {self.planned} cases{unreachable}"
 
     @property
     def recordable(self) -> bool:
@@ -2135,13 +2174,14 @@ class _Run:
 
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
     domain = case.entities[case.role].partition(".")[0] if case.entities else None
-    return CaseResult(case.id, case.role, domain, outcome, detail, twin=case.twin)
+    return CaseResult(case.id, case.role, domain, outcome, detail, twin=case.twin, unreachable=case.unreachable)
 
 
-def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any, keyword: str | None = None) -> RunResult:
-    """One result per suite from its parts, which runs split between them (the lanes, then the phases), in the order
-    the parts first name each suite, its cases in file order. A suite is complete only when every case it plans is
-    there and no keyword left any out: lanes whose phases never ran write no record."""
+def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunResult:
+    """One result per suite from its parts, which runs split between them (the lanes, then the phases, or runs), in
+    the order the parts first name each suite, its cases in file order. A suite is complete only when every case it
+    plans has a result, none of them an unreachable skip: lanes whose phases never ran write no record, and neither
+    does a run that left a case out (-k) until another runs it."""
     joined: dict[tuple[str, str], SuiteResult] = {}
     for part in parts:
         key = (part.suite.integration, part.suite.name)
@@ -2157,7 +2197,8 @@ def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any, keyword
         planned = [case.id for case in cases(result.suite, profile, None, adapters_for(result.suite, registry))]
         position = {case_id: index for index, case_id in enumerate(planned)}
         result.cases.sort(key=lambda case: position.get(case.id, len(position)))
-        result.complete = not keyword and set(planned) <= {case.id for case in result.cases}
+        result.planned = len(planned)
+        result.complete = set(planned) <= {case.id for case in result.cases if not case.unreachable}
     return RunResult(list(joined.values()))
 
 
@@ -2235,7 +2276,10 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
     lines = [f"# {title}"]
     for suite_result in result.suites:
         suite = suite_result.suite
-        lines += ["", f"## {suite.integration} / {suite.name}", "", *table(suite_result, details=True)]
+        lines += ["", f"## {suite.integration} / {suite.name}", ""]
+        if partial := suite_result.partial:
+            lines += [f"{partial}: no record.", ""]
+        lines += table(suite_result, details=True)
     directory.mkdir(parents=True, exist_ok=True)
     path = report_path(directory, title)
     path.write_text("\n".join(lines) + "\n")

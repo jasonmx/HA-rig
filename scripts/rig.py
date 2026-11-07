@@ -63,15 +63,21 @@ integrations', then each other declared network's in that order, each only if it
 each and one straight home at the end. The run holds only the networks it visits. --recover, and the replay before the
 next run's gate, move them home. --roam-check visits every declared network with no suites.
 
-Before the gate, and alone with --check, the run checks every phase's devices at once: each fixed entity its cases
-use is in HA, on its integration and available, and each roaming bulb is on a network. Without that, a device left
-unpowered stops the run only when its phase comes, after the bulbs have moved.
+Before the gate, and alone with --check, the run checks every phase's devices at once: each fixed entity the cases
+it will run use is in HA, on its integration and available, and each roaming bulb is on a network. Without that, a
+device left unpowered stops the run only when its phase comes, after the bulbs have moved. With
+--ignore-unreachables an unavailable fixed entity skips its cases instead (engine.unreachable), and while any is,
+those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
-A run saves each case as it finishes (ha_rig/progress.py), so one that stops part way, on a signal, the restricted
-sensor or --for's budget, exits 75 and, rerun the same way, picks up at the first unfinished case; a suite finished
-across sessions still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones
-finish; it counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first
-case. A changed tree, selection or HA version starts fresh, saying why, and so does --fresh. Finished failures are kept.
+A run builds coverage (ha_rig/coverage.py): it leaves out each selected suite with a fresh record, one citing a commit
+at which the suite's adapter code is unchanged, as deviceside's release gate judges it, or a saved result for every
+case, and runs only the cases of the rest with no saved result. It saves each case as it finishes in the profile's
+ledger (ha_rig/progress.py), keyed by the suite's code, so one that stops part way, on a signal, the restricted sensor
+or --for's budget, exits 75 and, rerun, picks up where it stopped; a suite finished across runs still writes its
+record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish; it counts from approval,
+the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case. A suite with a failed
+case, or saved on another HA version, reruns whole; --fresh reruns the selected suites whatever is recorded or saved.
+--coverage prints each selected suite's coverage at HEAD and the devices its missing cases need, changing nothing.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -81,7 +87,10 @@ baseline, so --recover too).
 
 Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] [--serial] [--debug-logs]
                       [--integration KEY ...] [--action NAME ...] [-k TEXT] [--for DURATION] [--fresh]
-       scripts/rig.py [--profile NAME] --check [--integration KEY ...] [--action NAME ...] [-k TEXT]
+                      [--ignore-unreachables]
+       scripts/rig.py [--profile NAME] --check [--ignore-unreachables] [--integration KEY ...] [--action NAME ...]
+                      [-k TEXT]
+       scripts/rig.py [--profile NAME] --coverage [--unattended] [--integration KEY ...] [--action NAME ...] [-k TEXT]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
@@ -107,7 +116,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -122,12 +131,13 @@ sys.path.append(str(REPO))
 
 from custom_components.deviceside.core.registry import AdapterRegistry  # noqa: E402
 
-from ha_rig import locks, target, terms  # noqa: E402
+from ha_rig import coverage, locks, target, terms  # noqa: E402
 from ha_rig.authorize import APPROVAL, OLD_SENSOR_KEY, SENSOR_KEY, Decision, authorize  # noqa: E402
 from ha_rig.baseline import NAME as BASELINE_NAME  # noqa: E402
 from ha_rig.baseline import Baseline  # noqa: E402
 from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
 from ha_rig.client import HAClient, HAError  # noqa: E402
+from ha_rig.coverage import SuiteCoverage  # noqa: E402
 from ha_rig.engine import (  # noqa: E402
     ADMIN_INTEGRATIONS,
     Budget,
@@ -162,7 +172,7 @@ from ha_rig.profile import (  # noqa: E402
     load_env,
     profile_paths,
 )
-from ha_rig.progress import Done, Key, Progress  # noqa: E402
+from ha_rig.progress import Done, Progress  # noqa: E402
 from ha_rig.roam import BLUETOOTH_RESET, NAMES, Bulb, GroupError, Roamer, RoamError  # noqa: E402
 from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
 from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa: E402
@@ -659,6 +669,8 @@ class Setup:
     deploy: Deploy | None = None  # None for --check, which deploys nothing
     progress: Progress | None = None  # None where no record is possible: --no-deploy, --roam-check, --check
     selected: list[Suite] = field(default_factory=list)  # every suite selected; `suites` are those with cases left
+    coverage: list[SuiteCoverage] = field(default_factory=list)  # each selected suite's, with progress
+    planned_tree: str | None = None  # the integration tree the coverage was planned at
 
     @property
     def done(self) -> Done:
@@ -682,6 +694,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="check the run's devices are in HA, on their integration and available, and where its roaming bulbs "
         "are, then stop: no lock, no deploy, nothing changed",
+    )
+    parser.add_argument(
+        "--coverage",
+        action="store_true",
+        help="say which selected suites are covered at this checkout's HEAD, by a fresh record or saved cases, and "
+        "which devices the missing cases need, then stop: no lock, no deploy, nothing changed",
     )
     parser.add_argument("--no-deploy", action="store_true", help="test whatever HA already runs")
     parser.add_argument(
@@ -717,7 +735,17 @@ def main(argv: list[str] | None = None) -> int:
         help="start no case after this long (30m, 90s, 1h15m), let in-flight ones finish, put back and exit 75; "
         "rerun the same way to resume",
     )
-    parser.add_argument("--fresh", action="store_true", help="drop a stopped run's saved progress and start over")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="rerun the selected suites whole, whatever their records and saved cases say",
+    )
+    parser.add_argument(
+        "--ignore-unreachables",
+        action="store_true",
+        help="run what the devices that are up allow: skip the cases of an unavailable fixed entity, and while any "
+        "is, of fixed groups whose members the profile doesn't list and of fixed scenes; their suites write no record",
+    )
     parser.add_argument("--recover", action="store_true", help="put back what an aborted run left changed, then stop")
     parser.add_argument(
         "--roam-check", action="store_true", help="move the profile's roam bulbs to every network and home, no suites"
@@ -749,10 +777,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.command = command
     approved()  # refuses the variable it replaced, in every mode
+    refuse_conflicts(parser, args, command)
+    args.dry_run |= args.check  # like a dry run, it holds no lock and changes nothing
+    colors = args.wait_free or not args.dry_run  # a dry run holds no lock and sets no color, so it clears none
+    try:
+        with handling_signals(leave):  # a run killed while it waits still clears its color
+            return wait_or_run(args)
+    finally:
+        if colors:
+            locks.workspace_color(None)
+
+
+def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, command: list[str]) -> None:
+    """Stop, through argparse, on flags that don't go together."""
     if args.deploy_only and (
         args.profile
         or args.no_deploy
         or args.check
+        or args.coverage
         or args.roam_check
         or args.recover
         or args.wait_free
@@ -767,12 +809,30 @@ def main(argv: list[str] | None = None) -> int:
         or args.debug_logs
         or args.budget
         or args.fresh
+        or args.ignore_unreachables
     ):
         parser.error("--deploy-only takes only --dry-run: it needs no profile and runs no test")
     if (args.budget or args.fresh) and (args.check or args.roam_check or args.recover or args.wait_free or command):
         parser.error("--for and --fresh are for a test run")
+    if args.ignore_unreachables and (args.roam_check or args.recover or args.wait_free or command):
+        parser.error("--ignore-unreachables is for a test run or --check")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
+    if args.coverage and (
+        args.check
+        or args.dry_run
+        or args.no_deploy
+        or args.roam_check
+        or args.recover
+        or args.wait_free
+        or command
+        or args.serial
+        or args.debug_logs
+        or args.budget
+        or args.fresh
+        or args.ignore_unreachables
+    ):
+        parser.error("--coverage takes only --profile, --integration, --action, -k and --unattended")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
         parser.error("--debug-logs is for a run or --roam-check")
     if args.visual and not command:
@@ -781,14 +841,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--hold and --exclusive need a command after --, and a command after -- needs one of them")
     if command and (args.check or args.recover or args.roam_check or args.wait_free):
         parser.error("a command after -- can't be combined with a run's modes; --dry-run only says if it may go")
-    args.dry_run |= args.check  # like a dry run, it holds no lock and changes nothing
-    colors = args.wait_free or not args.dry_run  # a dry run holds no lock and sets no color, so it clears none
-    try:
-        with handling_signals(leave):  # a run killed while it waits still clears its color
-            return wait_or_run(args)
-    finally:
-        if colors:
-            locks.workspace_color(None)
 
 
 def duration(text: str) -> float:
@@ -823,6 +875,8 @@ def wait_or_run(args: argparse.Namespace) -> int:
         return recover_all(args, directory)
     if args.deploy_only:
         return deploy_only(args, directory)
+    if args.coverage:
+        return coverage_only(args, directory)
     setup = prepare(args, directory)
     held = None if args.dry_run else take(args, setup, directory)  # waits for the locks, then holds them until exit
     try:
@@ -894,35 +948,45 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
         return setup
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
     if directory is not None and not args.no_deploy and not args.roam_check:
-        resume(args, setup, directory)
+        plan_coverage(args, setup, directory)
     if not args.dry_run:
         check_tokens(env, setup.suites, registry, setup.roaming or setup.grouping)
     return setup
 
 
-def resume(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
-    """Load the progress a stopped run saved under this run's key, and plan only the suites with cases left: what the
-    run holds, moves, checks and estimates shrinks with it. A progress with nothing left starts fresh."""
-    key = Key(
-        setup.profile.name,
-        setup.deploy.local_tree,
-        tuple(sorted(args.integration or ())),
-        tuple(sorted(args.action or ())),
-        args.keyword,
-        args.serial,
-        args.unattended,
-    )
-    progress = Progress.load(directory, setup.profile.name, setup.deploy.branch, key, fresh=args.fresh)
-    if progress:
-        progress.check_ha(ha_version(setup.env))
+def plan_coverage(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
+    """Load the ledger and plan only what isn't covered (ha_rig/coverage.py): a selected suite with a fresh record, or
+    a saved result for every case, is left out, and the rest run only their cases with no saved result that holds,
+    those the keyword keeps. What the run holds, moves, checks and estimates shrinks with it. --fresh ignores the
+    records and drops the saved cases of the selected suites."""
+    progress = Progress.load(directory, setup.profile.name)
+    # A record names one HA version, so cases saved on another rerun, and new ones note it from the first.
+    if (version := ha_version(setup.env)) is not None:
+        progress.check_ha(version)
+    elif progress.entries:
+        if not args.dry_run:
+            raise SystemExit("Can't read HA's version, which the saved cases are checked against; is HA up?")
+        print("HA's version can't be read, so saved cases on an older HA may still count below.")
     setup.progress = progress
-    if not (done := progress.done()):
-        return
-    remaining = [suite for suite in setup.selected if left(suite, setup.profile, setup.registry, done, args.keyword)]
-    if not remaining:
-        print("The saved progress has every case finished; starting fresh.")
-        progress.reset()
-        return
+    setup.planned_tree = setup.deploy.local_tree
+    setup.coverage = coverage.of(
+        setup.selected,
+        setup.profile,
+        setup.registry,
+        REPO,
+        setup.deploy.commit,
+        progress,
+        fresh=args.fresh,
+        unattended=args.unattended,
+    )
+    covered = {(c.suite.integration, c.suite.name) for c in setup.coverage if c.covered}
+    done, profile, registry = setup.done, setup.profile, setup.registry
+    remaining = [
+        suite
+        for suite in setup.selected
+        if (suite.integration, suite.name) not in covered
+        and (not runnable_suite(suite, registry) or left(suite, profile, registry, done, args.keyword))
+    ]
     setup.suites = remaining
     setup.roaming = roams(setup.profile, remaining)
     setup.grouping = makes_groups(setup.profile, remaining)
@@ -962,7 +1026,11 @@ def claim(args: argparse.Namespace, setup: Setup) -> Claim:
 
 def runnable(setup: Setup) -> list[Suite]:
     """The suites with an adapter, which the run can run."""
-    return [suite for suite in setup.suites if runnable_suite(suite, setup.registry)]
+    return runnable_suites(setup.suites, setup.registry)
+
+
+def runnable_suites(suites: list[Suite], registry: AdapterRegistry) -> list[Suite]:
+    return [suite for suite in suites if runnable_suite(suite, registry)]
 
 
 def runnable_suite(suite: Suite, registry: AdapterRegistry) -> bool:
@@ -998,11 +1066,9 @@ def take(args: argparse.Namespace, setup: Setup, directory: Path) -> Held:
         print(f"HA changed while this run waited; it now needs {needed}.")
         held = locks.hold(held.claim | needed, holder, directory)
         setup.deploy = deploy_state(setup.env.get("RIG_STATUS_CMD", ""))
-    if setup.progress is not None and setup.deploy.local_tree != setup.progress.key.tree:
-        if setup.progress:  # its saved cases ran on the tree the plan read
-            held.close()
-            raise SystemExit("The checkout's integration tree changed while this run waited; run it again.")
-        setup.progress.key = replace(setup.progress.key, tree=setup.deploy.local_tree)
+    if setup.planned_tree is not None and setup.deploy.local_tree != setup.planned_tree:
+        held.close()  # the coverage was planned, and the suites fingerprinted, at the tree the plan read
+        raise SystemExit("The checkout's integration tree changed while this run waited; run it again.")
     return held
 
 
@@ -1030,7 +1096,7 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
     decision = None if args.check else authority.decide(restricted=not profile.pre_authorized)
     homes = replay(env, held, directory, authority)
     if args.check:
-        return check_only(setup, args.keyword, homes, claim(args, setup), directory)
+        return check_only(setup, args.keyword, homes, claim(args, setup), directory, args.ignore_unreachables)
     deploy = setup.deploy
     deploying = setup.deploying(args)
     lanes = not args.serial
@@ -1038,6 +1104,9 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
         profile, suites, registry, args.keyword, deploy, deploying, setup.roaming, setup.grouping, lanes, setup.done
     )
     print_resume(args, setup)
+    if setup.progress is not None and not runnable(setup):
+        print("Nothing to run: every selected suite is covered (--fresh reruns them).")
+        return 0
     print(f"Locks: {held.claim if held else claim(args, setup)}")
     if args.debug_logs:
         print_debug_logs(env, suites, setup.roaming)
@@ -1046,8 +1115,13 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
         check_deploy(env, deploy)
     if not args.roam_check:
         print()
-        ready = not asyncio.run(check_devices(env, suites, profile, registry, args.keyword, setup.roaming, homes))
-        if not (ready or args.dry_run):
+        problems = asyncio.run(
+            check_devices(
+                env, suites, profile, registry, args.keyword, setup.roaming, homes, setup.done, args.ignore_unreachables
+            )
+        )
+        print_unreachable(suites, profile, registry, args.keyword, setup.done)
+        if problems and not args.dry_run:
             raise SystemExit("Power or fix the devices above, then run again.")
     whose = f"profile {profile.name} is pre-authorized. " if profile.pre_authorized else ""
     print(f"Authorization: {whose}{decision.reason}")
@@ -1065,15 +1139,19 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
 
 
 def print_resume(args: argparse.Namespace, setup: Setup) -> None:
-    """How many cases a resumed run has done, and the budget."""
-    if done := setup.done:
+    """The selected suites left out as covered, how many cases of the rest are saved, and the budget."""
+    for suite_coverage in setup.coverage:
+        if suite_coverage.covered:
+            print(f"{suite_coverage.suite.integration} / {suite_coverage.suite.name}: {suite_coverage}, skipped")
+    running = {(suite.integration, suite.name) for suite in setup.suites}
+    if done := [key for key in setup.done if key[:2] in running]:
         registry = setup.registry
         total = sum(
-            len(cases(suite, setup.profile, args.keyword, adapters_for(suite, registry)))
-            for suite in setup.selected
+            len(cases(suite, setup.profile, None, adapters_for(suite, registry)))
+            for suite in setup.suites
             if runnable_suite(suite, registry)
         )
-        print(f"Resuming: {len(done)} of {total} cases done (started {setup.progress.started}); --fresh to start over.")
+        print(f"Resuming: {len(done)} of the {total} cases of the suites to run are saved; --fresh to start over.")
     if args.budget:
         print(f"Budget: no case starts after {args.budget:.0f} s from approval, deploy included; rerun to resume.")
 
@@ -1157,26 +1235,40 @@ def aborted(setup: Setup, keyword: str | None) -> Callable[[], int]:
 
     def stop() -> int:
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        report_saved(setup.progress, setup.selected, setup.registry, setup.profile, keyword, stamp)
-        return say_stopped(setup.progress, setup.selected, setup.profile, setup.registry, "aborted")
+        report_saved(setup.progress, setup.selected, setup.registry, setup.profile, stamp)
+        return say_stopped(setup.progress, setup.suites, setup.profile, setup.registry, keyword, "aborted")
 
     return stop
 
 
 def say_stopped(
-    progress: Progress | None, selected: list[Suite], profile: Profile, registry: AdapterRegistry, why: str
+    progress: Progress | None,
+    suites: list[Suite],
+    profile: Profile,
+    registry: AdapterRegistry,
+    keyword: str | None,
+    why: str,
 ) -> int:
-    """Say the run stopped with cases left, and how to resume; RESUMABLE."""
+    """Say the run stopped with cases left, and how to resume; RESUMABLE. Its saved failures are dropped first, to
+    rerun whole."""
     if progress is None:
         print(f"Stopped ({why}); with --no-deploy nothing is saved to resume from.")
         return RESUMABLE
+    progress.drop_failed()
     done = progress.done()
-    count = sum(len(left(suite, profile, registry, done, progress.key.keyword)) for suite in selected)
+    count = sum(len(left(suite, profile, registry, done, keyword)) for suite in suites)
     print(f"Stopped with {count} cases left ({why}); rerun the same command to resume.")
     return RESUMABLE
 
 
-def check_only(setup: Setup, keyword: str | None, homes: set[str], wanted: Claim, directory: Path) -> int:
+def check_only(
+    setup: Setup,
+    keyword: str | None,
+    homes: set[str],
+    wanted: Claim,
+    directory: Path,
+    ignore_unreachables: bool = False,
+) -> int:
     """--check: the device check alone, naming the runs that hold locks this run would claim, whose moves and pauses
     it would see."""
     if held := locks.holders(directory, wanted):
@@ -1184,9 +1276,73 @@ def check_only(setup: Setup, keyword: str | None, homes: set[str], wanted: Claim
         for line in held:
             print(f"  {line}")
     problems = asyncio.run(
-        check_devices(setup.env, setup.suites, setup.profile, setup.registry, keyword, setup.roaming, homes)
+        check_devices(
+            setup.env,
+            setup.suites,
+            setup.profile,
+            setup.registry,
+            keyword,
+            setup.roaming,
+            homes,
+            {},
+            ignore_unreachables,
+        )
     )
+    print_unreachable(setup.suites, setup.profile, setup.registry, keyword)
     return 1 if problems else 0
+
+
+def coverage_only(args: argparse.Namespace, directory: Path) -> int:
+    """--coverage: each selected suite's coverage at the checkout's HEAD, as a run would plan it, and the devices its
+    missing cases need, which is what to power up for the next run. Reads the records, the ledger and HA's version;
+    changes nothing, the ledger included. With no selection it is the whole profile: the release candidate's view.
+    Returns 0 when every suite is covered."""
+    env = load_env()
+    try:
+        profile = Profile.load(choose_profile(args.profile, env))
+    except ValueError as err:
+        raise SystemExit(f"Fix the profile: {err}") from err
+    registry = AdapterRegistry.discover()
+    suites = run_suites(args, profile, registry)
+    commit = git("rev-parse", "HEAD")
+    print(f"Coverage of profile {profile.name} at {git('rev-parse', '--short', commit)} (HEAD):")
+    if git("status", "--porcelain", "--", COMPONENT):
+        print(f"  Uncommitted changes under {COMPONENT} aren't counted: a run deploys only what is committed.")
+    progress = Progress.load(directory, profile.name)
+    if progress.entries:
+        if (version := ha_version(env)) is None:
+            print("  HA's version can't be read, so saved cases on an older HA may still count below.")
+        else:
+            progress.check_ha(version)
+    plan = coverage.of(suites, profile, registry, REPO, commit, progress, unattended=args.unattended)
+    for line in coverage_lines(plan, profile, args.keyword):
+        print(line)
+    return 0 if all(suite_coverage.covered for suite_coverage in plan) else 1
+
+
+def coverage_lines(plan: list[SuiteCoverage], profile: Profile, keyword: str | None = None) -> list[str]:
+    """One line per suite, its missing cases (those `keyword` keeps) under a partial one, then the total and the devices
+    every missing case needs, their supplies included."""
+    lines, needed = [], {}
+    power = profile.power()
+    for suite_coverage in plan:
+        suite = suite_coverage.suite
+        lines.append(f"  {suite.integration} / {suite.name}: {suite_coverage}")
+        if suite_coverage.covered:
+            continue
+        missing = [case for case in suite_coverage.missing if not keyword or keyword in case.id]
+        for case in missing:
+            devices = [] if case.skip else list(dict.fromkeys([*case.entities.values(), *case.members]))
+            devices += [power[e] for e in devices if e in power and power[e] not in devices]
+            needed.update(dict.fromkeys(devices))
+            if suite_coverage.saved:
+                lines.append(f"      {case.id}: {', '.join(devices) or case.skip}")
+    covered = sum(suite_coverage.covered for suite_coverage in plan)
+    left = sum(len(suite_coverage.missing) for suite_coverage in plan if not suite_coverage.covered)
+    lines.append(f"{covered} of {len(plan)} suites covered; {left} cases missing.")
+    if needed:
+        lines.append(f"The missing cases need: {', '.join(sorted(needed))}")
+    return lines
 
 
 def hold_command(args: argparse.Namespace, directory: Path) -> int:
@@ -1634,8 +1790,9 @@ async def run_rig(
     stand.
 
     With `progress`, each case is saved as it finishes and the report joins the saved results of every `selected`
-    suite to this session's, so a suite finished across sessions writes its record; the progress goes once nothing
-    is left. A run the `budget` stopped says what is left and returns RESUMABLE, unless the logs flag it."""
+    suite to this session's, so a suite finished across sessions writes its record, which takes it out of the ledger;
+    a suite that failed a case leaves it when the run ends. A run the `budget` stopped says what is left and returns
+    RESUMABLE, unless the logs flag it."""
     lab = roaming or grouping
     selected = selected or suites
     if lab and not (env.get("HA_ADMIN_TOKEN") and env.get("HUE_BRIDGE_HOST") and env.get("HUE_APP_KEY")):
@@ -1685,19 +1842,21 @@ async def run_rig(
             )
             result, touched = joined(result, progress, selected)
             if suites:
-                await report(result, ha, registry, commit, profile, keyword, stamp, touched)
+                await report(result, ha, registry, commit, profile, stamp, touched, progress)
         except RoamError as err:
             # A move that failed isn't retried here; the journal keeps where the bulbs are, for --recover. The groups
             # made so far still go, and after a group that couldn't be made, the bulbs still go home. The phases that
             # ran still get their report and records.
             if not isinstance(err, GroupError):
                 stopped, roamer = roamer, None
-            await report_ran(results, ha, registry, commit, profile, keyword, stamp)
+            await report_ran(results, ha, registry, commit, profile, stamp)
+            if progress is not None:
+                progress.drop_failed()  # the run ends here, so its failed suites rerun whole
             raise SystemExit(f"Roaming stopped: {err}") from None
         finally:
             home, signalled = await wind_down(roamer, stopped, logs, levels, pauses, journal, (bridge, ha, admin))
             end_abort(home, signalled, sys.exception())
-        code = end_code(result, home, budget, progress, selected, profile, registry)
+        code = end_code(result, home, budget, progress, suites, profile, registry, keyword)
     finally:
         flagged = logs.settle(code == 0)
     return 1 if flagged else code
@@ -1758,18 +1917,20 @@ def end_code(
     home: bool,
     budget: Budget | None,
     progress: Progress | None,
-    selected: list[Suite],
+    suites: list[Suite],
     profile: Profile,
     registry: AdapterRegistry,
+    keyword: str | None = None,
 ) -> int:
     """The run's exit code before its logs are read: 1 with the bulbs not home; RESUMABLE when the budget left cases,
-    saying so; else 1 on a failure, saved or new, and 0 otherwise, the progress done with."""
+    saying so; else 1 on a failure, saved or new, and 0 otherwise. The ledger stays, but for the suites that failed a
+    case, which rerun whole."""
     if not home:
         return 1
     if budget is not None and budget.stopped:
-        return say_stopped(progress, selected, profile, registry, "budget spent")
+        return say_stopped(progress, suites, profile, registry, keyword, "budget spent")
     if progress is not None:
-        progress.discard()
+        progress.drop_failed()
     return 1 if result.failed else 0
 
 
@@ -1846,10 +2007,11 @@ async def run_phases(
         await visit(roamer, network, bool(phase_suites or not suites))
         if moving and budget is not None:
             budget.grant()
+        done = common.get("done")
         if number == 0 and lanes:
-            await wait_for_targets(ha, suites, profile, registry, keyword, only=head(profile))
+            await wait_for_targets(ha, suites, profile, registry, keyword, only=unfinished(done, head(profile)))
         if phase_suites:
-            await wait_for_targets(ha, phase_suites, profile, registry, keyword, only=only)
+            await wait_for_targets(ha, phase_suites, profile, registry, keyword, only=unfinished(done, only))
         if number == 0 and pause is not None:
             await pause()
         if number == 0 and lanes:
@@ -1896,7 +2058,6 @@ async def report_ran(
     registry: AdapterRegistry,
     commit: str | None,
     profile: Profile,
-    keyword: str | None = None,
     stamp: str | None = None,
 ) -> None:
     """After a failed move, report the phases that ran before it. A report that fails is printed, never raised: the
@@ -1904,7 +2065,7 @@ async def report_ran(
     if not results:
         return
     try:
-        await report(RunResult(results), ha, registry, commit, profile, keyword, stamp)
+        await report(RunResult(results), ha, registry, commit, profile, stamp)
     except Exception as err:  # noqa: BLE001
         print(f"The phases that ran couldn't be reported: {err}")
 
@@ -1915,15 +2076,19 @@ async def report(
     registry: AdapterRegistry,
     commit: str | None,
     profile: Profile,
-    keyword: str | None = None,
     stamp: str | None = None,
     touched: set[tuple[str, str]] | None = None,
+    progress: Progress | None = None,
 ):
     """The run's report, and a test record per fully passed suite when a commit names the tree HA ran. A suite whose
-    cases ran in parts (lanes, then phases, or sessions) is joined first; one missing a part writes no record. With
-    `touched`, only the suites with a case in this session write theirs: an earlier session wrote the rest."""
-    result = merge(result.suites, profile, registry, keyword)
+    cases ran in parts (lanes, then phases, or runs) is joined first; one missing a part writes no record, and says
+    how far it got. With `touched`, only the suites with a case in this session write theirs: an earlier session wrote
+    the rest. A suite whose record is written leaves the ledger (`progress`): the record carries its coverage."""
+    result = merge(result.suites, profile, registry)
     stamp = stamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for suite_result in result.suites:
+        if partial := suite_result.partial:
+            print(f"{suite_result.suite.integration} / {suite_result.suite.name}: {partial}")
     print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
     if commit is None:
         print("No test records: no commit names the tree HA ran (--no-deploy, or origin moved before the deploy).")
@@ -1932,8 +2097,14 @@ async def report(
     today = datetime.date.today().isoformat()
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
-    for path in await write_records(result, registry, TEST_RECORDS_DIR, today, source, profile.name):
+    written = await write_records(result, registry, TEST_RECORDS_DIR, today, source, profile.name)
+    for path in written:
         print(f"Wrote {path.relative_to(REPO)}; review the diff before committing it.")
+    if progress is not None:
+        for suite_result in result.suites:
+            if TEST_RECORDS_DIR / suite_result.suite.integration / f"{suite_result.suite.name}.md" in written:
+                progress.drop(suite_result.suite)
+        progress.save()
 
 
 def report_saved(
@@ -1941,7 +2112,6 @@ def report_saved(
     suites: list[Suite],
     registry: AdapterRegistry,
     profile: Profile,
-    keyword: str | None,
     stamp: str,
 ) -> None:
     """The report of every case `progress` has saved, after a signal: no records, as the run is unfinished. Nothing
@@ -1949,7 +2119,7 @@ def report_saved(
     if progress is None:
         return
     try:
-        result = merge(progress.parts(suites), profile, registry, keyword)
+        result = merge(progress.parts(suites), profile, registry)
         print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
     except Exception as err:  # noqa: BLE001 - the report is a courtesy; the devices go back regardless
         print(f"The cases that ran couldn't be reported: {err}")
@@ -2053,8 +2223,11 @@ def targets(
     registry: AdapterRegistry,
     keyword: str | None,
     only: Callable[[Case], bool] | None = None,
+    done: Done | None = None,
 ) -> list[str]:
-    """Every entity a case `only` accepts will move, a group's listed members included."""
+    """Every entity a case `only` accepts will move, a group's listed members included; none of a case `done` has a
+    result for, which the run leaves out."""
+    only = unfinished(done, only)
     return sorted(
         {
             entity
@@ -2068,18 +2241,19 @@ def targets(
 
 
 def platforms(
-    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None
+    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None, done: Done | None = None
 ) -> dict[str, tuple[str, str]]:
     """Each entity the cases will move (targets), with its integration and the platform HA must register it on: the
     integration's HA domain (runlogs.HA_DOMAINS), or switch_as_x for a light_wrapped; a group's members count as the
     group's integration."""
+    only = unfinished(done)
     found: dict[str, tuple[str, str]] = {}
     for suite in suites:
         if not registry.adapter(suite.action, suite.integration):
             continue
         domain = HA_DOMAINS.get(suite.integration, suite.integration)
         for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
-            if case.skip:
+            if case.skip or (only is not None and not only(case)):
                 continue
             for role, entity in case.entities.items():
                 found.setdefault(entity, (suite.integration, "switch_as_x" if role == "light_wrapped" else domain))
@@ -2113,24 +2287,30 @@ async def check_fixed(
     profile: Profile,
     registry: AdapterRegistry,
     keyword: str | None,
-) -> list[str]:
-    """The problems among the fixed entities: one not in HA or unavailable, or, of those in HA, one on the wrong
-    platform."""
-    problems, present = [], []
+    done: Done | None = None,
+    ignore_unreachables: bool = False,
+) -> tuple[list[str], set[str]]:
+    """The problems among the fixed entities, and those offline: one not in HA, or of those in HA, one on the wrong
+    platform, is a problem; one unavailable is too, unless `ignore_unreachables`, which counts it offline instead."""
+    problems, present, offline = [], [], set()
     for entity, state in zip(fixed, await asyncio.gather(*map(ha.get_state, fixed)), strict=True):
         if state is None:
             problems.append(f"{entity}: not in HA; check profile {profile.name}")
             continue
         present.append(entity)
-        if not available(state):
+        if available(state):
+            continue
+        if ignore_unreachables:
+            offline.add(entity)
+        else:
             problems.append(f"{entity}: unavailable; check it is powered")
     if present:
         try:
-            expected = platforms(suites, profile, registry, keyword)
+            expected = platforms(suites, profile, registry, keyword, done)
             problems += await check_platforms(admin or ha, expected, present, profile)
         except HAError as err:  # a token without admin rights can't list the registry
             print(f"The platforms weren't checked: HA refused the entity registry ({err}).")
-    return problems
+    return problems, offline
 
 
 async def check_devices(
@@ -2141,14 +2321,18 @@ async def check_devices(
     keyword: str | None,
     roaming: bool,
     homes: set[str] = frozenset(),
+    done: Done | None = None,
+    ignore_unreachables: bool = False,
 ) -> list[str]:
-    """Before anything changes, for every phase at once: each fixed entity the selected cases use is in HA, on its
-    integration and available, and, when the run roams, each roaming bulb is on a network with its light available.
-    Prints what it found; returns the problems, which would otherwise stop the run part way, after moves. Rig-made
-    groups and scenes don't exist yet, and a roaming bulb's light may still be under another ID, so neither is looked
-    up as an entity.
+    """Before anything changes, for every phase at once: each fixed entity the cases still to run use (none `done`
+    has a result for) is in HA, on its integration and available, and, when the run roams, each roaming bulb is on a
+    network with its light available. Prints what it found; returns the problems, which would otherwise stop the run
+    part way, after moves. Rig-made groups and scenes don't exist yet, and a roaming bulb's light may still be under
+    another ID, so neither is looked up as an entity.
+    With `ignore_unreachables`, an unavailable fixed entity is no problem: it becomes `profile.offline`, and its cases
+    skip as unreachable (engine.unreachable). A roaming bulb is still checked strictly.
     `homes` are the bulbs whose Hue home the home record holds, which a run puts back."""
-    fixed = [entity for entity in targets(suites, profile, registry, keyword) if entity not in profile.made_entities]
+    fixed = [e for e in targets(suites, profile, registry, keyword, done=done) if e not in profile.made_entities]
     bulbs = list(profile.roam) if roaming else []
     print(f"Checking profile {profile.name}: {len(fixed)} entities" + (f", {len(bulbs)} roaming." if bulbs else "."))
     if not (env.get("HA_URL") and env.get("HA_TOKEN")):
@@ -2159,7 +2343,10 @@ async def check_devices(
     except (OSError, aiohttp.ClientError, RuntimeError) as err:
         return [f"Can't reach HA at {env.get('HA_URL')}: {err or type(err).__name__}"]
     try:
-        problems += await check_fixed(ha, admin, fixed, suites, profile, registry, keyword)
+        found, offline = await check_fixed(
+            ha, admin, fixed, suites, profile, registry, keyword, done, ignore_unreachables
+        )
+        problems += found
         if bulbs:
             problems += await check_roaming(env, admin, bulbs, ha, homes)
     finally:
@@ -2168,8 +2355,25 @@ async def check_devices(
             await admin.close()
     for problem in problems:
         print(f"  {problem}")
+    for entity in sorted(offline):
+        print(f"  {entity}: unavailable; its cases skip (--ignore-unreachables)")
     print(f"{len(problems)} problem(s): nothing was changed." if problems else "Every device is ready.")
+    profile.offline = frozenset(offline)
     return problems
+
+
+def print_unreachable(
+    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None, done: Done | None = None
+) -> None:
+    """The cases still to run that skip as unreachable, by suite, once the check has found what is offline."""
+    if not profile.offline:
+        return
+    only = unfinished(done)
+    print("Unreachable, skipped (their suites write no record this run):")
+    for suite in runnable_suites(suites, registry):
+        for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+            if case.unreachable and (only is None or only(case)):
+                print(f"  {suite.integration} / {suite.name} {case.id}: {case.skip}")
 
 
 async def check_roaming(

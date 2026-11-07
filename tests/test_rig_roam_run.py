@@ -665,6 +665,38 @@ async def test_the_check_names_an_unavailable_or_missing_entity_and_a_bulb_on_no
     assert (await check(tmp_path))[0] == "switch.plug: not in HA; check profile lab"
 
 
+async def test_ignoring_unreachables_an_unavailable_fixed_entity_goes_offline_and_its_cases_skip(tmp_path, lab, capsys):
+    plug_up(lab)
+    lab.ha.states["switch.plug"]["state"] = "unavailable"
+    profile = Profile.load(lab_profile(tmp_path))
+    suites = check_suites(tmp_path)
+    registry = AdapterRegistry.discover()
+
+    assert await rig.check_devices(ENV, suites, profile, registry, None, True, ignore_unreachables=True) == []
+    assert profile.offline == {"switch.plug"}
+    out = capsys.readouterr().out
+    assert "switch.plug: unavailable; its cases skip (--ignore-unreachables)" in out
+    rig.print_unreachable(suites, profile, registry, None)
+    assert "  shelly / turn_on_for t[switch_plug]: switch.plug unreachable" in capsys.readouterr().out
+    assert "switch.plug" not in rig.targets(suites, profile, registry, None)  # wait_for_targets waits for none
+
+    lab.ha.states["light.lab_a"] = {"entity_id": "light.lab_a", "state": "unavailable", "attributes": {}}
+    problems = await rig.check_devices(ENV, suites, profile, registry, None, True, ignore_unreachables=True)
+    assert problems == ["light.lab_a: on Hue, unavailable; check it is powered"]  # a roaming bulb stays strict
+    del lab.ha.states["switch.plug"]
+    problems = await rig.check_devices(ENV, suites, profile, registry, None, False, ignore_unreachables=True)
+    assert problems == ["switch.plug: not in HA; check profile lab"]
+
+
+async def test_the_check_looks_only_at_the_cases_left_to_run(tmp_path, lab, capsys):
+    lab.ha.states["switch.plug"] = {"entity_id": "switch.plug", "state": "unavailable", "attributes": {}}
+    suites = check_suites(tmp_path)
+    profile = Profile.load(lab_profile(tmp_path))
+    done = {("shelly", "turn_on_for", "t[switch_plug]"): None}
+    assert await rig.check_devices(ENV, suites, profile, AdapterRegistry.discover(), None, False, done=done) == []
+    assert "Checking profile lab: 0 entities." in capsys.readouterr().out
+
+
 async def test_the_check_says_a_bulb_away_from_hue_will_be_moved_and_finds_one_unpowered(tmp_path, lab, capsys):
     plug_up(lab)
     leave_hue(lab, "hue-device-2")
@@ -738,7 +770,9 @@ def main_with(tmp_path: Path, monkeypatch, problems: list[str]) -> list:
     path = lab_profile(tmp_path)
     asked = []
 
-    async def check_devices(env, suites, profile, registry, keyword, roaming, homes=frozenset()):
+    async def check_devices(
+        env, suites, profile, registry, keyword, roaming, homes=frozenset(), done=None, ignore_unreachables=False
+    ):
         asked.append(([suite.integration for suite in suites], roaming))
         return problems
 
@@ -746,6 +780,7 @@ def main_with(tmp_path: Path, monkeypatch, problems: list[str]) -> list:
     monkeypatch.setattr(rig, "load_env", lambda: dict(ENV))
     monkeypatch.setattr(rig, "git", lambda *args, check=True: str(tmp_path) if "--git-common-dir" in args else "wt")
     monkeypatch.setattr(rig, "check_devices", check_devices)
+    monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
     monkeypatch.setattr(rig, "deploy_state", lambda status_cmd: rig.Deploy("c1", "tree", "tree", "tree", "wt"))
     return asked
 

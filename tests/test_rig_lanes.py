@@ -188,8 +188,12 @@ def test_merge_joins_a_suite_split_between_lanes_and_phases_in_file_order(tmp_pa
 
     (alone,) = merge([lanes], profile, fakes.OPTION_REGISTRY).suites  # a failed move cut the phases short
     assert not alone.complete and not alone.recordable
-    (keyed,) = merge([lanes, phases], profile, fakes.OPTION_REGISTRY, keyword="t").suites
-    assert not keyed.complete
+    assert alone.partial == "partial: 1 of 2 cases"
+    unreachable = SuiteResult(
+        suite, [*lanes.cases, CaseResult("t[light_ct]", "light_ct", None, Outcome.SKIPPED, unreachable=True)], False
+    )
+    (offline,) = merge([unreachable], profile, fakes.OPTION_REGISTRY).suites
+    assert not offline.recordable and offline.partial == "partial: 1 of 2 cases; 1 unreachable"
 
 
 def test_merge_unions_the_devices_of_a_suites_parts_in_order(tmp_path):
@@ -337,7 +341,9 @@ def roaming_run(tmp_path, monkeypatch) -> tuple:
 
 async def test_a_resume_with_only_one_networks_cases_left_visits_only_it(tmp_path, monkeypatch):
     ha, lab, profile, suites, finder, ran = roaming_run(tmp_path, monkeypatch)
-    progress = rig.Progress(tmp_path / "progress.json", rig.Key("lab", "tree"))
+    progress = rig.Progress(tmp_path / "progress.json")
+    for suite in suites:
+        progress.track(suite, "fp")
     for suite in suites:
         for case in cases(suite, profile):
             if case.id != "t[light_ct]" or suite.integration != "zigbee2mqtt":
