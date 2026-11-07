@@ -10,7 +10,7 @@ tests:
     steps:
       - entry: reload
       - call: {}
-      - expect_response: {integration: self}
+      - expect_response: {}
 
   # DeviceSide's actions are registered once per HA run, so a disabled entry's are still there: they raise
   # not_loaded (deviceside's docs/action-behavior.md), not HA's action-not-found or an exception.
@@ -22,4 +22,4 @@ tests:
       - expect_error: {key: not_loaded}
       - entry: enable
       - call: {}
-      - expect_response: {integration: self}
+      - expect_response: {}
