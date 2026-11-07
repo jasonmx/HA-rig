@@ -666,8 +666,29 @@ def cases(
                     outside = [name for name in lights if members and entities[name] not in members]
                     skip = f"{outside[0]} is not one of the group's members" if outside else None
                     case = Case(suite, test, role, entities, skip, observed, members)
+                    if skip is None and (why := unreachable(case, profile)):
+                        case = replace(case, skip=why, unreachable=True)
                 result.append(case)
     return result
+
+
+def unreachable(case: Case, profile: Profile) -> str | None:
+    """Why the case can't run while some of the profile's fixed entities are offline (--ignore-unreachables), or None:
+    one of its entities, a group member or a supply is offline; or, as the profile can't say which devices they
+    hold, it targets a fixed group whose members it doesn't list, or a fixed scene. Rig-made groups and scenes are
+    made of roaming bulbs, which a run checks strictly, so they stay in scope."""
+    if not profile.offline:
+        return None
+    power = profile.power()
+    devices = [*case.entities.values(), *case.members]
+    if down := next((e for e in [*devices, *filter(None, map(power.get, devices))] if e in profile.offline), None):
+        return f"{down} unreachable"
+    fixed = {name: entity for name, entity in case.entities.items() if entity not in profile.made_entities}
+    if any(name in GROUP_ROLES for name in fixed) and not case.members:
+        return "group: members not listed"
+    if "scene" in fixed:
+        return "scene: contents unknown"
+    return None
 
 
 def in_head(case: Case, profile: Profile) -> bool:
@@ -2153,7 +2174,7 @@ class _Run:
 
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
     domain = case.entities[case.role].partition(".")[0] if case.entities else None
-    return CaseResult(case.id, case.role, domain, outcome, detail, twin=case.twin)
+    return CaseResult(case.id, case.role, domain, outcome, detail, twin=case.twin, unreachable=case.unreachable)
 
 
 def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunResult:

@@ -141,6 +141,9 @@ class Profile:
     # disables, roaming and HA restarts included, its recovery and its --visual profile probes go whatever
     # RIG_RESTRICTED_ENTITY reads, for a setup whose lights nobody minds seeing move. Off, they are restricted.
     pre_authorized: bool = False
+    # The fixed entities --ignore-unreachables found unavailable before the run: their cases skip as unreachable, and
+    # while any is, so do those whose devices the profile can't name (unlisted group members, fixed scenes).
+    offline: frozenset[str] = frozenset()
 
     @classmethod
     def load(cls, path: Path) -> Profile:

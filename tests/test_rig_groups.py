@@ -8,8 +8,9 @@ import pytest
 
 from ha_rig import roam
 from ha_rig import terms as terms_module
+from ha_rig.engine import Suite, cases, load_step_file
 from ha_rig.journal import Journal
-from ha_rig.profile import Profile, RoamGroup
+from ha_rig.profile import Profile, RigEntity, RoamGroup
 from ha_rig.roam import Roamer, RoamError
 from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, FakeBridge, FakeHA, Lab, lab_profile
 
@@ -344,3 +345,70 @@ def test_a_role_roam_groups_make_cant_also_be_on_a_fixed_entity(tmp_path, networ
 def test_the_household_check_flags_a_roam_groups_and_scenes_entity_ids(tmp_path):
     terms = terms_module.private_terms([lab_profile(tmp_path, GROUPS_YAML)], tmp_path / "none")
     assert {"light.test_group", "light.test_color_group", "scene.test_relax"} <= set(terms)
+
+
+SKIP_STEPS = """
+action: turn_on_for
+rig_seconds: 10
+tests:
+  - name: t
+    roles: [group, scene, light_ct]
+    steps:
+      - set: {state: off}
+"""
+
+
+def skips(tmp_path, offline: set[str], members=("light.a", "light.b"), made: bool = False) -> dict[str, tuple]:
+    """Each case's skip and whether it is unreachable, with `offline` down: a fixed group (or the rig-made one) whose
+    members are `members`, a fixed scene (or the rig-made one), and light.a powered through switch.supply."""
+    group = GROUP.entity_id if made else "light.fixed_group"
+    scene = GROUP.scene if made else "scene.fixed"
+    profile = Profile(
+        {
+            "hue": [
+                RigEntity(group, frozenset({"group"}), members=members),
+                RigEntity(scene, frozenset({"scene"})),
+                RigEntity("light.a", frozenset({"light_ct"}), powered_by="switch.supply"),
+                RigEntity("switch.supply", frozenset({"switch_plug"})),
+            ]
+        },
+        roam_groups=(GROUP,) if made else (),
+        offline=frozenset(offline),
+    )
+    path = tmp_path / "steps.yaml"
+    path.write_text(SKIP_STEPS)
+    return {case.role: (case.skip, case.unreachable) for case in cases(Suite(load_step_file(path), "hue"), profile)}
+
+
+def test_nothing_offline_skips_nothing(tmp_path):
+    assert skips(tmp_path, set(), members=()) == {
+        "group": (None, False),
+        "scene": (None, False),
+        "light_ct": (None, False),
+    }
+
+
+def test_with_listed_members_all_online_a_group_runs_and_fixed_scenes_skip(tmp_path):
+    assert skips(tmp_path, {"light.elsewhere"}) == {
+        "group": (None, False),
+        "scene": ("scene: contents unknown", True),
+        "light_ct": (None, False),
+    }
+
+
+def test_a_member_offline_skips_its_group(tmp_path):
+    assert skips(tmp_path, {"light.b"})["group"] == ("light.b unreachable", True)
+
+
+def test_a_group_whose_members_arent_listed_skips_while_anything_is_offline(tmp_path):
+    assert skips(tmp_path, {"light.elsewhere"}, members=())["group"] == ("group: members not listed", True)
+
+
+def test_a_supply_offline_skips_what_it_powers(tmp_path):
+    found = skips(tmp_path, {"switch.supply"})
+    assert found["light_ct"] == found["group"] == ("switch.supply unreachable", True)  # it powers a member
+
+
+def test_rig_made_groups_and_scenes_stay_in_scope(tmp_path):
+    found = skips(tmp_path, {"light.elsewhere"}, members=GROUP.members, made=True)
+    assert found["group"] == (None, False) and found["scene"] == (None, False)

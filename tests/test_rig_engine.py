@@ -33,6 +33,7 @@ from ha_rig.engine import (
 )
 from ha_rig.journal import Journal
 from ha_rig.profile import Profile, RigEntity
+from ha_rig.progress import Progress
 from tests.rig_fakes import (
     OPTION_REGISTRY,
     PENDING,
@@ -757,6 +758,22 @@ async def test_a_group_case_targeting_a_light_outside_the_group_is_skipped(tmp_p
     inv = Profile({"fake": [room, RigEntity("light.lamp", frozenset({"light_ct"}))]})
     result = await run_one(FakeHA({}, members_on()), suite(tmp_path, text, "fake"), inv, registry=GROUP_REGISTRY)
     assert outcomes(result) == {"every_member[group]": (Outcome.SKIPPED, "light_ct is not one of the group's members")}
+
+
+async def test_an_unreachable_member_skips_its_group_case_and_the_suite_writes_no_record(tmp_path, monkeypatch):
+    room = RigEntity("light.room", frozenset({"group"}), members=("light.a", "light.b"))
+    inv = Profile({"fake": [room]}, offline=frozenset({"light.b"}))
+    ha = FakeHA({"light.room": {}, "light.a": {}}, members_on("light.a"))
+    progress = Progress(tmp_path / "ledger.json")
+    steps = suite(tmp_path, GROUP, "fake")
+    progress.track(steps, "fp")
+    result = await run_one(ha, steps, inv, registry=GROUP_REGISTRY, on_result=progress.record)
+    (case,) = result.suites[0].cases
+    assert (case.outcome, case.detail, case.unreachable) == (Outcome.SKIPPED, "light.b unreachable", True)
+    assert ha.calls == []  # nothing moved
+    assert not progress  # never saved
+    (joined,) = engine.merge(result.suites, inv, GROUP_REGISTRY).suites
+    assert not joined.recordable and joined.partial == "partial: 0 of 1 cases; 1 unreachable"
 
 
 async def test_a_group_color_is_a_group(tmp_path):
