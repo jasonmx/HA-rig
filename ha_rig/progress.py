@@ -1,191 +1,236 @@
-"""A test run's finished cases, on disk, so a run that stops part way picks up where it left off.
+"""The ledger: each suite's finished cases, on disk, so its coverage builds up over any number of runs.
 
 A run saves each case the moment it finishes, and the facts each part of a suite took (HA's version, the devices behind
-its entities), in `deviceside-rig-progress/<profile>--<branch>.json` in deviceside's git common dir: one file per
-profile and branch, so a worktree's runs don't collide. A rerun with the same key (profile, the integration's local
-tree, the selection) skips the saved cases and joins their results to its own, so a suite finished across sessions
-writes its record; any other key starts fresh, saying why. So does HA running another version than the one saved: a
-record names one. The file goes once every case has a result. It holds household entity IDs, so it stays out of the
-repo, like the journals.
+its entities), in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir: one file per profile, shared
+by every worktree. Its entries are per suite, keyed by the suite's fingerprint (ha_rig/coverage.py), so a suite's saved
+cases hold only while the code they prove is unchanged, and runs of different code sit side by side. A later run joins
+a suite's saved results to its own, so a suite finished across runs writes its record.
 
-Nothing is written until the run saves its first case, so a dry run, or a run that never starts, leaves an earlier
-run's progress as it was.
+An entry goes when:
+- HA runs another version than its cases ran on: a record names one;
+- its suite's record is written, which carries its coverage from then on;
+- the run that saved a failure of one of its cases ends: the suite reruns whole, so a record never covers up a failure;
+- nothing has touched it for PRUNE_DAYS.
+
+Two runs on different integrations may save at once, so each save re-reads the file under a lock and merges this run's
+changes into it. Nothing is written until the run saves, so a dry run, or a run that never starts, leaves the file as
+it was. It holds household entity IDs, so it stays out of the repo, like the journals.
 """
 
+import contextlib
 import datetime
+import fcntl
 import json
-from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from .engine import CaseResult, Device, Outcome, Suite, SuiteResult
 from .journal import write_whole
 
 DIRECTORY = "deviceside-rig-progress"
+PRUNE_DAYS = 30
 
 Done = dict[tuple[str, str, str], CaseResult]  # (integration, suite name, case id): its result
+EntryKey = tuple[str, str, str]  # (integration, suite name, fingerprint)
 
 
-@dataclass(frozen=True, slots=True)
-class Key:
-    """What a run's saved cases are valid for: the profile, the integration tree HA runs, and the selection."""
-
-    profile: str
-    tree: str
-    integrations: tuple[str, ...] = ()
-    actions: tuple[str, ...] = ()
-    keyword: str | None = None
-    serial: bool = False
-    unattended: bool = False
-
-    @classmethod
-    def of(cls, raw: Any) -> Key | None:
-        try:
-            return cls(
-                raw["profile"],
-                raw["tree"],
-                tuple(raw["integrations"]),
-                tuple(raw["actions"]),
-                raw["keyword"],
-                raw["serial"],
-                raw["unattended"],
-            )
-        except KeyError, TypeError:
-            return None
-
-    def as_json(self) -> dict:
-        return asdict(self) | {"integrations": list(self.integrations), "actions": list(self.actions)}
-
-    def differs(self, other: Key | None) -> str | None:
-        """Why saved cases under `other` don't hold for this key, or None when they do."""
-        if other is None:
-            return "its key is unreadable"
-        if other.profile != self.profile:
-            return "profile changed"
-        if other.tree != self.tree:
-            return "tree changed"
-        if other != self:
-            return "selection changed"
-        return None
+def path_for(directory: Path, profile: str) -> Path:
+    return directory / DIRECTORY / f"{profile}.json"
 
 
-def path_for(directory: Path, profile: str, branch: str) -> Path:
-    return directory / DIRECTORY / f"{profile}--{branch.replace('/', '_')}.json"
+def _now() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _key(entry: dict) -> EntryKey:
+    return entry["integration"], entry["suite"], entry["fingerprint"]
+
+
+def _read(path: Path) -> dict[EntryKey, dict]:
+    try:
+        saved = json.loads(path.read_text()) if path.exists() else {}
+        return {_key(entry): entry for entry in saved.get("suites", [])}
+    except ValueError, KeyError, TypeError, AttributeError:
+        return {}
+
+
+def _old(entry: dict, now: datetime.datetime) -> bool:
+    try:
+        touched = datetime.datetime.fromisoformat(entry.get("touched", ""))
+    except ValueError:
+        return True
+    return now - touched > datetime.timedelta(days=PRUNE_DAYS)
 
 
 class Progress:
-    def __init__(self, path: Path, key: Key, saved: dict | None = None):
+    """The profile's ledger, as this run sees it: every entry on disk, and the suites the run `track`s, each at its
+    fingerprint now. Its changes are merged into the file on each save."""
+
+    def __init__(self, path: Path, entries: dict[EntryKey, dict] | None = None):
         self.path = path
-        self.key = key
-        saved = saved or {}
-        self.started: str = saved.get("started") or datetime.datetime.now().isoformat(timespec="seconds")
-        self.ha_version: str | None = saved.get("ha_version")
-        self.cases: list[dict] = list(saved.get("cases", []))
-        self.facts_by: dict[tuple[str, str], dict] = {
-            (entry["integration"], entry["suite"]): entry for entry in saved.get("facts", [])
-        }
+        self.entries: dict[EntryKey, dict] = dict(entries or {})
+        self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): its fingerprint now
+        self.ha_version: str | None = None
+        self.changed: set[EntryKey] = set()
+        self.dropped: set[EntryKey] = set()
 
     @classmethod
-    def load(
-        cls,
-        directory: Path,
-        profile: str,
-        branch: str,
-        key: Key,
-        out: Callable[[str], None] = print,
-        fresh: bool = False,
-    ) -> Progress:
-        """The saved progress when its key matches `key`, else an empty one, saying why it starts fresh. `fresh`
-        (--fresh) starts fresh whatever is saved. The saved file stays until the run saves its first case."""
-        path = path_for(directory, profile, branch)
-        try:
-            saved = json.loads(path.read_text()) if path.exists() else None
-        except ValueError:
-            saved = {}
-        if saved is None:
-            return cls(path, key)
-        if fresh:
-            out("Starting fresh (--fresh): the saved progress is dropped.")
-            return cls(path, key)
-        if why := key.differs(Key.of(saved.get("key"))):
-            out(f"Starting fresh: {why} since the saved progress (started {saved.get('started', 'unknown')}).")
-            return cls(path, key)
-        return cls(path, key, saved)
+    def load(cls, directory: Path, profile: str) -> Progress:
+        """The ledger on disk, its entries untouched for PRUNE_DAYS dropped (from the file at the next save)."""
+        progress = cls(path_for(directory, profile), _read(path_for(directory, profile)))
+        now = datetime.datetime.now()
+        for key in [key for key, entry in progress.entries.items() if _old(entry, now)]:
+            progress._drop(key)
+        return progress
+
+    def track(self, suite: Suite, fingerprint: str) -> None:
+        """Follow `suite` at `fingerprint`: its saved cases there are the run's, and its new ones are saved there."""
+        self.tracked[suite.integration, suite.name] = fingerprint
+
+    def key(self, suite: Suite) -> EntryKey | None:
+        if (fingerprint := self.tracked.get((suite.integration, suite.name))) is None:
+            return None
+        return suite.integration, suite.name, fingerprint
+
+    def entry(self, suite: Suite) -> dict | None:
+        """The tracked suite's entry at its fingerprint now, if it has one."""
+        return self.entries.get(self.key(suite) or ("", "", ""))
 
     def __bool__(self) -> bool:
-        return bool(self.cases)
+        return bool(self.done())
 
-    def check_ha(self, version: str | None, out: Callable[[str], None] = print) -> None:
-        """Start fresh when HA runs another version than the saved cases ran on, or its version can't be read: a
-        record names one version. Otherwise note HA's version for the cases to come."""
-        if self.cases and version != self.ha_version:
-            seen = f"HA is {version}" if version else "HA's version can't be read"
-            out(f"Starting fresh: {seen}, and the saved progress ran on {self.ha_version}.")
-            self.reset()
-        self.ha_version = self.ha_version or version
+    def tracked_keys(self) -> list[EntryKey]:
+        return [(integration, name, fingerprint) for (integration, name), fingerprint in self.tracked.items()]
 
-    def reset(self) -> None:
-        """Forget the saved cases in memory; the file is overwritten on the next save."""
-        self.cases, self.facts_by = [], {}
-        self.started = datetime.datetime.now().isoformat(timespec="seconds")
+    def check_ha(self, version: str, out: Callable[[str], None] = print) -> None:
+        """Drop each entry whose cases ran on another HA version than `version`, from the file at the next save: a
+        record names one. Notes `version` for the cases to come."""
+        self.ha_version = version
+        for key, entry in list(self.entries.items()):
+            if (saved := entry.get("ha_version")) is not None and saved != version and entry.get("cases"):
+                out(f"{key[0]} / {key[1]}: its saved cases ran on HA {saved}, and HA is {version}; they rerun.")
+                self._drop(key)
+
+    def _entry(self, suite: Suite) -> dict:
+        key = self.key(suite)
+        if key is None:
+            raise KeyError(f"{suite.integration} / {suite.name} isn't tracked")
+        entry = self.entries.setdefault(
+            key,
+            {
+                "integration": key[0],
+                "suite": key[1],
+                "fingerprint": key[2],
+                "ha_version": self.ha_version,
+                "devices": [],
+                "cases": [],
+            },
+        )
+        entry["ha_version"] = entry.get("ha_version") or self.ha_version
+        entry["touched"] = _now()
+        self.changed.add(key)
+        self.dropped.discard(key)
+        return entry
 
     def record(self, suite: Suite, result: CaseResult) -> None:
-        """Save one finished case, replacing any earlier result of it."""
-        entry = {"integration": suite.integration, "suite": suite.name} | asdict(result)
-        entry["outcome"] = str(result.outcome)
-        entry["entity_ids"] = list(result.entity_ids)
-        same = (suite.integration, suite.name, result.id)
-        self.cases = [case for case in self.cases if (case["integration"], case["suite"], case["id"]) != same]
-        self.cases.append(entry)
+        """Save one finished case, replacing any earlier result of it; an unreachable skip is never saved, as it
+        proves nothing."""
+        if result.unreachable:
+            return
+        entry = self._entry(suite)
+        case = asdict(result) | {"outcome": str(result.outcome), "entity_ids": list(result.entity_ids)}
+        case.pop("unreachable")
+        entry["cases"] = [saved for saved in entry["cases"] if saved["id"] != result.id] + [case]
         self.save()
 
     def facts(self, suite: Suite, ha_version: str | None, devices: Iterable[Device]) -> None:
         """Save the facts a part of `suite` took, joined to those of its earlier parts."""
-        key = (suite.integration, suite.name)
-        entry = self.facts_by.setdefault(
-            key, {"integration": key[0], "suite": key[1], "ha_version": None, "devices": []}
-        )
+        entry = self._entry(suite)
         entry["ha_version"] = entry["ha_version"] or ha_version
-        self.ha_version = self.ha_version or ha_version
         for device in map(asdict, devices):
             if device not in entry["devices"]:
                 entry["devices"].append(device)
         self.save()
 
+    def forget(self, suite: Suite, case_ids: Iterable[str]) -> None:
+        """Drop saved cases that no longer hold (their entities changed), until the next save writes it."""
+        if (entry := self.entry(suite)) is None:
+            return
+        gone = set(case_ids)
+        if any(case["id"] in gone for case in entry["cases"]):
+            entry["cases"] = [case for case in entry["cases"] if case["id"] not in gone]
+            self.changed.add(_key(entry))
+
+    def saved(self, suite: Suite) -> dict[str, CaseResult]:
+        """The tracked suite's saved results by case id."""
+        entry = self.entry(suite)
+        return {case["id"]: _result(case) for case in entry["cases"]} if entry else {}
+
     def done(self) -> Done:
-        return {(case["integration"], case["suite"], case["id"]): _result(case) for case in self.cases}
+        """The tracked suites' saved results."""
+        return {
+            (key[0], key[1], case["id"]): _result(case)
+            for key in self.tracked_keys()
+            if (entry := self.entries.get(key))
+            for case in entry["cases"]
+        }
 
     def parts(self, suites: Iterable[Suite]) -> list[SuiteResult]:
-        """The saved results of each of `suites` that has any, as incomplete parts for merge to join."""
+        """The saved results of each of `suites` that is tracked and has any, as incomplete parts for merge to join."""
         parts = []
         for suite in suites:
-            key = (suite.integration, suite.name)
-            saved = [_result(case) for case in self.cases if (case["integration"], case["suite"]) == key]
-            if not saved:
+            if (entry := self.entry(suite)) is None or not entry["cases"]:
                 continue
-            facts = self.facts_by.get(key, {})
-            devices = [Device(**device) for device in facts.get("devices", [])]
-            parts.append(SuiteResult(suite, saved, complete=False, ha_version=facts.get("ha_version"), devices=devices))
+            devices = [Device(**device) for device in entry["devices"]]
+            cases = [_result(case) for case in entry["cases"]]
+            parts.append(SuiteResult(suite, cases, complete=False, ha_version=entry["ha_version"], devices=devices))
         return parts
 
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        write_whole(
-            self.path,
-            {
-                "key": self.key.as_json(),
-                "ha_version": self.ha_version,
-                "started": self.started,
-                "cases": self.cases,
-                "facts": list(self.facts_by.values()),
-            },
-        )
+    def drop(self, suite: Suite) -> None:
+        """Drop the suite's entry at its fingerprint now (--fresh, or its record written), until the next save."""
+        if (key := self.key(suite)) is not None:
+            self._drop(key)
 
-    def discard(self) -> None:
-        """Delete the saved progress: the run finished every case."""
-        self.reset()
-        self.path.unlink(missing_ok=True)
+    def _drop(self, key: EntryKey) -> None:
+        self.entries.pop(key, None)
+        self.changed.discard(key)
+        self.dropped.add(key)
+
+    def drop_failed(self) -> list[tuple[str, str]]:
+        """At the run's end: drop each tracked suite holding a failure, so it reruns whole; saved. Returns them."""
+        failed = []
+        for key in self.tracked_keys():
+            entry = self.entries.get(key)
+            if entry and any(case["outcome"] == Outcome.FAIL for case in entry["cases"]):
+                self._drop(key)
+                failed.append(key[:2])
+        self.save()
+        return failed
+
+    def save(self) -> None:
+        """Merge this run's changes into the file, under its lock: another run may have saved meanwhile."""
+        if not (self.changed or self.dropped):
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._locked():
+            merged = _read(self.path)
+            for key in self.dropped:
+                merged.pop(key, None)
+            for key in self.changed:
+                merged[key] = self.entries[key]
+            write_whole(self.path, {"suites": list(merged.values())} if merged else {})
+        self.entries = merged
+        self.changed, self.dropped = set(), set()
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self.path.with_name(f"{self.path.name}.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _result(case: dict) -> CaseResult:

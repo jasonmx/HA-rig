@@ -26,7 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .engine import Suite, adapters_for
+from .engine import Case, CaseResult, Outcome, Suite, adapters_for, cases
+from .profile import Profile
+from .progress import Progress
 
 CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # check_release's
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
@@ -138,7 +140,9 @@ def freshness(repo: Path, suite: Suite, commit: str, files: Iterable[str], plann
         return Freshness(record, "cites no commit")
     if git(repo, "rev-parse", "--verify", "--quiet", f"{record.commit}^{{commit}}", check=False).returncode:
         return Freshness(record, f"cites {record.commit}, which git can't find")
-    if changed := git(repo, "diff", "--name-only", record.commit, commit, "--", *files).stdout.split():
+    if (diff := git(repo, "diff", "--name-only", record.commit, commit, "--", *files, check=False)).returncode:
+        return Freshness(record, f"git can't compare {record.commit} with {commit}: {diff.stderr.strip()}")
+    if changed := diff.stdout.split():
         return Freshness(record, ", ".join(changed))
     planned = frozenset(planned)
     if record.case_ids != planned:
@@ -146,3 +150,82 @@ def freshness(repo: Path, suite: Suite, commit: str, files: Iterable[str], plann
         why = [f"new {', '.join(new)}" if new else "", f"gone {', '.join(gone)}" if gone else ""]
         return Freshness(record, "cases changed: " + "; ".join(filter(None, why)))
     return Freshness(record, None)
+
+
+@dataclass(slots=True)
+class SuiteCoverage:
+    """One suite's coverage now: its fingerprint, its record's freshness, the cases it plans and their saved results
+    that still hold."""
+
+    suite: Suite
+    fingerprint: str
+    freshness: Freshness
+    planned: list[Case]
+    saved: dict[str, CaseResult]
+
+    @property
+    def covered(self) -> bool:
+        return self.freshness.fresh or self.complete
+
+    @property
+    def complete(self) -> bool:
+        """Whether every planned case has a saved result."""
+        return bool(self.planned) and all(case.id in self.saved for case in self.planned)
+
+    @property
+    def missing(self) -> list[Case]:
+        return [case for case in self.planned if case.id not in self.saved]
+
+    def __str__(self) -> str:
+        if self.freshness.fresh:
+            return f"covered ({self.freshness})"
+        if self.complete:
+            return "covered (saved; no record yet)"
+        if self.saved:
+            return f"partial {len(self.saved)}/{len(self.planned)}"
+        return f"uncovered ({self.freshness})"
+
+
+def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
+    """Whether a saved result still stands for `case`: the profile skips it for the same reason, or it moved the
+    entities the case plans now. A `not observed` stands only for an unattended run."""
+    if case.skip:
+        return result.outcome is Outcome.SKIPPED and result.detail == case.skip
+    if result.outcome is Outcome.NOT_OBSERVED:
+        return unattended
+    return result.outcome is not Outcome.SKIPPED and result.entity_ids == tuple(case.entities.values())
+
+
+def of(
+    suites: Iterable[Suite],
+    profile: Profile,
+    registry: Any,
+    repo: Path,
+    commit: str,
+    progress: Progress | None,
+    *,
+    fresh: bool = False,
+    unattended: bool = False,
+) -> list[SuiteCoverage]:
+    """Each suite's coverage at `commit`, for those with an adapter; tracking each in `progress` at its fingerprint.
+    Saved results that no longer hold are forgotten, and a suite with a saved failure is dropped, to rerun whole.
+    `fresh` (--fresh) ignores the records and drops the saved cases."""
+    found = []
+    for suite in suites:
+        if registry.adapter(suite.action, suite.integration) is None:
+            continue
+        files = code(suite, registry, repo)
+        suite_fingerprint = fingerprint(repo, commit, files, suite.file.path)
+        planned = cases(suite, profile, None, adapters_for(suite, registry))
+        saved: dict[str, CaseResult] = {}
+        if progress is not None:
+            progress.track(suite, suite_fingerprint)
+            entry = progress.saved(suite)
+            if fresh or any(result.outcome is Outcome.FAIL for result in entry.values()):
+                progress.drop(suite)
+            else:
+                saved = {c.id: entry[c.id] for c in planned if c.id in entry and holds(c, entry[c.id], unattended)}
+                progress.forget(suite, set(entry) - set(saved))
+        record = Freshness(None, None) if fresh else freshness(repo, suite, commit, files, [c.id for c in planned])
+        found.append(SuiteCoverage(suite, suite_fingerprint, record, planned, saved))
+    return found

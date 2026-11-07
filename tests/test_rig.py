@@ -19,7 +19,6 @@ from ha_rig import baseline, engine
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
-from ha_rig.progress import path_for
 from tests import rig_fakes as fakes
 from tests.rig_fakes import write
 
@@ -1280,20 +1279,33 @@ def run_args(**kwargs) -> types.SimpleNamespace:
     return types.SimpleNamespace(**(defaults | {"fresh": False, "no_deploy": False, "roam_check": False} | kwargs))
 
 
-def resumed(tmp_path, monkeypatch, done_ids: dict[str, list[str]], **kwargs) -> rig.Setup:
-    """resume() after a stopped run that finished `done_ids` by integration, on HA 2026.10.1."""
-    profile, suites = resumable(tmp_path)
+ENTITY = {"shelly": "light.a", "zha": "light.b"}
+
+
+def planned(tmp_path, monkeypatch, suites, profile, **kwargs) -> rig.Setup:
+    """plan_coverage() on HA 2026.10.1 at commit c1, with tmp_path as the deviceside checkout: no record anywhere,
+    and each suite's code no files, so its fingerprint is its step file's."""
+    monkeypatch.setattr(rig, "REPO", tmp_path)
+    monkeypatch.setattr(rig.coverage, "code", lambda suite, registry, repo: ())
+    monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
     deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
-    key = rig.Key("house", "tree1", (), (), None, False, True)
-    saved = rig.Progress.load(tmp_path, "house", "wt/x", key)
+    setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
+    rig.plan_coverage(run_args(**kwargs), setup, tmp_path)
+    return setup
+
+
+def resumed(tmp_path, monkeypatch, done_ids: dict[str, list[str]], **kwargs) -> rig.Setup:
+    """The plan after an earlier run saved `done_ids`, by integration, as passes."""
+    profile, suites = resumable(tmp_path)
+    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
     for suite in suites:
         for case_id in done_ids.get(suite.integration, []):
-            saved.record(suite, engine.CaseResult(case_id, "light_ct", "light", engine.Outcome.PASS))
-        saved.facts(suite, "2026.10.1", [])
-    monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
-    setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
-    rig.resume(run_args(**kwargs), setup, tmp_path)
-    return setup
+            result = engine.CaseResult(
+                case_id, "light_ct", "light", engine.Outcome.PASS, entity_ids=(ENTITY[suite.integration],)
+            )
+            earlier.record(suite, result)
+        earlier.facts(suite, "2026.10.1", [])
+    return planned(tmp_path, monkeypatch, suites, profile, **kwargs)
 
 
 def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypatch, capsys):
@@ -1304,19 +1316,57 @@ def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypa
     )
     assert rig.estimate(setup.suites, fakes.OPTION_REGISTRY, False, done=setup.done, resumed=setup.profile) == 30
     rig.print_resume(types.SimpleNamespace(budget=None, keyword=None), setup)
-    assert "Resuming: 3 of 4 cases done" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "shelly / raise_brightness: covered (saved; no record yet), skipped" in out
+    assert "Resuming: 1 of 2 cases saved" in out
 
 
-def test_a_resume_with_nothing_left_starts_fresh(tmp_path, monkeypatch, capsys):
+def test_a_selection_or_keyword_shares_the_saved_cases(tmp_path, monkeypatch):
+    setup = resumed(tmp_path, monkeypatch, {"zha": ["t[light_ct]"]}, serial=True, integration=["zha"], keyword="u")
+    assert set(setup.done) == {("zha", "raise_brightness", "t[light_ct]")}
+    assert [suite.integration for suite in setup.suites] == ["shelly", "zha"]
+    done_only = resumed(tmp_path, monkeypatch, {"zha": ["u[light_ct]"]}, keyword="u")
+    assert [suite.integration for suite in done_only.suites] == ["shelly"]  # zha's -k cases are all saved
+
+
+def test_covered_suites_are_left_out_and_fresh_reruns_them(tmp_path, monkeypatch, capsys):
     every = ["t[light_ct]", "u[light_ct]"]
     setup = resumed(tmp_path, monkeypatch, {"shelly": every, "zha": every})
-    assert setup.suites == setup.selected and not setup.done
-    assert "every case finished; starting fresh" in capsys.readouterr().out
+    assert setup.suites == [] and [str(c) for c in setup.coverage] == ["covered (saved; no record yet)"] * 2
+    again = planned(tmp_path, monkeypatch, *reversed(resumable(tmp_path)), fresh=True)
+    assert again.suites == again.selected and not again.done
+    assert [str(c) for c in again.coverage] == ["uncovered (no record)"] * 2
 
 
-def test_another_selection_starts_fresh(tmp_path, monkeypatch, capsys):
-    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]}, serial=True)
-    assert not setup.done and "selection changed" in capsys.readouterr().out
+def test_a_saved_case_on_other_entities_or_unobserved_doesnt_hold(tmp_path, monkeypatch):
+    profile, suites = resumable(tmp_path)
+    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
+    earlier.record(
+        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.old",))
+    )
+    earlier.record(suites[0], engine.CaseResult("u[light_ct]", "light_ct", "light", engine.Outcome.NOT_OBSERVED))
+    assert planned(tmp_path, monkeypatch, suites, profile, unattended=False).done == {}
+    assert set(planned(tmp_path, monkeypatch, suites, profile).done) == {("shelly", "raise_brightness", "u[light_ct]")}
+
+
+def test_a_saved_failure_reruns_its_whole_suite(tmp_path, monkeypatch):
+    profile, suites = resumable(tmp_path)
+    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
+    earlier.record(
+        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.a",))
+    )
+    earlier.record(
+        suites[0], engine.CaseResult("u[light_ct]", "light_ct", "light", engine.Outcome.FAIL, "x", ("light.a",))
+    )
+    assert planned(tmp_path, monkeypatch, suites, profile).done == {}
+
+
+def test_an_edited_step_file_stales_its_saved_cases(tmp_path, monkeypatch):
+    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
+    assert setup.done
+    profile, suites = resumable(tmp_path)
+    (tmp_path / "steps.yaml").write_text(TWO_SUITES + "# edited\n")  # the fingerprint reads it at the plan
+    assert not planned(tmp_path, monkeypatch, suites, profile).done
 
 
 def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path, monkeypatch, capsys):
@@ -1331,22 +1381,19 @@ def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path
 
     monkeypatch.setattr(rig, "write_records", write_records)
     profile, suites = resumable(tmp_path)
-    key = rig.Key("house", "tree1", (), (), None, False, True)
 
     def session(budget=None) -> int:
-        progress = rig.Progress.load(tmp_path, "house", "wt/x", key)
-        done = progress.done()
-        left = [suite for suite in suites if rig.left(suite, profile, fakes.OPTION_REGISTRY, done, None)] or suites
+        setup = planned(tmp_path, monkeypatch, suites, profile)
         return asyncio.run(
             rig.run_rig(
                 {},
-                left,
+                setup.suites,
                 profile,
                 fakes.OPTION_REGISTRY,
                 None,
                 True,
                 "c1",
-                progress=progress,
+                progress=setup.progress,
                 selected=suites,
                 budget=budget,
             )
@@ -1360,7 +1407,7 @@ def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path
 
         def counting(self, suite, result):
             record(self, suite, result)
-            if len(self.cases) >= count:
+            if len(self.done()) >= count:
                 budget.deadline = 0.0
 
         monkeypatch.setattr(rig.Progress, "record", counting)
@@ -1369,13 +1416,40 @@ def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path
     assert session(spent_after(3)) == rig.RESUMABLE
     assert "Stopped with 1 cases left (budget spent); rerun the same command to resume." in capsys.readouterr().out
     assert written == [["shelly"]]  # zha is one case short
-    assert path_for(tmp_path, "house", "wt/x").exists()
 
     monkeypatch.setattr(rig.Progress, "record", record)
     assert session() == 0
     assert "Resuming" not in capsys.readouterr().out
     assert written == [["shelly"], ["zha"]]  # shelly's record isn't written again
-    assert not path_for(tmp_path, "house", "wt/x").exists()
+
+
+async def test_a_written_record_takes_its_suite_out_of_the_ledger_and_a_failure_drops_its_own(tmp_path, monkeypatch):
+    profile, suites = resumable(tmp_path)
+    progress = planned(tmp_path, monkeypatch, suites, profile).progress
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
+    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", tmp_path / "docs" / "test-records")
+    for suite in suites:
+        for case_id in ("t[light_ct]", "u[light_ct]"):
+            outcome = (
+                engine.Outcome.FAIL if suite.integration == "zha" and case_id == "u[light_ct]" else engine.Outcome.PASS
+            )
+            progress.record(
+                suite, engine.CaseResult(case_id, "light_ct", "light", outcome, entity_ids=(ENTITY[suite.integration],))
+            )
+        progress.facts(suite, "2026.10.1", [])
+
+    async def write_records(result, registry, records_dir, date, source, profile):
+        return [
+            records_dir / part.suite.integration / f"{part.suite.name}.md" for part in result.suites if part.recordable
+        ]
+
+    monkeypatch.setattr(rig, "write_records", write_records)
+    result = engine.RunResult(progress.parts(suites))
+    await rig.report(result, None, fakes.OPTION_REGISTRY, "c1", profile, progress=progress)
+    assert {key[0] for key in progress.done()} == {"zha"}  # shelly's record carries it now
+    assert rig.end_code(result, True, None, progress, suites, profile, fakes.OPTION_REGISTRY) == 1
+    assert not rig.Progress.load(tmp_path, "house").entries  # the failed suite reruns whole
 
 
 def test_a_signal_stops_a_run_with_progress_resumable(capsys):
