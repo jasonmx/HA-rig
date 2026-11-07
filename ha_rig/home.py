@@ -40,8 +40,10 @@ class HomeRecord:
         """The entries as they are now; read with no lock, as each write replaces the file whole."""
         if self.directory is None:
             return dict(self.entries)
-        path = self.directory / NAME
-        return json.loads(path.read_text()) if path.exists() else {}
+        try:
+            return json.loads((self.directory / NAME).read_text())
+        except FileNotFoundError:
+            return {}
 
     def add(self, ieee: str, entry: dict) -> None:
         """Write `entry` for `ieee` unless one is there."""
@@ -66,12 +68,11 @@ class HomeRecord:
             return
         with (self.directory / LOCK_NAME).open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            path = self.directory / NAME
-            entries = json.loads(path.read_text()) if path.exists() else {}
+            entries = self.all()
             before = json.dumps(entries, sort_keys=True)
             yield entries
             if json.dumps(entries, sort_keys=True) != before:
-                write_whole(path, entries)
+                write_whole(self.directory / NAME, entries)
 
 
 def light_state(state: dict | None) -> dict | None:
