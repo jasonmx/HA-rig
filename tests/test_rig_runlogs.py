@@ -113,6 +113,11 @@ CRASHED = (
 )
 
 
+def test_a_crash_spanning_midnight_counts_once():
+    log = "23:59:55.000 error   [z2m] ASH_NCP_FATAL_ERROR\n00:00:03.000 error   [z2m] Adapter disconnected\n"
+    assert coordinator_crashes(log) == (["23:59:55"], 0)
+
+
 def test_coordinator_crashes_are_counted_once_each_with_their_times():
     assert coordinator_crashes(CRASHED) == (["23:08:46", "23:30:01"], 1)
     assert coordinator_crashes("10:00:00.000 info    [z2m] fine\n") == ([], 0)
