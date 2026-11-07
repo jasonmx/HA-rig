@@ -7,18 +7,13 @@ from pathlib import Path
 import pytest
 
 from ha_rig import terms
+from tests.rig_fakes import write
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("check_private", RIG_HOME / "scripts" / "check_private.py")
 check_private = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_private)
 REAL_WRITE = terms.write  # conftest swaps the module's for a no-op
-
-
-def write(tmp_path: Path, name: str, text: str) -> Path:
-    path = tmp_path / name
-    path.write_text(text)
-    return path
 
 
 def found(tmp_path: Path, profile: str = "", env: str = "") -> dict[str, str]:

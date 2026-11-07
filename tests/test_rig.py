@@ -21,6 +21,7 @@ from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
 from ha_rig.progress import path_for
 from tests import rig_fakes as fakes
+from tests.rig_fakes import write
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("rig", RIG_HOME / "scripts" / "rig.py")
@@ -32,12 +33,6 @@ _spec.loader.exec_module(rig)
 def reports_in_tmp(tmp_path, monkeypatch):
     """A run's report and captured logs go to the test's folder, not the system temp one."""
     monkeypatch.setattr(rig, "REPORT_DIR", tmp_path / "reports")
-
-
-def write(tmp_path: Path, name: str, text: str) -> Path:
-    path = tmp_path / name
-    path.write_text(text)
-    return path
 
 
 @pytest.fixture
@@ -804,7 +799,6 @@ async def test_recover_puts_back_every_lanes_case(tmp_path, monkeypatch):
 
 
 async def test_recover_puts_back_a_cases_auto_config_and_waits_out_its_reload(monkeypatch):
-    monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
     monkeypatch.setitem(engine.ENTRY_RELOADS, "shelly", replace(engine.ENTRY_RELOADS["shelly"], deadline_s=0.5))
     shelly = fakes.ShellyAuto({"switch.plug": {"auto_off": {"duration": 6}, "auto_on": None}})
     ha = fakes.FakeHA({"switch.plug": {"state": "on"}}, shelly)
