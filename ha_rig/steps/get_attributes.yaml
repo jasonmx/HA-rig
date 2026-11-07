@@ -54,7 +54,7 @@ tests:
     only: [zigbee2mqtt]
     steps:
       - set: {state: on, xy_color: [0.3, 0.5]}
-      - wait: 2  # as in reads_while_off
+      - wait: 2  # Z2M sends color after on, and a bulb drops it if the off lands first
       - set: {state: off}
       - call: {}
       - expect_response:
