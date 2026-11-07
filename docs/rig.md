@@ -24,9 +24,9 @@ from.
 The rig keeps the profiles and `.env.rig` in this repo's main checkout, and its locks, journals and baseline in the
 deviceside checkout's git common dir, shared by every worktree of it. It writes its test records into the
 deviceside checkout, to commit there. On every invocation it also writes the household's terms, every profile's
-entity IDs and IEEEs and `.env.rig`'s host and token, to `.private-terms.rig` in deviceside's main checkout
-(gitignored), where deviceside's household check reads them; `python -m ha_rig.terms` does it by hand after editing
-a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in deviceside's main checkout, where the
+entity IDs and IEEEs and `.env.rig`'s HA and Hue bridge hosts, tokens, Hue app key and restricted sensor, to
+`.private-terms.rig` in deviceside's main checkout (gitignored), where deviceside's household check reads them;
+`python -m ha_rig.terms` does it by hand after editing a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in deviceside's main checkout, where the
 rig kept them before it moved: move them here.
 
 ## Before a run
