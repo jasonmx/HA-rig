@@ -984,13 +984,16 @@ tests:
 
 
 def ramp(step: int) -> Callable:
-    """Brightness that changes by `step` every 50 ms, from 100, until the test ends."""
+    """Brightness that changes by `step` every 50 ms, from 100, until the light is turned off (as a transition stops)
+    or the test ends."""
 
     def _respond(ha, action, data):
         async def _ramp():
             brightness = 100
             while True:
                 await asyncio.sleep(0.05)
+                if ha.states[data["entity_id"]]["state"] == "off":
+                    return
                 brightness += step
                 ha.set(data["entity_id"], "on", brightness=brightness)
 
@@ -1020,6 +1023,31 @@ async def test_sample(tmp_path, expect, step, failure):
     outcome, detail = outcomes(result)["ramps[light_dimmable]"]
     assert outcome is (Outcome.FAIL if failure else Outcome.PASS)
     assert failure in detail
+
+
+async def test_a_steady_sample_of_an_attribute_never_read_fails(tmp_path):
+    # Read as 0 throughout, an absent attribute would hold steady.
+    ha = FakeHA({"light.lamp": {}}, lambda ha, action, data: {data["entity_id"]: {"status": "confirmed"}})
+    steps = suite(tmp_path, SAMPLE.replace("EXPECT", "steady"))
+    result = await run_one(ha, steps, profile(light_dimmable="light.lamp"))
+    assert outcomes(result) == {
+        "ramps[light_dimmable]": (Outcome.FAIL, "step 2 (sample): light.lamp: brightness was never read")
+    }
+
+
+async def test_a_rise_from_off_reads_the_missing_brightness_as_0(tmp_path):
+    def respond(ha, action, data):
+        async def _light():
+            await asyncio.sleep(0.1)
+            ha.set(data["entity_id"], "on", brightness=50)
+
+        ha.set(data["entity_id"], "off")
+        PENDING.append(asyncio.get_running_loop().create_task(_light()))
+        return {data["entity_id"]: {"status": "confirmed"}}
+
+    steps = suite(tmp_path, SAMPLE.replace("EXPECT", "rising"))
+    result = await run_one(FakeHA({"light.lamp": {}}, respond), steps, profile(light_dimmable="light.lamp"))
+    assert outcomes(result) == {"ramps[light_dimmable]": (Outcome.PASS, "")}
 
 
 async def test_a_failed_sample_times_each_reading_from_the_call(tmp_path):
@@ -1565,6 +1593,8 @@ async def test_each_suite_runs_with_its_options_and_the_rig_gets_its_own_back(tm
     assert admin.options == {"opt": True, "other": False}  # as the rig had them
     assert admin.saved == [{"opt": False, "other": False}, {"opt": True, "other": False}]
     assert [suite_result.suite.name for suite_result in result.suites] == ["raise_brightness", "raise_brightness-opt"]
+    records = [render_record(each, "Fake", "2026.10.1", [], "2026-10-25", "test", "lab") for each in result.suites]
+    assert ["| Options | opt |" in record for record in records] == [False, True]
 
 
 async def test_options_already_in_force_are_not_saved(tmp_path, monkeypatch):

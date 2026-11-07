@@ -1593,7 +1593,7 @@ class _CaseRun:
         attributes = {key: args.get("attributes", {}) for key in keys}
         if self.is_group(keys[0]):
             return expect, attributes
-        states = {key: await self.ha.get_state(key) for key in keys}
+        states = dict(zip(keys, await asyncio.gather(*map(self.ha.get_state, keys)), strict=True))
         if "attributes" in args:
             attributes = _by_modes(attributes, states, entity_id)
         sent = _LIGHT_FIELDS & set(self.sent)
@@ -1623,7 +1623,7 @@ class _CaseRun:
         shared between them."""
         deadline = asyncio.get_running_loop().time() + (within or 0)
         members = await self.members(entity_id)
-        states = {member: await self.ha.get_state(member) for member in members}
+        states = dict(zip(members, await asyncio.gather(*map(self.ha.get_state, members)), strict=True))
         wants = _by_modes(dict.fromkeys(members, want), states, entity_id)
         for member in members:
             member_want = dict(wants[member])
@@ -1635,7 +1635,7 @@ class _CaseRun:
                 return state is not None and all(_matches(_value(state, n), v) for n, v in member_want.items())
 
             if within is None:
-                if not holds(state := await self.ha.get_state(member)):
+                if not holds(state := states[member]):
                     raise StepFailure(f"{member}: expected {member_want}, got {_describe(state, member_want)}")
                 continue
             remaining = max(deadline - asyncio.get_running_loop().time(), 0)
@@ -1723,7 +1723,7 @@ class _CaseRun:
 
     async def _sample(self, args: dict, _following: str | None) -> None:
         """Poll an attribute (dotted, as _lookup reads one) for `for` seconds; an absent attribute (a light that is
-        off) reads as 0.
+        off) reads as 0, but a sample in which it was never read fails, else an absent attribute would pass `steady`.
 
         `source: deviceside` reads deviceside.get_attributes instead of HA's state, in its units (brightness in
         percent): mid-move it predicts where the light is, where HA shows a Hue fade's end value at once.
@@ -1733,6 +1733,7 @@ class _CaseRun:
         deadline = loop.time() + args["for"].eval(self.names)
         every = max(args["every"].eval(self.names), 0.05)
         readings: list[float] = []
+        read = False  # any reading was not None
         offsets: list[float] = []  # each reading's round-trip middle, after the last call was sent (else the start)
         since = self.call_times[0] if self.call_times else loop.time()
         while True:
@@ -1741,10 +1742,13 @@ class _CaseRun:
             offsets.append((before + loop.time()) / 2 - since)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
                 raise StepFailure(f"{entity_id}: {attribute} is {value!r}, not a number")
+            read = read or value is not None
             readings.append(float(value or 0))
             if loop.time() >= deadline:
                 break
             await asyncio.sleep(min(every, max(deadline - loop.time(), 0)))
+        if not read:
+            raise StepFailure(f"{entity_id}: {attribute} was never read")
         shown = _timed(readings, offsets, self.call_times)
         if "min" in args and min(readings) < args["min"]:
             raise StepFailure(f"{entity_id}: {attribute} fell below {args['min']}: {shown}")
@@ -2164,10 +2168,13 @@ class Device:
 
 async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[Device]]:
     """HA's version and the devices behind the entities, via registry calls a non-admin token may make."""
-    config = await ha.command({"type": "get_config"})
-    listed = await ha.command({"type": "config/entity_registry/list_for_display"})
+    config, listed, registered = await asyncio.gather(
+        ha.command({"type": "get_config"}),
+        ha.command({"type": "config/entity_registry/list_for_display"}),
+        ha.command({"type": "config/device_registry/list"}),
+    )
     device_ids = {entry["ei"]: entry.get("di") for entry in listed["entities"]}
-    devices = {device["id"]: device for device in await ha.command({"type": "config/device_registry/list"})}
+    devices = {device["id"]: device for device in registered}
     found: dict[Device, None] = {}
     for entity_id in entity_ids:
         if (device := devices.get(device_ids.get(entity_id))) is not None:
@@ -2189,6 +2196,8 @@ def render_record(
         ("Home Assistant", ha_version),
         ("Device", "; ".join(map(str, devices)) or "none"),
     ]
+    if suite.file.options:
+        rows.append(("Options", ", ".join(sorted(suite.file.options))))
     lines = [f"# {title} · {suite.name}", "", "| | |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     lines += ["", "## Tests", "", *table(suite_result)]
