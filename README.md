@@ -11,3 +11,64 @@ Setup, running it, and writing step files: [docs/rig.md](docs/rig.md).
 uv sync && .venv/bin/pytest          # the rig's own tests, against a deviceside checkout beside this one
 cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 ```
+
+## Options
+
+`./scripts/rig.py --help`, at 100 columns (`tests/test_rig.py` fails when this block drifts from it):
+
+<!-- rig-help -->
+```text
+usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--coverage] [--no-deploy]
+              [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
+              [--unattended] [--serial] [--debug-logs] [--deploy-only] [--for DURATION] [--fresh]
+              [--ignore-unreachables] [--recover] [--roam-check] [--wait-free]
+              [--hold INTEGRATION] [--exclusive] [--visual {none,profile}]
+
+Run the rig tests against the live HA, behind an authorization gate.
+
+options:
+  -h, --help            show this help message and exit
+  --profile PROFILE     the profile to run (profiles/NAME.yaml); needed if there are two
+  --dry-run             print the plan and stop before the gate
+  --check               check the run's devices are in HA, on their integration and available, and
+                        where its roaming bulbs are, then stop: no lock, no deploy, nothing
+                        changed
+  --coverage            say which selected suites are covered at this checkout's HEAD, by a fresh
+                        record or saved cases, and which devices the missing cases need, then
+                        stop: no lock, no deploy, nothing changed
+  --no-deploy           test whatever HA already runs
+  --integration {hue,matter,shelly,zha,zigbee2mqtt}
+                        limit to an integration key (repeatable); with --wait-free, wait for it
+  --action ACTION       limit to an action's step files (repeatable)
+  -k KEYWORD            run only test cases whose id contains this text
+  --unattended          skip observed tests, reporting them not observed
+  --serial              run every case one at a time, with no lanes: to tell a case that fails in
+                        a lane from one that fails
+  --debug-logs          run HA's DeviceSide and the run's integrations, and Z2M, at debug, and
+                        keep the run's captured logs (they are kept after a failure whatever this
+                        says)
+  --deploy-only         deploy this checkout's branch and restart HA, then release the locks: no
+                        profile, no tests; unrestricted
+  --for DURATION        start no case after this long (30m, 90s, 1h15m), let in-flight ones
+                        finish, put back and exit 75; rerun the same way to resume
+  --fresh               rerun the selected suites whole, whatever their records and saved cases
+                        say
+  --ignore-unreachables
+                        run what the devices that are up allow: skip the cases of an unavailable
+                        fixed entity, and while any is, of fixed groups whose members the profile
+                        doesn't list and of fixed scenes; their suites write no record
+  --recover             put back what an aborted run left changed, then stop
+  --roam-check          move the profile's roam bulbs to every network and home, no suites
+  --wait-free           wait until no rig run holds the locks (with --integration, those
+                        integrations' and HA exclusively), without taking them; another run may
+                        take them first
+  --hold INTEGRATION    hold this integration's lock (repeatable) and HA shared while running the
+                        command after --, for a probe
+  --exclusive           with a command after --: hold HA exclusively, for a probe that restarts HA
+                        or reloads DeviceSide
+  --visual {none,profile}
+                        with a command after --: declare what the probe changes that anyone could
+                        see, making it unrestricted: none, nothing; profile, only what the pre-
+                        authorized profile covers. Left out, the probe is restricted
+```
+<!-- /rig-help -->

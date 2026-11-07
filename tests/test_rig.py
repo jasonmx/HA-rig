@@ -1621,3 +1621,16 @@ async def test_a_cleanup_that_raises_doesnt_skip_the_rest(tmp_path, monkeypatch)
 
     assert ha.states["automation.motion"]["state"] == "on"
     assert closed == [True, True]  # both clients; here one fake serves as each
+
+
+def test_readme_shows_the_current_help(monkeypatch, capsys):
+    """README's options block is `rig.py --help` verbatim, so a CLI change lands with its README update."""
+    monkeypatch.setenv("COLUMNS", "100")
+    monkeypatch.setenv("PYTHON_COLORS", "0")  # outranks FORCE_COLOR, which colors argparse's help off a tty
+    monkeypatch.setattr(rig.sys, "argv", ["rig.py"])
+    with pytest.raises(SystemExit):
+        rig.main(["--help"])
+    readme = (RIG_HOME / "README.md").read_text()
+    assert "<!-- rig-help -->" in readme and "<!-- /rig-help -->" in readme, "README lost its rig-help markers"
+    block = readme.split("<!-- rig-help -->\n```text\n", 1)[1].split("\n```\n<!-- /rig-help -->", 1)[0]
+    assert block == capsys.readouterr().out.rstrip("\n"), "regenerate README's block: COLUMNS=100 scripts/rig.py --help"
