@@ -27,5 +27,7 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 - Before opening the PR: `/audit-code` on the diff, then fix its findings and carry on to the PR; stop for Jason
   only on a big judgment call. Judge each finding by the codebase's long-term health, not the PR's convenience:
   fix it now unless it is genuinely out of scope, and then say where it is tracked.
+- A PR that changes `scripts/rig.py`'s options regenerates README's `--help` block (`COLUMNS=100 scripts/rig.py
+  --help`); `tests/test_rig.py` fails until it does.
 - A new or renamed deviceside action needs its step file here, landed with or before the deviceside PR it tests.
 - Async throughout; American English, matching HA.
