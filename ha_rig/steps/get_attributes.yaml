@@ -48,7 +48,7 @@ tests:
           attributes:
             xy_color.0: {min: 0.29, max: 0.31}
             xy_color.1: {min: 0.49, max: 0.51}
-            hs_color.0: {min: 0, max: 360}
+            hs_color.0: {min: 94, max: 108}  # xy (0.3, 0.5) is hue 101; the xy bounds above span 96 to 107
             color_temp_kelvin: null
 
   # Zigbee2MQTT reads each member: a group has a timer only when every member that is on runs one.
