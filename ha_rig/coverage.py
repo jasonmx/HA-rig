@@ -34,6 +34,7 @@ CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULT
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
 CASE_ROW = re.compile(r"^\| `([^`]+)` \|", re.MULTILINE)
 RECORDS = Path("docs") / "test-records"
+INTEGRATIONS = "custom_components/deviceside/integrations/"  # left off the changed files a stale record names
 
 
 def adapter_code(repo: Path) -> Callable[[Path], list[Path]]:
@@ -143,7 +144,7 @@ def freshness(repo: Path, suite: Suite, commit: str, files: Iterable[str], plann
     if (diff := git(repo, "diff", "--name-only", record.commit, commit, "--", *files, check=False)).returncode:
         return Freshness(record, f"git can't compare {record.commit} with {commit}: {diff.stderr.strip()}")
     if changed := diff.stdout.split():
-        return Freshness(record, ", ".join(changed))
+        return Freshness(record, ", ".join(path.removeprefix(INTEGRATIONS) for path in changed))
     planned = frozenset(planned)
     if record.case_ids != planned:
         new, gone = sorted(planned - record.case_ids), sorted(record.case_ids - planned)

@@ -686,6 +686,12 @@ def main(argv: list[str] | None = None) -> int:
         help="check the run's devices are in HA, on their integration and available, and where its roaming bulbs "
         "are, then stop: no lock, no deploy, nothing changed",
     )
+    parser.add_argument(
+        "--coverage",
+        action="store_true",
+        help="say which selected suites are covered at this checkout's HEAD, by a fresh record or saved cases, and "
+        "which devices the missing cases need, then stop: no lock, no deploy, nothing changed",
+    )
     parser.add_argument("--no-deploy", action="store_true", help="test whatever HA already runs")
     parser.add_argument(
         "--integration",
@@ -779,6 +785,7 @@ def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, 
         args.profile
         or args.no_deploy
         or args.check
+        or args.coverage
         or args.roam_check
         or args.recover
         or args.wait_free
@@ -802,6 +809,21 @@ def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, 
         parser.error("--ignore-unreachables is for a test run or --check")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
+    if args.coverage and (
+        args.check
+        or args.dry_run
+        or args.no_deploy
+        or args.roam_check
+        or args.recover
+        or args.wait_free
+        or command
+        or args.serial
+        or args.debug_logs
+        or args.budget
+        or args.fresh
+        or args.ignore_unreachables
+    ):
+        parser.error("--coverage takes only --profile, --integration, --action, -k and --unattended")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
         parser.error("--debug-logs is for a run or --roam-check")
     if args.visual and not command:
@@ -844,6 +866,8 @@ def wait_or_run(args: argparse.Namespace) -> int:
         return recover_all(args, directory)
     if args.deploy_only:
         return deploy_only(args, directory)
+    if args.coverage:
+        return coverage_only(args, directory)
     setup = prepare(args, directory)
     held = None if args.dry_run else take(args, setup, directory)  # waits for the locks, then holds them until exit
     try:
@@ -1254,6 +1278,59 @@ def check_only(
     )
     print_unreachable(setup.suites, setup.profile, setup.registry, keyword)
     return 1 if problems else 0
+
+
+def coverage_only(args: argparse.Namespace, directory: Path) -> int:
+    """--coverage: each selected suite's coverage at the checkout's HEAD, as a run would plan it, and the devices its
+    missing cases need, which is what to power up for the next run. Reads the records, the ledger and HA's version;
+    changes nothing, the ledger included. With no selection it is the whole profile: the release candidate's view.
+    Returns 0 when every suite is covered."""
+    env = load_env()
+    try:
+        profile = Profile.load(choose_profile(args.profile, env))
+    except ValueError as err:
+        raise SystemExit(f"Fix the profile: {err}") from err
+    registry = AdapterRegistry.discover()
+    suites = run_suites(args, profile, registry)
+    commit = git("rev-parse", "HEAD")
+    print(f"Coverage of profile {profile.name} at {git('rev-parse', '--short', commit)} (HEAD):")
+    if git("status", "--porcelain", "--", COMPONENT):
+        print(f"  Uncommitted changes under {COMPONENT} aren't counted: a run deploys only what is committed.")
+    progress = Progress.load(directory, profile.name)
+    if progress.entries:
+        if (version := ha_version(env)) is None:
+            print("  HA's version can't be read, so saved cases on an older HA may still count below.")
+        else:
+            progress.check_ha(version)
+    plan = coverage.of(suites, profile, registry, REPO, commit, progress, unattended=args.unattended)
+    for line in coverage_lines(plan, profile, args.keyword):
+        print(line)
+    return 0 if all(suite_coverage.covered for suite_coverage in plan) else 1
+
+
+def coverage_lines(plan: list[SuiteCoverage], profile: Profile, keyword: str | None = None) -> list[str]:
+    """One line per suite, its missing cases (those `keyword` keeps) under a partial one, then the total and the devices
+    every missing case needs, their supplies included."""
+    lines, needed = [], {}
+    power = profile.power()
+    for suite_coverage in plan:
+        suite = suite_coverage.suite
+        lines.append(f"  {suite.integration} / {suite.name}: {suite_coverage}")
+        if suite_coverage.covered:
+            continue
+        missing = [case for case in suite_coverage.missing if not keyword or keyword in case.id]
+        for case in missing:
+            devices = [] if case.skip else list(dict.fromkeys([*case.entities.values(), *case.members]))
+            devices += [power[e] for e in devices if e in power and power[e] not in devices]
+            needed.update(dict.fromkeys(devices))
+            if suite_coverage.saved:
+                lines.append(f"      {case.id}: {', '.join(devices) or case.skip}")
+    covered = sum(suite_coverage.covered for suite_coverage in plan)
+    left = sum(len(suite_coverage.missing) for suite_coverage in plan if not suite_coverage.covered)
+    lines.append(f"{covered} of {len(plan)} suites covered; {left} cases missing.")
+    if needed:
+        lines.append(f"The missing cases need: {', '.join(sorted(needed))}")
+    return lines
 
 
 def hold_command(args: argparse.Namespace, directory: Path) -> int:

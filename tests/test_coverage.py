@@ -101,7 +101,7 @@ def test_a_record_stays_fresh_until_its_adapters_code_changes(repo):
     changed = commit(repo, {f"{PKG}/hue/turn_on_for.py": "x = 2\n"})
     assert coverage.freshness(repo, SUITE, changed, shelly(repo), IDS).fresh
     stale = coverage.freshness(repo, OTHER, changed, hue(repo), IDS)
-    assert (stale.fresh, str(stale)) == (False, f"stale: {PKG}/hue/turn_on_for.py")
+    assert (stale.fresh, str(stale)) == (False, "stale: hue/turn_on_for.py")
 
 
 def test_a_record_whose_cases_differ_is_stale(repo):

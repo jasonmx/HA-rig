@@ -1510,6 +1510,54 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     assert {call[2].get("entity_id") for call in ha.calls if call[0] == "light"} == {"light.b"}
 
 
+def test_coverage_lists_each_suite_the_missing_cases_and_the_devices_they_need(tmp_path, monkeypatch):
+    entities = [
+        RigEntity("light.a", frozenset({"light_ct"}), powered_by="switch.p"),
+        RigEntity("switch.p", frozenset({"switch_plug"})),
+    ]
+    profile = Profile({"shelly": entities, "zha": [RigEntity("light.b", frozenset({"light_ct"}))]}, {}, name="house")
+    step_file = load_step_file(write(tmp_path, "steps.yaml", TWO_SUITES))
+    suites = [rig.Suite(step_file, "shelly"), rig.Suite(step_file, "zha")]
+    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
+    earlier.record(
+        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.a",))
+    )
+    plan = planned(tmp_path, monkeypatch, suites, profile).coverage
+    assert rig.coverage_lines(plan, profile) == [
+        "  shelly / raise_brightness: partial 1/2",
+        "      u[light_ct]: light.a, switch.p",
+        "  zha / raise_brightness: uncovered (no record)",
+        "0 of 2 suites covered; 3 cases missing.",
+        "The missing cases need: light.a, light.b, switch.p",
+    ]
+
+
+def test_coverage_changes_nothing_not_even_a_stale_ledger(tmp_path, monkeypatch, capsys):
+    profile, suites = resumable(tmp_path)
+    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
+    earlier.record(
+        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.FAIL, "x", ("light.a",))
+    )
+    ledger = rig.Progress.load(tmp_path, "house").path
+    before = ledger.read_text()
+    monkeypatch.setattr(rig, "load_env", dict)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: None)
+    monkeypatch.setattr(rig.Profile, "load", lambda path: profile)
+    monkeypatch.setattr(rig, "run_suites", lambda args, profile, registry: suites)
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "" if "status" in args else "c1")
+    monkeypatch.setattr(rig.AdapterRegistry, "discover", lambda: fakes.OPTION_REGISTRY)
+    assert rig.coverage_only(run_args(profile=None), tmp_path) == 1
+    assert ledger.read_text() == before  # its failed suite would drop, but only a run saves
+    assert "0 of 2 suites covered; 4 cases missing." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("extra", [["--check"], ["--dry-run"], ["--fresh"], ["--ignore-unreachables"], ["--serial"]])
+def test_coverage_is_read_only_and_takes_only_a_selection(extra, capsys):
+    with pytest.raises(SystemExit):
+        rig.main(["--coverage", *extra])
+    assert "--coverage takes only" in capsys.readouterr().err
+
+
 def test_a_signal_stops_a_run_with_progress_resumable(capsys):
     async def cancelled():
         raise asyncio.CancelledError
