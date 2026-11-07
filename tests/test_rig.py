@@ -1390,3 +1390,34 @@ def test_a_signal_stops_a_run_with_progress_resumable(capsys):
 
     assert rig.run_tests(cancelled(), aborted=lambda: rig.RESUMABLE) == rig.RESUMABLE
     assert capsys.readouterr().out == "Aborted.\n"
+
+
+async def test_a_cleanup_that_raises_doesnt_skip_the_rest(tmp_path, monkeypatch):
+    """end_logging raising still releases the pauses and closes the client, and its error is the one raised."""
+    ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
+    closed = []
+
+    async def close():
+        closed.append(True)
+
+    ha.close = close
+
+    async def run_phases(*args, **kwargs):
+        await args[10]()  # the pause: the automation goes off for the run
+        assert ha.states["automation.motion"]["state"] == "off"
+        return engine.RunResult([])
+
+    async def end_logging(*args):
+        raise RuntimeError("logging is stuck")
+
+    monkeypatch.setattr(rig, "run_phases", run_phases)
+    monkeypatch.setattr(rig, "end_logging", end_logging)
+    journal = Journal(tmp_path / LEGACY_NAME)
+
+    with pytest.raises(RuntimeError, match="logging is stuck"):
+        await rig.run_rig(
+            {}, [], fakes.profile("shelly", ("automation.motion",)), fakes.OPTION_REGISTRY, None, True, None, journal
+        )
+
+    assert ha.states["automation.motion"]["state"] == "on"
+    assert closed == [True, True]  # both clients; here one fake serves as each

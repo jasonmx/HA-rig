@@ -349,7 +349,7 @@ def deployed_trees(status_cmd: str) -> tuple[str | None, str | None]:
     """
     if not status_cmd:
         return None, None
-    result = subprocess.run(status_cmd.split(), capture_output=True, text=True)
+    result = subprocess.run(shlex.split(status_cmd), capture_output=True, text=True)
     if result.returncode == 91:
         return None, None
     if result.returncode != 0:
@@ -1193,7 +1193,8 @@ def hold_command(args: argparse.Namespace, directory: Path) -> int:
     """A command after --: run a probe holding the integrations --hold names and HA, shared or with --exclusive
     exclusively, with the profile's automations for them paused, and return its exit code. No case journal: the
     probe puts back what it changes. It is restricted unless --visual declares it isn't (probe_restricted), and a
-    restricted probe that went because the sensor was off is checked again once it holds its locks. A journal is
+    restricted probe that went because the sensor was off is checked again once it holds its locks. Holding them, it
+    puts back what aborted runs left under them, as replay does, and only warns of an orphan it may not. A journal is
     started all the same, never written, as the name the baseline knows the probe by, alive while it runs: a crashed
     probe's pauses are pruned like a run's."""
     wanted = Claim("exclusive" if args.exclusive else "shared", frozenset(args.hold or ()))
@@ -1214,13 +1215,15 @@ def hold_command(args: argparse.Namespace, directory: Path) -> int:
         return 0
     if not proceed(decision):
         return 1
-    with locks.hold(wanted, holder, directory):
+    with locks.hold(wanted, holder, directory) as held:
         # A probe may wait long for its locks. One that went on the sensor alone reads it again; one approved, by the
         # variable or a human's yes, isn't asked again.
         if restricted and authority.clear() and not approved():
             authority = Authority(env)
             if not authority.clear() and not proceed(decision := authority.decide(restricted)):
                 return 1
+        # Put back what the locks cover and the rig may; warn of the rest, which the probe starts over all the same.
+        replay(env, held, directory, authority, warn=True)
         journal = Journal.start(directory)
         try:
             with authority.watching(decision):
@@ -1432,12 +1435,12 @@ def left_restricted(journal: Journal, why: str) -> str:
     return f"left {journal.path} ({why}): sensor off or {APPROVAL}=1 restores it"
 
 
-def replay(env: dict, held: Held | None, directory: Path, authority: Authority) -> set[str]:
+def replay(env: dict, held: Held | None, directory: Path, authority: Authority, warn: bool = False) -> set[str]:
     """Put back what aborted runs left changed, each whose claim the run holds (needs) and that `authority` lets the
     rig put back now; say how to put back the rest. A run whose claim covers an orphan it may not put back stops
     here, before its gate, rather than test on top of what that orphan left. A dry run holds nothing, so it only says
     what is there. Returns the roaming bulbs whose Hue home the home record or a journal from before it still holds,
-    which a run puts back."""
+    which a run puts back. With `warn` (a probe), an orphan it may not put back is only printed, and it goes on."""
     homes: set[str] = set()
     stale: list[str] = []
     for orphan in orphans(directory):
@@ -1446,7 +1449,7 @@ def replay(env: dict, held: Held | None, directory: Path, authority: Authority) 
             covered = held is None or held.claim.covers(needed)
             if covered and (why := authority.withholds(orphan)):
                 print(left_restricted(orphan, why))
-                if held is not None:
+                if held is not None and not warn:
                     stale.append(str(orphan.path))
             elif held is not None and covered:
                 asyncio.run(recover_rig(env, orphan))
@@ -1526,7 +1529,7 @@ def print_plan(
         print("Deploy: skipped (--no-deploy); tests run the deployed tree, not this checkout, and write no record")
     elif not deploying:
         print("Deploy: not needed, no restart")
-    seconds = estimate(suites, registry, deploying, roaming, profile if lanes else None, done, profile)
+    seconds = estimate(suites, registry, deploying, roaming, profile if lanes else None, done, resumed=profile)
     print(f"Estimated duration: {seconds} s. These are in-use household devices; they will visibly change state.")
 
 
@@ -1692,21 +1695,53 @@ async def run_rig(
             await report_ran(results, ha, registry, commit, profile, keyword, stamp)
             raise SystemExit(f"Roaming stopped: {err}") from None
         finally:
-            home, signalled = await sheltered(leave_lab(roamer, stopped))
-            await end_logging(logs, levels, admin)
-            if pauses is not None:
-                await pauses.release()
-            drop_profile(journal)
-            if bridge:
-                await bridge.close()
-            await ha.close()
-            if admin:
-                await admin.close()
+            home, signalled = await wind_down(roamer, stopped, logs, levels, pauses, journal, (bridge, ha, admin))
             end_abort(home, signalled, sys.exception())
         code = end_code(result, home, budget, progress, selected, profile, registry)
     finally:
         flagged = logs.settle(code == 0)
     return 1 if flagged else code
+
+
+async def wind_down(
+    roamer: Roamer | None,
+    stopped: Roamer | None,
+    logs: RunLogs,
+    levels: DebugLevels | None,
+    pauses: Baseline | None,
+    journal: Journal | None,
+    clients: tuple[HueBridge | None, HAClient, HAClient | None],
+) -> tuple[bool, bool]:
+    """After a run: the bulbs home (leave_lab), the logs ended, the pauses released, the journal's profile dropped, the
+    clients closed. Each step runs whatever the one before did; the first error is raised once all have. Whether the
+    bulbs are home, and whether a signal came on the way."""
+    errors: list[BaseException] = []
+    home, signalled = True, False
+
+    async def step(call: Awaitable[Any]) -> None:
+        try:
+            await call
+        except BaseException as err:  # noqa: BLE001 - the rest still runs; the first error is raised after
+            errors.append(err)
+
+    try:
+        home, signalled = await sheltered(leave_lab(roamer, stopped))
+    except BaseException as err:  # noqa: BLE001 - as step
+        errors.append(err)
+    admin = clients[2]
+    await step(end_logging(logs, levels, admin))
+    if pauses is not None:
+        await step(pauses.release())
+    try:
+        drop_profile(journal)
+    except Exception as err:  # noqa: BLE001 - as step
+        errors.append(err)
+    for client in clients:
+        if client is not None:
+            await step(client.close())
+    if errors:
+        raise errors[0]
+    return home, signalled
 
 
 def joined(
