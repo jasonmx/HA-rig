@@ -670,6 +670,7 @@ class FakeAdmin(FakeHA):
         self.options = {"opt": True, "other": False} | (options or {})
         self.saved: list[dict] = []
         self.aborted = 0
+        self.menu = ["settings", "report_device", "propose_device", "report_bug"]
         self.disabled = False
         self.stuck = False
         self.moves: list[str] = []
@@ -697,11 +698,14 @@ class FakeAdmin(FakeHA):
             self.moves.append("reload")
             return {"require_restart": False}
         if path.endswith("/options/flow"):
-            schema = [{"name": name, "default": value, "type": "boolean"} for name, value in self.options.items()]
-            return {"type": "form", "flow_id": "f1", "data_schema": schema}
+            # As DeviceSide's options flow: a menu, whose settings step is the options form.
+            return {"type": "menu", "flow_id": "f1", "menu_options": self.menu}
         if method == "delete":
             self.aborted += 1
             return {"message": "Flow aborted"}
+        if json == {"next_step_id": "settings"}:
+            schema = [{"name": name, "default": value, "type": "boolean"} for name, value in self.options.items()]
+            return {"type": "form", "flow_id": "f1", "step_id": "settings", "data_schema": schema}
         self.options = dict(json)
         self.saved.append(dict(json))
         return {"type": "create_entry"}

@@ -64,6 +64,8 @@ UNRESTORED = "+unrestored"  # appended to a case's journal key for the entities 
 
 # How long after saving options the engine waits before checking the entry has reloaded.
 OPTIONS_RELOAD_S = 1.0
+# The step of DeviceSide's options menu that holds its options.
+SETTINGS_STEP = "settings"
 
 # Actions whose calls leave a prediction behind (SETTLE_S): the raises and lowers, which run for up to their
 # sweep_time (default: actions/ramp.py DEFAULT_SWEEP_TIME), and stop.
@@ -739,14 +741,11 @@ class EntryOptions:
     async def apply(self, wanted: dict[str, bool]) -> None:
         if self.original is not None and all(self.current.get(name) == on for name, on in wanted.items()):
             return
-        flow = await self.admin.rest("post", "/api/config/config_entries/options/flow", {"handler": await self.find()})
-        # The form's defaults are the options in force.
-        values = {field["name"]: field.get("default") for field in flow.get("data_schema", [])}
+        flow_path, values = await self.options_form()
         if self.original is None:
             self.original = dict(values)
             if self.journal is not None:
                 self.journal.update(options=self.original)
-        flow_path = f"/api/config/config_entries/options/flow/{flow['flow_id']}"
         if all(values.get(name) == on for name, on in wanted.items()):
             # Saving would still reload an entry whose options were never saved: they go from none to these.
             await self.admin.rest("delete", flow_path)
@@ -771,6 +770,26 @@ class EntryOptions:
             raise
         self.current = values
         await self.reloaded()
+
+    async def options_form(self) -> tuple[str, dict]:
+        """Open DeviceSide's options flow at its options form: its path, and the options in force (the form's
+        defaults). The flow is closed again if it shows no such form."""
+        flow = await self.admin.rest("post", "/api/config/config_entries/options/flow", {"handler": await self.find()})
+        flow_path = f"/api/config/config_entries/options/flow/{flow['flow_id']}"
+        try:
+            if flow.get("type") == "menu":
+                # DeviceSide's options open on a menu (settings and the issue forms); the options are its settings step.
+                if SETTINGS_STEP not in flow.get("menu_options", []):
+                    raise RuntimeError(f"DeviceSide's options menu has no {SETTINGS_STEP!r} step: {flow}")
+                flow = await self.admin.rest("post", flow_path, {"next_step_id": SETTINGS_STEP})
+            # Never read options from anything but the form: no fields would pass for no options, and be put back.
+            if flow.get("type") != "form" or not flow.get("data_schema"):
+                raise RuntimeError(f"DeviceSide's options flow showed no options form: {flow}")
+        except Exception:
+            with contextlib.suppress(Exception):  # don't leave the flow open in HA
+                await self.admin.rest("delete", flow_path)
+            raise
+        return flow_path, {field["name"]: field.get("default") for field in flow["data_schema"]}
 
     async def reloaded(self, state: str = "loaded") -> None:
         """Wait for the reload a saved change schedules, which starts after the save returns, or for a disable or an
