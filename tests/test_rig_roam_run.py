@@ -1083,6 +1083,37 @@ async def test_a_signal_mid_move_still_brings_the_bulbs_home(tmp_path, monkeypat
     assert not journal.path.exists()
 
 
+async def test_a_second_signal_mid_move_leaves_the_bulbs_where_they_are_and_keeps_the_journal(
+    tmp_path, monkeypatch, lab
+):
+    """The first signal started the way home; a second one, which cancels the move itself as asyncio.run does once the
+    default handlers are back, stops the run at once: no bulb is moved on, and the journal keeps where they are."""
+    armed: list[bool] = []
+    run, journal, _ = signal_mid_move(monkeypatch, lab, tmp_path, "join", then=lambda: armed.append(True))
+    left = lab.ha.on_leave
+    stopped: list[bool] = []
+
+    def leave(integration, ieee):
+        left(integration, ieee)
+        if armed and not stopped:  # the first release on the way home
+            stopped.append(True)
+            asyncio.current_task().cancel()  # the way home's own task: sheltered from the first signal only
+
+    lab.ha.on_leave = leave
+    heeding_a_pending_cancel(lab)
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    finally:  # the process would be gone; the run's log readers would not
+        for task in asyncio.all_tasks() - {asyncio.current_task()}:
+            task.cancel()
+
+    assert stopped
+    assert await where(lab) != ["hue", "hue"]
+    assert "roam" in Journal(journal.path).sections
+
+
 async def test_a_signal_on_the_way_home_lets_the_cleanup_after_it_finish(tmp_path, monkeypatch, lab):
     """The signal that came during the move home stops the run only once everything is put back."""
     run, _, signalled = signal_mid_move(monkeypatch, lab, tmp_path, "home")
