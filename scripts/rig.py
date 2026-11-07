@@ -123,7 +123,7 @@ sys.path.append(str(REPO))
 from custom_components.deviceside.core.registry import AdapterRegistry  # noqa: E402
 
 from ha_rig import locks, target, terms  # noqa: E402
-from ha_rig.authorize import APPROVAL, SENSOR_KEY, Decision, authorize  # noqa: E402
+from ha_rig.authorize import APPROVAL, OLD_SENSOR_KEY, SENSOR_KEY, Decision, authorize  # noqa: E402
 from ha_rig.baseline import NAME as BASELINE_NAME  # noqa: E402
 from ha_rig.baseline import Baseline  # noqa: E402
 from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
@@ -504,8 +504,8 @@ def restricted_sensor(env: dict) -> str | None:
     neither is set."""
     if entity := env.get(SENSOR_KEY):
         return entity
-    if entity := env.get("RIG_BLOCKER_ENTITY"):
-        print(f"RIG_BLOCKER_ENTITY in .env.rig is now {SENSOR_KEY}; rename it.")
+    if entity := env.get(OLD_SENSOR_KEY):
+        print(f"{OLD_SENSOR_KEY} in .env.rig is now {SENSOR_KEY}; rename it.")
         return entity
     return None
 

@@ -47,7 +47,7 @@ def main(argv: list[str]) -> int:
     try:
         terms = all_terms()
     except ValueError as err:
-        print(f"Can't read the household's terms, so nothing is checked: {err}")
+        print(f"Can't read the household's terms, so the commit is refused: {err}")
         return 1
     if not terms:
         return 0

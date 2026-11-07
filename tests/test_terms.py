@@ -4,6 +4,8 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from ha_rig import terms
 from tests.rig_fakes import write
 
@@ -52,8 +54,38 @@ def test_terms_come_from_every_entity_a_profile_names(tmp_path):
     }
 
 
-def test_generic_host_is_not_a_term(tmp_path):
+def test_terms_come_from_every_private_key_in_the_env(tmp_path):
+    assert found(
+        tmp_path,
+        env="HA_ADMIN_TOKEN=Admin.Tok\nHUE_BRIDGE_HOST=Bridge.example.lan\nHUE_APP_KEY=HueKey123\n"
+        "RIG_RESTRICTED_ENTITY=binary_sensor.Hall_Watch\nRIG_BLOCKER_ENTITY=binary_sensor.old_blocker\n",
+    ) == {
+        "admin.tok": "HA_ADMIN_TOKEN from .env.rig",
+        "bridge.example.lan": "bridge.example.lan",
+        "huekey123": "HUE_APP_KEY from .env.rig",
+        "binary_sensor.hall_watch": "binary_sensor.Hall_Watch",
+        "binary_sensor.old_blocker": "binary_sensor.old_blocker",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "host"),
+    [
+        ("bridge.example.lan:443", "bridge.example.lan"),
+        ("https://bridge.example.lan", "bridge.example.lan"),
+        ("192.0.2.7", "192.0.2.7"),
+        ("2001:db8::7", "2001:db8::7"),
+        ("[2001:db8::7]", "2001:db8::7"),
+    ],
+)
+def test_a_bridge_host_is_its_host_however_written(tmp_path, value, host):
+    assert found(tmp_path, env=f"HUE_BRIDGE_HOST={value}\n") == {host: host}
+
+
+def test_generic_names_are_not_terms(tmp_path):
     assert found(tmp_path, env="HA_URL=http://homeassistant.local:8123\n") == {}
+    assert found(tmp_path, env="HUE_BRIDGE_HOST=localhost\nHUE_APP_KEY=\n") == {}
+    assert found(tmp_path, env="RIG_RESTRICTED_ENTITY=binary_sensor.rig_restricted\n") == {}
 
 
 def test_terms_default_to_every_profile(tmp_path, monkeypatch):
@@ -129,7 +161,9 @@ def test_check_passes_without_terms(tmp_path, monkeypatch):
 def test_check_fails_when_a_profile_cannot_be_read(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(terms, "profile_paths", lambda: [write(tmp_path, "house.yaml", "pause: [a]1\n")])
     assert check_private.main([str(write(tmp_path, "msg", "anything"))]) == 1
-    assert "house.yaml: not valid YAML" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "the commit is refused" in out
+    assert "house.yaml: not valid YAML" in out
 
 
 def test_check_fails_on_a_hit(tmp_path, monkeypatch, capsys):
