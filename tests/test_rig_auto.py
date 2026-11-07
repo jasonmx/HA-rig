@@ -11,7 +11,7 @@ from ha_rig import engine
 from ha_rig.engine import Outcome, RunResult, load_step_file, run
 from ha_rig.engine import Suite as EngineSuite
 from ha_rig.journal import Journal
-from tests.rig_fakes import PENDING, FakeHA, ShellyAuto, profile
+from tests.rig_fakes import FakeHA, ShellyAuto, profile
 
 REGISTRY = AdapterRegistry.discover()
 TOLERANCE = {"shelly": 0.2}
@@ -21,17 +21,7 @@ PLUG = "switch.plug"
 
 @pytest.fixture(autouse=True)
 def _quick(monkeypatch):
-    monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
     monkeypatch.setitem(engine.ENTRY_RELOADS, "shelly", replace(engine.ENTRY_RELOADS["shelly"], deadline_s=DEADLINE_S))
-
-
-@pytest.fixture(autouse=True)
-async def _cancel_pending():
-    yield
-    for pending in PENDING:
-        pending.cancel()
-    await asyncio.gather(*(task for task in PENDING if isinstance(task, asyncio.Task)), return_exceptions=True)
-    PENDING.clear()
 
 
 def steps(tmp_path, action: str, body: str) -> EngineSuite:
