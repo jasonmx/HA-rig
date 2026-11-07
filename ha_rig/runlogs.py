@@ -48,7 +48,9 @@ def coordinator_crashes(log: str) -> tuple[list[str], int]:
             at = datetime.datetime.strptime(stamp[:8], "%H:%M:%S")
         except ValueError:
             continue
-        if last is None or not 0 <= (at - last).total_seconds() < CRASH_GAP_S:
+        # Stamps carry no date: a negative gap is a crash across midnight, a day later than it reads.
+        gap = (at - last).total_seconds() % 86400 if last is not None else None
+        if gap is None or gap >= CRASH_GAP_S:
             crashes.append(stamp[:8])
         last = at
     return crashes, acks

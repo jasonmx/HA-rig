@@ -49,6 +49,7 @@ from .profile import (
     normalize_ieee,
     rig_name,
 )
+from .runlogs import HA_DOMAINS, ROAM_INTEGRATIONS
 
 NAMES = {"hue": "Hue", "zha": "ZHA", "zigbee2mqtt": "Z2M"}
 JOIN_S = 120  # how long a join window stays open, and how long a bulb has to join it
@@ -80,7 +81,7 @@ GONE_S = 15  # for HA to drop a rig-made group's entity once the group is remove
 SCENE_BRIGHTNESS = 40.0
 SCENE_MIREK = 366
 # HA's platform for each network's entities, so the rig removes only a leftover entity of its own kind.
-PLATFORMS = {"hue": "hue", "zha": "zha", "zigbee2mqtt": "mqtt"}
+PLATFORMS = {key: HA_DOMAINS[key] for key in ROAM_INTEGRATIONS}
 # Z2M registers a group's HA device as ("mqtt", "zigbee2mqtt_<base topic as character codes>_<group ID>")
 # (getEncodedBaseTopic in Z2M's lib/extension/homeassistant.ts; DeviceSide's zigbee2mqtt/addressing.py reads it).
 Z2M_GROUP_IDENTIFIER = "zigbee2mqtt_" + "".join(str(ord(c)) for c in "zigbee2mqtt") + "_{}"
@@ -1038,7 +1039,7 @@ class Roamer:
                 self.homes.fill(bulb.ieee, "hue", await self.hue_home(bulb))
 
     async def hue_home(self, bulb: Bulb) -> dict:
-        rooms, zones, scenes = [await self.bridge.get(kind) for kind in ("room", "zone", "scene")]
+        rooms, zones, scenes = await asyncio.gather(*(self.bridge.get(kind) for kind in ("room", "zone", "scene")))
         device_id = await self.bridge.device_id_by_ieee(bulb.ieee)
         device = (await self.bridge.get("device", device_id))[0]
         light_id = _light_of(device)

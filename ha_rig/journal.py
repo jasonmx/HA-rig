@@ -120,7 +120,7 @@ def orphans(directory: Path) -> list[Journal]:
     found = []
     for lock_path in sorted(directory.glob(f"{PREFIX}*.lock")):
         handle = lock_path.open("a+")
-        if not locked(handle):
+        if not acquired(handle):
             handle.close()  # a live run's
             continue
         journal = Journal(lock_path.with_suffix(".json"), handle)
@@ -131,7 +131,7 @@ def orphans(directory: Path) -> list[Journal]:
     return sorted(found, key=lambda journal: journal.started or 0.0)
 
 
-def locked(handle) -> bool:
+def acquired(handle) -> bool:
     """Take `handle`'s lock if it comes free within PROBES tries; whether it did."""
     for probe in range(PROBES):
         try:

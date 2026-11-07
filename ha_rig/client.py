@@ -100,6 +100,7 @@ class HAClient:
         self._states: dict[str, dict] = {}
         self._changed = asyncio.Condition()
         self._reader: asyncio.Task | None = None
+        self._lost: str | None = None  # why the reader ended, once it has: no reply can come after that
         self._state_events: int | None = None  # the state_changed subscription's WebSocket id
 
     async def connect(self) -> None:
@@ -129,6 +130,22 @@ class HAClient:
             await self._session.close()
 
     async def _read(self) -> None:
+        try:
+            await self._dispatch()
+            self._lost = "the WebSocket closed"
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # a frame that won't parse, or a socket error
+            self._lost = f"{type(err).__name__}: {err}"
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(self._connection_error())
+        self._pending.clear()
+
+    def _connection_error(self) -> ConnectionError:
+        return ConnectionError(f"Home Assistant's WebSocket is gone ({self._lost})")
+
+    async def _dispatch(self) -> None:
         async for message in self._ws:
             data = message.json()
             if data["type"] == "result":
@@ -146,11 +163,18 @@ class HAClient:
                     self._changed.notify_all()
 
     async def command(self, payload: dict, msg_id: int | None = None) -> Any:
+        """Send a command and wait for its reply. Raises ConnectionError at once if the reader has ended, or ends
+        while the command waits, rather than letting it run out its 30 s."""
+        if self._lost is not None:
+            raise self._connection_error()
         msg_id = next(self._ids) if msg_id is None else msg_id
         future = asyncio.get_running_loop().create_future()
         self._pending[msg_id] = future
-        await self._ws.send_json({"id": msg_id, **payload})
-        reply = await asyncio.wait_for(future, timeout=30)
+        try:
+            await self._ws.send_json({"id": msg_id, **payload})
+            reply = await asyncio.wait_for(future, timeout=30)
+        finally:
+            self._pending.pop(msg_id, None)
         if not reply["success"]:
             raise HAError(reply["error"])
         return reply["result"]
