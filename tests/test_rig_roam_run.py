@@ -771,7 +771,7 @@ def main_with(tmp_path: Path, monkeypatch, problems: list[str]) -> list:
     asked = []
 
     async def check_devices(
-        env, suites, profile, registry, keyword, roaming, homes=frozenset(), done=None, ignore=False
+        env, suites, profile, registry, keyword, roaming, homes=frozenset(), done=None, ignore_unreachables=False
     ):
         asked.append(([suite.integration for suite in suites], roaming))
         return problems
@@ -780,6 +780,7 @@ def main_with(tmp_path: Path, monkeypatch, problems: list[str]) -> list:
     monkeypatch.setattr(rig, "load_env", lambda: dict(ENV))
     monkeypatch.setattr(rig, "git", lambda *args, check=True: str(tmp_path) if "--git-common-dir" in args else "wt")
     monkeypatch.setattr(rig, "check_devices", check_devices)
+    monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
     monkeypatch.setattr(rig, "deploy_state", lambda status_cmd: rig.Deploy("c1", "tree", "tree", "tree", "wt"))
     return asked
 

@@ -960,10 +960,13 @@ def plan_coverage(args: argparse.Namespace, setup: Setup, directory: Path) -> No
     those the keyword keeps. What the run holds, moves, checks and estimates shrinks with it. --fresh ignores the
     records and drops the saved cases of the selected suites."""
     progress = Progress.load(directory, setup.profile.name)
-    if progress.entries:  # a record names one HA version, so cases saved on another rerun
-        if (version := ha_version(setup.env)) is None:
-            raise SystemExit("Can't read HA's version, which the saved cases are checked against; is HA up?")
+    # A record names one HA version, so cases saved on another rerun, and new ones note it from the first.
+    if (version := ha_version(setup.env)) is not None:
         progress.check_ha(version)
+    elif progress.entries:
+        if not args.dry_run:
+            raise SystemExit("Can't read HA's version, which the saved cases are checked against; is HA up?")
+        print("HA's version can't be read, so saved cases on an older HA may still count below.")
     setup.progress = progress
     setup.planned_tree = setup.deploy.local_tree
     setup.coverage = coverage.of(
@@ -1148,7 +1151,7 @@ def print_resume(args: argparse.Namespace, setup: Setup) -> None:
             for suite in setup.suites
             if runnable_suite(suite, registry)
         )
-        print(f"Resuming: {len(done)} of {total} cases saved; --fresh to start over.")
+        print(f"Resuming: {len(done)} of the {total} cases of the suites to run are saved; --fresh to start over.")
     if args.budget:
         print(f"Budget: no case starts after {args.budget:.0f} s from approval, deploy included; rerun to resume.")
 
@@ -1847,6 +1850,8 @@ async def run_rig(
             if not isinstance(err, GroupError):
                 stopped, roamer = roamer, None
             await report_ran(results, ha, registry, commit, profile, stamp)
+            if progress is not None:
+                progress.drop_failed()  # the run ends here, so its failed suites rerun whole
             raise SystemExit(f"Roaming stopped: {err}") from None
         finally:
             home, signalled = await wind_down(roamer, stopped, logs, levels, pauses, journal, (bridge, ha, admin))

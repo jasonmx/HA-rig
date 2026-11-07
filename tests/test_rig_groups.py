@@ -411,4 +411,5 @@ def test_a_supply_offline_skips_what_it_powers(tmp_path):
 
 def test_rig_made_groups_and_scenes_stay_in_scope(tmp_path):
     found = skips(tmp_path, {"light.elsewhere"}, members=GROUP.members, made=True)
-    assert found["group"] == (None, False) and found["scene"] == (None, False)
+    assert found["group"] == (None, False)
+    assert found["scene"] == (None, False)

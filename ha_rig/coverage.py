@@ -17,6 +17,7 @@ Pure file and git reading: --coverage and the plan run it before anything change
 
 import datetime
 import hashlib
+import importlib.util
 import inspect
 import re
 import subprocess
@@ -38,15 +39,19 @@ INTEGRATIONS = "custom_components/deviceside/integrations/"  # left off the chan
 
 
 def adapter_code(repo: Path) -> Callable[[Path], list[Path]]:
-    """deviceside's `check_release.adapter_code`, from `repo`'s scripts/. Its import puts `repo` first on sys.path,
-    which is put back, so the rig's own `tests` package still wins."""
-    if (loaded := sys.modules.get("check_release")) is None:
+    """deviceside's `check_release.adapter_code`, from `repo`'s scripts/, loaded once per checkout. Loading it puts its
+    checkout first on sys.path, which is put back, so the rig's own `tests` package still wins."""
+    script = (repo / "scripts" / "check_release.py").resolve()
+    name = f"check_release_{hashlib.sha256(str(script).encode()).hexdigest()[:8]}"
+    if (loaded := sys.modules.get(name)) is None:
+        spec = importlib.util.spec_from_file_location(name, script)
+        loaded = importlib.util.module_from_spec(spec)
         saved = list(sys.path)
-        sys.path.append(str(repo / "scripts"))
         try:
-            import check_release as loaded  # noqa: PLC0415 - from the target checkout, found only at run time
+            spec.loader.exec_module(loaded)
         finally:
             sys.path[:] = saved
+        sys.modules[name] = loaded
     return loaded.adapter_code
 
 
@@ -72,12 +77,11 @@ def fingerprint(repo: Path, commit: str, files: Iterable[str], step_file: Path) 
     """The suite's fingerprint at `commit`: each of its code `files`' blob there, with the step file's hash. A file
     missing at the commit counts as itself missing, not an error."""
     files = sorted(files)
-    blobs = [
-        git(repo, "rev-parse", "--verify", "--quiet", f"{commit}:{path}", check=False).stdout.strip() for path in files
-    ]
+    listed = git(repo, "ls-tree", "--full-tree", commit, "--", *files, check=False).stdout.splitlines()
+    blobs = {path: meta.split()[2] for meta, _, path in (line.partition("\t") for line in listed)}
     digest = hashlib.sha256()
-    for path, blob in zip(files, blobs, strict=True):
-        digest.update(f"{path}\0{blob or '-'}\n".encode())
+    for path in files:
+        digest.update(f"{path}\0{blobs.get(path, '-')}\n".encode())
     digest.update(hashlib.sha256(step_file.read_bytes()).hexdigest().encode())
     return digest.hexdigest()[:16]
 
@@ -190,7 +194,7 @@ class SuiteCoverage:
 def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
     """Whether a saved result still stands for `case`: the profile skips it for the same reason, or it moved the
     entities the case plans now. A `not observed` stands only for an unattended run."""
-    if case.skip:
+    if case.skip and not case.unreachable:  # an unreachable skip is for now: what it saved before still stands
         return result.outcome is Outcome.SKIPPED and result.detail == case.skip
     if result.outcome is Outcome.NOT_OBSERVED:
         return unattended

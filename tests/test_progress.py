@@ -99,7 +99,8 @@ def test_an_unreachable_skip_is_never_saved(tmp_path):
     progress.record(
         SUITE, CaseResult("c[light]", "light", None, Outcome.SKIPPED, "light.x unreachable", unreachable=True)
     )
-    assert not progress and not path_for(tmp_path, "lab").exists()
+    assert not progress
+    assert not path_for(tmp_path, "lab").exists()
 
 
 def test_a_failed_suite_is_dropped_at_the_runs_end_and_others_stay(tmp_path):

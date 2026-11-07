@@ -78,7 +78,10 @@ class Progress:
     @classmethod
     def load(cls, directory: Path, profile: str) -> Progress:
         """The ledger on disk, its entries untouched for PRUNE_DAYS dropped (from the file at the next save)."""
-        progress = cls(path_for(directory, profile), _read(path_for(directory, profile)))
+        path = path_for(directory, profile)
+        progress = cls(path, _read(path))
+        if path.exists() and not progress.entries and path.read_text().strip():
+            print(f"The ledger {path} is unreadable, so every saved case reruns; the next save replaces it.")
         now = datetime.datetime.now()
         for key in [key for key, entry in progress.entries.items() if _old(entry, now)]:
             progress._drop(key)
@@ -104,11 +107,12 @@ class Progress:
         return [(integration, name, fingerprint) for (integration, name), fingerprint in self.tracked.items()]
 
     def check_ha(self, version: str, out: Callable[[str], None] = print) -> None:
-        """Drop each entry whose cases ran on another HA version than `version`, from the file at the next save: a
-        record names one. Notes `version` for the cases to come."""
+        """Drop each entry whose cases ran on another HA version than `version`, or on one never noted (a run killed
+        before its suite's facts), from the file at the next save: a record names one. Notes `version` for the cases
+        to come."""
         self.ha_version = version
         for key, entry in list(self.entries.items()):
-            if (saved := entry.get("ha_version")) is not None and saved != version and entry.get("cases"):
+            if (saved := entry.get("ha_version")) != version and entry.get("cases"):
                 out(f"{key[0]} / {key[1]}: its saved cases ran on HA {saved}, and HA is {version}; they rerun.")
                 self._drop(key)
 

@@ -1275,7 +1275,14 @@ def resumable(tmp_path: Path) -> tuple[Profile, list[rig.Suite]]:
 
 
 def run_args(**kwargs) -> types.SimpleNamespace:
-    defaults = {"integration": None, "action": None, "keyword": None, "serial": False, "unattended": True}
+    defaults = {
+        "integration": None,
+        "action": None,
+        "keyword": None,
+        "serial": False,
+        "unattended": True,
+        "dry_run": False,
+    }
     return types.SimpleNamespace(**(defaults | {"fresh": False, "no_deploy": False, "roam_check": False} | kwargs))
 
 
@@ -1318,11 +1325,11 @@ def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypa
     rig.print_resume(types.SimpleNamespace(budget=None, keyword=None), setup)
     out = capsys.readouterr().out
     assert "shelly / raise_brightness: covered (saved; no record yet), skipped" in out
-    assert "Resuming: 1 of 2 cases saved" in out
+    assert "Resuming: 1 of the 2 cases of the suites to run are saved" in out
 
 
 def test_a_selection_or_keyword_shares_the_saved_cases(tmp_path, monkeypatch):
-    setup = resumed(tmp_path, monkeypatch, {"zha": ["t[light_ct]"]}, serial=True, integration=["zha"], keyword="u")
+    setup = resumed(tmp_path, monkeypatch, {"zha": ["t[light_ct]"]}, serial=True, keyword="u")
     assert set(setup.done) == {("zha", "raise_brightness", "t[light_ct]")}
     assert [suite.integration for suite in setup.suites] == ["shelly", "zha"]
     done_only = resumed(tmp_path, monkeypatch, {"zha": ["u[light_ct]"]}, keyword="u")
@@ -1347,6 +1354,25 @@ def test_a_saved_case_on_other_entities_or_unobserved_doesnt_hold(tmp_path, monk
     earlier.record(suites[0], engine.CaseResult("u[light_ct]", "light_ct", "light", engine.Outcome.NOT_OBSERVED))
     assert planned(tmp_path, monkeypatch, suites, profile, unattended=False).done == {}
     assert set(planned(tmp_path, monkeypatch, suites, profile).done) == {("shelly", "raise_brightness", "u[light_ct]")}
+
+
+def test_a_case_unreachable_now_keeps_what_it_saved_and_a_record_outlives_an_ha_upgrade(tmp_path, monkeypatch):
+    profile, suites = resumable(tmp_path)
+    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
+    earlier.record(
+        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.a",))
+    )
+    profile.offline = frozenset({"light.a"})  # were the plan made with it down, the saved pass would still stand
+    assert set(planned(tmp_path, monkeypatch, suites, profile).done) == {("shelly", "raise_brightness", "t[light_ct]")}
+    profile.offline = frozenset()
+    fresh = rig.coverage.Freshness(rig.coverage.Record(tmp_path / "r.md", "c0", "2026-11-01", frozenset()), None)
+    monkeypatch.setattr(rig.coverage, "freshness", lambda *args: fresh)
+    monkeypatch.setattr(rig, "ha_version", lambda env: "2027.1.0")
+    deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
+    setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
+    rig.plan_coverage(run_args(), setup, tmp_path)
+    assert not setup.done  # the saved case ran on another HA
+    assert setup.suites == [] and all(c.covered for c in setup.coverage)  # the records still cover both
 
 
 def test_a_saved_failure_reruns_its_whole_suite(tmp_path, monkeypatch):
