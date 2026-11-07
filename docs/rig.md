@@ -126,7 +126,9 @@ you can try a branch's non-device features by hand. When HA already runs the che
 
 A probe takes the same locks through `--hold`, which runs a command while holding them and returns its exit code:
 `scripts/rig.py --hold zha -- <command>`, with `--exclusive` for one that restarts HA or reloads DeviceSide. It
-writes no journal, so the probe puts back what it changes. A probe is restricted unless it declares, trusted, what it
+writes no journal, so the probe puts back what it changes. Once it holds its locks it puts back what aborted runs
+left changed under them, as a run's replay does and never asking; an orphan it may not put back (restricted, with the
+sensor on) is named in a warning, with its journal and profile, and the probe starts anyway. A probe is restricted unless it declares, trusted, what it
 changes that anyone could see: `--visual none`, nothing, or `--visual profile`, only what a pre-authorized profile
 covers. `--dry-run` prints whether it may go and runs nothing.
 
