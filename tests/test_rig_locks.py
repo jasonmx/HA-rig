@@ -1193,3 +1193,33 @@ def test_a_resumed_run_claims_what_its_orphans_need_and_puts_them_back(tmp_path,
 def test_an_orphan_of_another_profile_does_not_widen_the_claim(tmp_path, monkeypatch):
     with resumed(tmp_path, monkeypatch, "elsewhere") as held:
         assert held.claim == claim("shelly")
+
+
+def probing_orphans(probe, monkeypatch, why: str | None):
+    """A probe holding hue over a hue orphan that `why` says the rig may not put back (None: it may); the journals
+    recover_rig was asked to put back."""
+    put_back: list[str] = []
+
+    async def recover_rig(env, journal):
+        put_back.append(journal.path.name)
+        journal.clear(*journal.sections)
+
+    monkeypatch.setattr(rig, "recover_rig", recover_rig)
+    monkeypatch.setattr(rig.Authority, "withholds", lambda self, journal: why)
+    monkeypatch.setattr(rig, "run_command", lambda command: 0)
+    return put_back
+
+
+def test_a_probe_puts_back_a_restorable_orphan_its_locks_cover(probe, monkeypatch):
+    path = orphan(probe, claim("hue"), cases=CASE)
+    put_back = probing_orphans(probe, monkeypatch, None)
+    assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
+    assert put_back == [path.name]
+
+
+def test_a_probe_over_a_restricted_orphan_warns_and_runs(probe, monkeypatch, capsys):
+    path = orphan(probe, claim("hue"), cases=CASE)
+    put_back = probing_orphans(probe, monkeypatch, "profile lab, restricted")
+    assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
+    assert put_back == []
+    assert f"left {path} (profile lab, restricted)" in capsys.readouterr().out
