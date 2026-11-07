@@ -18,6 +18,13 @@ from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
 PENDING: list[asyncio.TimerHandle | asyncio.Task] = []
 
 
+def write(tmp_path: Path, name: str, text: str) -> Path:
+    """A file in the test's folder."""
+    path = tmp_path / name
+    path.write_text(text)
+    return path
+
+
 def _merge(into: dict, options: dict) -> None:
     """Merge device options as Z2M does (objectAssignDeep): nested dicts key by key, a cleared key kept as null."""
     for key, value in options.items():

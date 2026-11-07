@@ -1,13 +1,15 @@
-"""Fixtures every rig test shares: no real cmux, no wait between a Z2M bulb's first reads, and no household terms
-written into the deviceside checkout the tests import."""
+"""Fixtures every rig test shares: no real cmux, no settle waits, no wait between a Z2M bulb's first reads, no timers
+left running, and no household terms written into the deviceside checkout the tests import."""
 
+import asyncio
 import sys
 from collections.abc import Iterator
 
 import pytest
 
-from ha_rig import locks, roam, target, terms
+from ha_rig import engine, locks, roam, target, terms
 from ha_rig.target import deviceside_repo
+from tests.rig_fakes import PENDING
 
 # The rig imports deviceside's registry and actions; appended, so this repo's own `tests` package wins.
 sys.path.append(str(deviceside_repo()))
@@ -35,6 +37,23 @@ def workspace_colors(monkeypatch) -> list[str | None]:
 def quick_prime(monkeypatch) -> None:
     """No wait between a Z2M bulb's first reads (Roamer.prime_z2m): the fakes don't answer DeviceSide's get."""
     monkeypatch.setattr(roam, "PRIME_GAP_S", 0)
+
+
+@pytest.fixture(autouse=True)
+def no_settle(monkeypatch) -> None:
+    """No settle wait before a run's first case or after it puts a device back; a test that needs one sets its own."""
+    monkeypatch.setattr(engine, "SETUP_SETTLE_S", 0)
+    monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
+
+
+@pytest.fixture(autouse=True)
+async def cancel_pending():
+    """Device timers and ramps outlive the run that started them; HA's test plugin fails on lingering ones."""
+    yield
+    for pending in PENDING:
+        pending.cancel()
+    await asyncio.gather(*(task for task in PENDING if isinstance(task, asyncio.Task)), return_exceptions=True)
+    PENDING.clear()
 
 
 @pytest.fixture(autouse=True)
