@@ -1,6 +1,7 @@
 """The rig's HAClient against a local stub of HA's WebSocket and REST API, so a live run isn't its first test."""
 
 import asyncio
+import functools
 import json
 
 import pytest
@@ -49,6 +50,24 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def vanishing(request: web.Request, end: str) -> web.WebSocketResponse:
+    """Answers the state subscription, then ends the connection on the next command: by closing, or with a frame that
+    isn't JSON when `end` is `garbage`."""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    await ws.send_json({"type": "auth_required"})
+    await ws.receive_json()
+    await ws.send_json({"type": "auth_ok"})
+    subscribe = await ws.receive_json()
+    await ws.send_json({"id": subscribe["id"], "type": "result", "success": True, "result": None})
+    await ws.receive_json()
+    if end == "garbage":
+        await ws.send_str("not json")
+        await asyncio.sleep(1)
+    await ws.close()
+    return ws
+
+
 async def state(request: web.Request) -> web.Response:
     if (entity := STATES.get(request.match_info["entity_id"])) is None:
         return web.Response(status=404)
@@ -93,3 +112,22 @@ async def test_mqtt_reads_and_a_late_message_leave_the_connection_working(client
     assert await client.z2m_device_options("0x02") == {}
     response = await client.call_service("x", "turn_on", {"entity_id": "switch.plug"}, return_response=True)
     assert response == {"ok": {"entity_id": "switch.plug"}}
+
+
+@pytest.mark.parametrize("end, why", [("close", "closed"), ("garbage", "JSONDecodeError")])
+async def test_a_connection_that_ends_fails_the_waiting_command_and_every_later_one_at_once(socket_enabled, end, why):
+    app = web.Application()
+    app.router.add_get("/api/websocket", functools.partial(vanishing, end=end))
+    server = TestServer(app, host="127.0.0.1")
+    await server.start_server()
+    ha = HAClient(str(server.make_url("")), "token")
+    await ha.connect()
+    try:
+        async with asyncio.timeout(5):  # not the 30 s a command waits for a reply
+            with pytest.raises(ConnectionError, match=why):
+                await ha.command({"type": "get_config"})
+            with pytest.raises(ConnectionError, match=why):
+                await ha.command({"type": "get_config"})
+    finally:
+        await ha.close()
+        await server.close()

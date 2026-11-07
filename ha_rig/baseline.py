@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import HAClient
-from .journal import Journal, locked, write_whole
+from .journal import Journal, acquired, write_whole
 
 NAME = "deviceside-rig.baseline.json"
 LOCK_NAME = "deviceside-rig.baseline.lock"
@@ -126,7 +126,7 @@ class Baseline:
         except FileNotFoundError:
             return False
         with handle:
-            if locked(handle):  # free: the run is gone; closing the handle lets it go again
+            if acquired(handle):  # free: the run is gone; closing the handle lets it go again
                 return False
         return True
 
