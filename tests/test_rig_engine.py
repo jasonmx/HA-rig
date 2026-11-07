@@ -64,22 +64,6 @@ tests:
 """
 
 
-@pytest.fixture(autouse=True)
-def _no_settle(monkeypatch):
-    monkeypatch.setattr(engine, "SETUP_SETTLE_S", 0)
-    monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
-
-
-@pytest.fixture(autouse=True)
-async def _cancel_pending():
-    """Device timers and ramps outlive the run that started them; HA's test plugin fails on lingering ones."""
-    yield
-    for pending in PENDING:
-        pending.cancel()
-    await asyncio.gather(*(task for task in PENDING if isinstance(task, asyncio.Task)), return_exceptions=True)
-    PENDING.clear()
-
-
 def timer_on(ha: FakeHA, action: str, data: dict) -> dict:
     """turn_on_for as a device with a working timer: on now, off after the duration."""
     entity_id = data["entity_id"]
