@@ -1627,7 +1627,7 @@ async def test_the_journal_holds_each_change_before_it_is_made_and_is_gone_after
     rest, call_service = admin.rest, admin.call_service
 
     async def save(method, path, json=None):
-        if method == "post" and not path.endswith("/options/flow"):
+        if method == "post" and not path.endswith("/options/flow") and "next_step_id" not in (json or {}):
             seen.append(("save", journal.get("options")))
         return await rest(method, path, json)
 
@@ -1696,7 +1696,7 @@ async def test_a_save_the_flow_refuses_closes_the_flow_and_raises():
     admin = FakeAdmin({})
 
     async def refused(method: str, path: str, json: dict | None = None):
-        if method == "post" and not path.endswith("/options/flow"):
+        if method == "post" and not path.endswith("/options/flow") and "next_step_id" not in (json or {}):
             return {"type": "form", "errors": {"base": "unknown"}}
         return await FakeAdmin.rest(admin, method, path, json)
 
@@ -1704,6 +1704,39 @@ async def test_a_save_the_flow_refuses_closes_the_flow_and_raises():
     with pytest.raises(RuntimeError, match="did not save"):
         await engine.EntryOptions(admin, reload_s=0).apply({"opt": False})
     assert admin.aborted == 1
+
+
+async def test_options_are_read_and_saved_through_the_menus_settings_step():
+    admin = FakeAdmin({})
+    await engine.EntryOptions(admin, reload_s=0).apply({"opt": False})
+    assert admin.saved == [{"opt": False, "other": False}]
+    assert admin.options == {"opt": False, "other": False}
+
+
+async def test_a_menu_without_settings_closes_the_flow_and_raises():
+    admin = FakeAdmin({})
+    admin.menu = ["report_device"]
+    with pytest.raises(RuntimeError, match="no 'settings' step"):
+        await engine.EntryOptions(admin, reload_s=0).apply({"opt": False})
+    assert admin.saved == []
+    assert admin.aborted == 1
+
+
+async def test_a_settings_step_with_no_options_form_closes_the_flow_and_raises_before_journaling(tmp_path):
+    admin = FakeAdmin({})
+    journal = Journal(tmp_path / "journal.json")
+
+    async def empty(method: str, path: str, json: dict | None = None):
+        if json == {"next_step_id": "settings"}:
+            return {"type": "form", "flow_id": "f1", "data_schema": []}
+        return await FakeAdmin.rest(admin, method, path, json)
+
+    admin.rest = empty
+    with pytest.raises(RuntimeError, match="no options form"):
+        await engine.EntryOptions(admin, reload_s=0, journal=journal).apply({"opt": False})
+    assert admin.saved == []
+    assert admin.aborted == 1
+    assert journal.get("options") is None
 
 
 async def test_options_that_hold_ha_shared_never_save_but_may_match():
