@@ -720,7 +720,17 @@ def main(argv: list[str] | None = None) -> int:
         help="start no case after this long (30m, 90s, 1h15m), let in-flight ones finish, put back and exit 75; "
         "rerun the same way to resume",
     )
-    parser.add_argument("--fresh", action="store_true", help="drop a stopped run's saved progress and start over")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="rerun the selected suites whole, whatever their records and saved cases say",
+    )
+    parser.add_argument(
+        "--ignore-unreachables",
+        action="store_true",
+        help="run what the devices that are up allow: skip the cases of an unavailable fixed entity, and while any "
+        "is, of fixed groups whose members the profile doesn't list and of fixed scenes; their suites write no record",
+    )
     parser.add_argument("--recover", action="store_true", help="put back what an aborted run left changed, then stop")
     parser.add_argument(
         "--roam-check", action="store_true", help="move the profile's roam bulbs to every network and home, no suites"
@@ -752,6 +762,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.command = command
     approved()  # refuses the variable it replaced, in every mode
+    refuse_conflicts(parser, args, command)
+    args.dry_run |= args.check  # like a dry run, it holds no lock and changes nothing
+    colors = args.wait_free or not args.dry_run  # a dry run holds no lock and sets no color, so it clears none
+    try:
+        with handling_signals(leave):  # a run killed while it waits still clears its color
+            return wait_or_run(args)
+    finally:
+        if colors:
+            locks.workspace_color(None)
+
+
+def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, command: list[str]) -> None:
+    """Stop, through argparse, on flags that don't go together."""
     if args.deploy_only and (
         args.profile
         or args.no_deploy
@@ -770,10 +793,13 @@ def main(argv: list[str] | None = None) -> int:
         or args.debug_logs
         or args.budget
         or args.fresh
+        or args.ignore_unreachables
     ):
         parser.error("--deploy-only takes only --dry-run: it needs no profile and runs no test")
     if (args.budget or args.fresh) and (args.check or args.roam_check or args.recover or args.wait_free or command):
         parser.error("--for and --fresh are for a test run")
+    if args.ignore_unreachables and (args.roam_check or args.recover or args.wait_free or command):
+        parser.error("--ignore-unreachables is for a test run or --check")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
@@ -784,14 +810,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--hold and --exclusive need a command after --, and a command after -- needs one of them")
     if command and (args.check or args.recover or args.roam_check or args.wait_free):
         parser.error("a command after -- can't be combined with a run's modes; --dry-run only says if it may go")
-    args.dry_run |= args.check  # like a dry run, it holds no lock and changes nothing
-    colors = args.wait_free or not args.dry_run  # a dry run holds no lock and sets no color, so it clears none
-    try:
-        with handling_signals(leave):  # a run killed while it waits still clears its color
-            return wait_or_run(args)
-    finally:
-        if colors:
-            locks.workspace_color(None)
 
 
 def duration(text: str) -> float:
@@ -972,7 +990,11 @@ def claim(args: argparse.Namespace, setup: Setup) -> Claim:
 
 def runnable(setup: Setup) -> list[Suite]:
     """The suites with an adapter, which the run can run."""
-    return [suite for suite in setup.suites if runnable_suite(suite, setup.registry)]
+    return runnable_suites(setup.suites, setup.registry)
+
+
+def runnable_suites(suites: list[Suite], registry: AdapterRegistry) -> list[Suite]:
+    return [suite for suite in suites if runnable_suite(suite, registry)]
 
 
 def runnable_suite(suite: Suite, registry: AdapterRegistry) -> bool:
@@ -1038,7 +1060,7 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
     decision = None if args.check else authority.decide(restricted=not profile.pre_authorized)
     homes = replay(env, held, directory, authority)
     if args.check:
-        return check_only(setup, args.keyword, homes, claim(args, setup), directory)
+        return check_only(setup, args.keyword, homes, claim(args, setup), directory, args.ignore_unreachables)
     deploy = setup.deploy
     deploying = setup.deploying(args)
     lanes = not args.serial
@@ -1057,8 +1079,13 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
         check_deploy(env, deploy)
     if not args.roam_check:
         print()
-        ready = not asyncio.run(check_devices(env, suites, profile, registry, args.keyword, setup.roaming, homes))
-        if not (ready or args.dry_run):
+        problems = asyncio.run(
+            check_devices(
+                env, suites, profile, registry, args.keyword, setup.roaming, homes, setup.done, args.ignore_unreachables
+            )
+        )
+        print_unreachable(suites, profile, registry, args.keyword, setup.done)
+        if problems and not args.dry_run:
             raise SystemExit("Power or fix the devices above, then run again.")
     whose = f"profile {profile.name} is pre-authorized. " if profile.pre_authorized else ""
     print(f"Authorization: {whose}{decision.reason}")
@@ -1198,7 +1225,14 @@ def say_stopped(
     return RESUMABLE
 
 
-def check_only(setup: Setup, keyword: str | None, homes: set[str], wanted: Claim, directory: Path) -> int:
+def check_only(
+    setup: Setup,
+    keyword: str | None,
+    homes: set[str],
+    wanted: Claim,
+    directory: Path,
+    ignore_unreachables: bool = False,
+) -> int:
     """--check: the device check alone, naming the runs that hold locks this run would claim, whose moves and pauses
     it would see."""
     if held := locks.holders(directory, wanted):
@@ -1206,8 +1240,19 @@ def check_only(setup: Setup, keyword: str | None, homes: set[str], wanted: Claim
         for line in held:
             print(f"  {line}")
     problems = asyncio.run(
-        check_devices(setup.env, setup.suites, setup.profile, setup.registry, keyword, setup.roaming, homes)
+        check_devices(
+            setup.env,
+            setup.suites,
+            setup.profile,
+            setup.registry,
+            keyword,
+            setup.roaming,
+            homes,
+            {},
+            ignore_unreachables,
+        )
     )
+    print_unreachable(setup.suites, setup.profile, setup.registry, keyword)
     return 1 if problems else 0
 
 
@@ -1870,10 +1915,11 @@ async def run_phases(
         await visit(roamer, network, bool(phase_suites or not suites))
         if moving and budget is not None:
             budget.grant()
+        done = common.get("done")
         if number == 0 and lanes:
-            await wait_for_targets(ha, suites, profile, registry, keyword, only=head(profile))
+            await wait_for_targets(ha, suites, profile, registry, keyword, only=unfinished(done, head(profile)))
         if phase_suites:
-            await wait_for_targets(ha, phase_suites, profile, registry, keyword, only=only)
+            await wait_for_targets(ha, phase_suites, profile, registry, keyword, only=unfinished(done, only))
         if number == 0 and pause is not None:
             await pause()
         if number == 0 and lanes:
@@ -2085,8 +2131,11 @@ def targets(
     registry: AdapterRegistry,
     keyword: str | None,
     only: Callable[[Case], bool] | None = None,
+    done: Done | None = None,
 ) -> list[str]:
-    """Every entity a case `only` accepts will move, a group's listed members included."""
+    """Every entity a case `only` accepts will move, a group's listed members included; none of a case `done` has a
+    result for, which the run leaves out."""
+    only = unfinished(done, only)
     return sorted(
         {
             entity
@@ -2100,18 +2149,19 @@ def targets(
 
 
 def platforms(
-    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None
+    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None, done: Done | None = None
 ) -> dict[str, tuple[str, str]]:
     """Each entity the cases will move (targets), with its integration and the platform HA must register it on: the
     integration's HA domain (runlogs.HA_DOMAINS), or switch_as_x for a light_wrapped; a group's members count as the
     group's integration."""
+    only = unfinished(done)
     found: dict[str, tuple[str, str]] = {}
     for suite in suites:
         if not registry.adapter(suite.action, suite.integration):
             continue
         domain = HA_DOMAINS.get(suite.integration, suite.integration)
         for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
-            if case.skip:
+            if case.skip or (only is not None and not only(case)):
                 continue
             for role, entity in case.entities.items():
                 found.setdefault(entity, (suite.integration, "switch_as_x" if role == "light_wrapped" else domain))
@@ -2145,24 +2195,30 @@ async def check_fixed(
     profile: Profile,
     registry: AdapterRegistry,
     keyword: str | None,
-) -> list[str]:
-    """The problems among the fixed entities: one not in HA or unavailable, or, of those in HA, one on the wrong
-    platform."""
-    problems, present = [], []
+    done: Done | None = None,
+    ignore_unreachables: bool = False,
+) -> tuple[list[str], set[str]]:
+    """The problems among the fixed entities, and those offline: one not in HA, or of those in HA, one on the wrong
+    platform, is a problem; one unavailable is too, unless `ignore_unreachables`, which counts it offline instead."""
+    problems, present, offline = [], [], set()
     for entity, state in zip(fixed, await asyncio.gather(*map(ha.get_state, fixed)), strict=True):
         if state is None:
             problems.append(f"{entity}: not in HA; check profile {profile.name}")
             continue
         present.append(entity)
-        if not available(state):
+        if available(state):
+            continue
+        if ignore_unreachables:
+            offline.add(entity)
+        else:
             problems.append(f"{entity}: unavailable; check it is powered")
     if present:
         try:
-            expected = platforms(suites, profile, registry, keyword)
+            expected = platforms(suites, profile, registry, keyword, done)
             problems += await check_platforms(admin or ha, expected, present, profile)
         except HAError as err:  # a token without admin rights can't list the registry
             print(f"The platforms weren't checked: HA refused the entity registry ({err}).")
-    return problems
+    return problems, offline
 
 
 async def check_devices(
@@ -2173,14 +2229,18 @@ async def check_devices(
     keyword: str | None,
     roaming: bool,
     homes: set[str] = frozenset(),
+    done: Done | None = None,
+    ignore_unreachables: bool = False,
 ) -> list[str]:
-    """Before anything changes, for every phase at once: each fixed entity the selected cases use is in HA, on its
-    integration and available, and, when the run roams, each roaming bulb is on a network with its light available.
-    Prints what it found; returns the problems, which would otherwise stop the run part way, after moves. Rig-made
-    groups and scenes don't exist yet, and a roaming bulb's light may still be under another ID, so neither is looked
-    up as an entity.
+    """Before anything changes, for every phase at once: each fixed entity the cases still to run use (none `done`
+    has a result for) is in HA, on its integration and available, and, when the run roams, each roaming bulb is on a
+    network with its light available. Prints what it found; returns the problems, which would otherwise stop the run
+    part way, after moves. Rig-made groups and scenes don't exist yet, and a roaming bulb's light may still be under
+    another ID, so neither is looked up as an entity.
+    With `ignore_unreachables`, an unavailable fixed entity is no problem: it becomes `profile.offline`, and its cases
+    skip as unreachable (engine.unreachable). A roaming bulb is still checked strictly.
     `homes` are the bulbs whose Hue home the home record holds, which a run puts back."""
-    fixed = [entity for entity in targets(suites, profile, registry, keyword) if entity not in profile.made_entities]
+    fixed = [e for e in targets(suites, profile, registry, keyword, done=done) if e not in profile.made_entities]
     bulbs = list(profile.roam) if roaming else []
     print(f"Checking profile {profile.name}: {len(fixed)} entities" + (f", {len(bulbs)} roaming." if bulbs else "."))
     if not (env.get("HA_URL") and env.get("HA_TOKEN")):
@@ -2191,7 +2251,10 @@ async def check_devices(
     except (OSError, aiohttp.ClientError, RuntimeError) as err:
         return [f"Can't reach HA at {env.get('HA_URL')}: {err or type(err).__name__}"]
     try:
-        problems += await check_fixed(ha, admin, fixed, suites, profile, registry, keyword)
+        found, offline = await check_fixed(
+            ha, admin, fixed, suites, profile, registry, keyword, done, ignore_unreachables
+        )
+        problems += found
         if bulbs:
             problems += await check_roaming(env, admin, bulbs, ha, homes)
     finally:
@@ -2200,8 +2263,25 @@ async def check_devices(
             await admin.close()
     for problem in problems:
         print(f"  {problem}")
+    for entity in sorted(offline):
+        print(f"  {entity}: unavailable; its cases skip (--ignore-unreachables)")
     print(f"{len(problems)} problem(s): nothing was changed." if problems else "Every device is ready.")
+    profile.offline = frozenset(offline)
     return problems
+
+
+def print_unreachable(
+    suites: list[Suite], profile: Profile, registry: AdapterRegistry, keyword: str | None, done: Done | None = None
+) -> None:
+    """The cases still to run that skip as unreachable, by suite, once the check has found what is offline."""
+    if not profile.offline:
+        return
+    only = unfinished(done)
+    print("Unreachable, skipped (their suites write no record this run):")
+    for suite in runnable_suites(suites, registry):
+        for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+            if case.unreachable and (only is None or only(case)):
+                print(f"  {suite.integration} / {suite.name} {case.id}: {case.skip}")
 
 
 async def check_roaming(

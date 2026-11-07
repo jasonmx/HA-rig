@@ -1452,6 +1452,64 @@ async def test_a_written_record_takes_its_suite_out_of_the_ledger_and_a_failure_
     assert not rig.Progress.load(tmp_path, "house").entries  # the failed suite reruns whole
 
 
+TWO_LIGHTS = """
+action: raise_brightness
+rig_seconds: 60
+tests:
+  - name: t
+    roles: [light_ct, light_dimmable]
+    steps:
+      - set: {state: off}
+"""
+
+
+def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only_the_rest(tmp_path, monkeypatch):
+    ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
+    ha.states["light.b"] = {"entity_id": "light.b", "state": "unavailable", "attributes": {}}
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    written: list[list[str]] = []
+
+    async def write_records(result, registry, records_dir, date, source, profile):
+        written.append([part.suite.integration for part in result.suites if part.recordable])
+        return []
+
+    monkeypatch.setattr(rig, "write_records", write_records)
+    entities = [RigEntity("light.a", frozenset({"light_ct"})), RigEntity("light.b", frozenset({"light_dimmable"}))]
+    profile = Profile({"shelly": entities}, {}, name="house")
+    suites = [rig.Suite(load_step_file(write(tmp_path, "steps.yaml", TWO_LIGHTS)), "shelly")]
+
+    def session(offline: frozenset[str]) -> tuple[int, list[str]]:
+        setup = planned(tmp_path, monkeypatch, suites, profile)
+        profile.offline = offline
+        checked = rig.targets(setup.suites, profile, fakes.OPTION_REGISTRY, None, done=setup.done)
+        code = asyncio.run(
+            rig.run_rig(
+                {},
+                setup.suites,
+                profile,
+                fakes.OPTION_REGISTRY,
+                None,
+                True,
+                "c1",
+                progress=setup.progress,
+                selected=suites,
+            )
+        )
+        return code, checked
+
+    assert session(frozenset({"light.b"})) == (0, ["light.a"])
+    assert written == [[]]  # partial: light.b's case skipped as unreachable
+    saved = rig.Progress.load(tmp_path, "house")
+    saved.track(suites[0], planned(tmp_path, monkeypatch, suites, profile).coverage[0].fingerprint)
+    assert set(saved.done()) == {("shelly", "raise_brightness", "t[light_ct]")}  # the skip isn't saved
+
+    ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 90}}
+    ha.calls.clear()
+    assert session(frozenset()) == (0, ["light.b"])  # only the missing case's device is checked
+    assert written == [[], ["shelly"]]
+    assert {call[2].get("entity_id") for call in ha.calls if call[0] == "light"} == {"light.b"}
+
+
 def test_a_signal_stops_a_run_with_progress_resumable(capsys):
     async def cancelled():
         raise asyncio.CancelledError
