@@ -984,13 +984,16 @@ tests:
 
 
 def ramp(step: int) -> Callable:
-    """Brightness that changes by `step` every 50 ms, from 100, until the test ends."""
+    """Brightness that changes by `step` every 50 ms, from 100, until the light is turned off (as a transition stops)
+    or the test ends."""
 
     def _respond(ha, action, data):
         async def _ramp():
             brightness = 100
             while True:
                 await asyncio.sleep(0.05)
+                if ha.states[data["entity_id"]]["state"] == "off":
+                    return
                 brightness += step
                 ha.set(data["entity_id"], "on", brightness=brightness)
 
