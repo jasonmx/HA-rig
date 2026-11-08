@@ -111,3 +111,19 @@ ha-rig `CLAUDE.md`, under **Changes**:
 - `scripts/check_release.py --records` passes on deviceside.
 - A rig run of the changed suites (Jason's authorization; Shelly needs the bulb powered — the lab Hue lamp shares
   its fixture) writes fresh records; `set_scene.applies_while_on` fails when the call is stubbed out (probe once).
+
+## Implementation decisions
+
+- **Decision 11 dropped** (Jason, 2026-11-08): deviceside's "Proof follows the call" rule (PR #204) already covers
+  ZHA's color groupcast through the brightness group cases and the single-light color cases. No scope change and no
+  hardware row; ZHA's `group_color` cases skip for want of the role.
+- **`covers:` not built**: four auto files with one regression case each.
+- **Firmware facts** (decision 7): the ledger keeps a firmware fact's pass in a `firmware` section keyed by suite
+  and case, with the devices its part ran on and a digest of the test as written. Coverage lends it to the suite's
+  entry at the fingerprint now (devices joined), so the record carries it, marked `(firmware fact)`, with the
+  firmware under Device. It goes when it fails or reruns, its test changes, its entities change, or a later part
+  shows a device of its model at another firmware. Never pruned for age; HA's version doesn't drop it.
+- **`check_release.py` unchanged**: a record carrying lent facts cites the commit of the run that wrote it, so the
+  gate's code comparison still holds; the deviceside tenet ("proven once per firmware version") is the rule change.
+- **One options pass** (decision 9): `engine.by_options` groups a run's suites by the options they pin, each set in
+  the order it first appears, so each set is saved once per run (`run()`), not once per file.

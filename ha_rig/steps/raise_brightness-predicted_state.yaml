@@ -38,6 +38,7 @@ tests:
 
   - name: bridge_scene_recall_mid_fade_shows_at_once  # the fade hides the lights' reports; the recall must end that
     roles: [group]
+    firmware_fact: true
     setup:
       - set: {state: on, brightness_pct: 10, color_temp_kelvin: 6500}  # far from the scene, so the recall shows
       - set: {state: off}

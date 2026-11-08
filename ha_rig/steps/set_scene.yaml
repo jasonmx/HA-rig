@@ -17,10 +17,13 @@ tests:
       - expect_state: {target: group, state: off}
       - set: {target: group, state: on}
 
+  # The room starts at full and 6500 K, far from the scene's 40 % and 2732 K (the rig-made scene's values, roam.py's
+  # SCENE_BRIGHTNESS and SCENE_MIREK), so a call that applied nothing leaves light_ct where the setup put it and fails.
   - name: applies_while_on  # §5.2
     roles: [scene]
     setup:
-      - set: {target: group, state: on, color_temp_kelvin: 6500}
+      - set: {target: group, state: on, brightness_pct: 100, color_temp_kelvin: 6500}
     steps:
       - call: {}
       - expect_state: {target: group, state: on, within: tol}
+      - expect_state: {target: light_ct, state: on, brightness: {min: 90, max: 114}, color_temp_kelvin: {min: 2600, max: 2850}, within: 5}

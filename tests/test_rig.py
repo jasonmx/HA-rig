@@ -168,12 +168,9 @@ def test_select_plan_lines_and_estimate(profile):
     assert rig.plan_lines(shelly_on + suites[1:2], profile, registry) == [
         "shelly / turn_on_for -> switch.plug",
         "    on_then_off[switch_plug]: switch.plug",
-        "    on_then_off[light_onoff]: no light_onoff entity in the profile",
-        "    on_then_off[light_wrapped]: no light_wrapped entity in the profile",
         "    drops_brightness_on_a_wrapper[light_wrapped]: no light_wrapped entity in the profile",
         "    drops_brightness_on_a_relay_light[light_onoff]: no light_onoff entity in the profile",
         "    bulb_on_then_off[light_dimmable]: no light_dimmable entity in the profile",
-        "    bulb_brightness_then_off[light_dimmable]: no light_dimmable entity in the profile",
         "    bulb_color_temp_then_off[light_ct]: no light_ct entity in the profile",
         "    bulb_transition_then_off[light_dimmable]: no light_dimmable entity in the profile",
         "    rgbcct_bulb_rgb_then_off[light_color]: no light_color entity in the profile",
@@ -184,8 +181,6 @@ def test_select_plan_lines_and_estimate(profile):
     assert rig.plan_lines(shelly_on, profile, registry, "on_then") == [
         "shelly / turn_on_for -> switch.plug",
         "    on_then_off[switch_plug]: switch.plug",
-        "    on_then_off[light_onoff]: no light_onoff entity in the profile",
-        "    on_then_off[light_wrapped]: no light_wrapped entity in the profile",
         "    bulb_on_then_off[light_dimmable]: no light_dimmable entity in the profile",
         "    bulb_transition_then_off[light_dimmable]: no light_dimmable entity in the profile",
     ]

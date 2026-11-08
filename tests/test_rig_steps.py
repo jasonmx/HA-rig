@@ -50,16 +50,16 @@ def test_the_step_files_keep_their_roles():
     by_action = {step_file.action: step_file for step_file in load_step_files()}
     assert by_action["turn_on_for"].roles == (
         "switch_plug",
-        "light_onoff",
         "light_wrapped",
+        "light_onoff",
         "light_dimmable",
         "light_ct",
         "light_color",
         "group",
     )
-    assert by_action["turn_off_for"].roles == ("switch_plug", "light_onoff", "light_wrapped", "light_dimmable")
+    assert by_action["turn_off_for"].roles == ("switch_plug", "light_dimmable")
     for action in ("set_auto_off", "set_auto_on", "clear_auto_off", "clear_auto_on"):
-        assert by_action[action].roles == ("switch_plug", "light_color")
+        assert by_action[action].roles == ("switch_plug",)
         assert all(test.only == frozenset({"shelly"}) for test in by_action[action].tests)
 
 
