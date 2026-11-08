@@ -1377,6 +1377,27 @@ async def test_set_waits_for_every_member_to_reach_the_brightness(tmp_path):
     assert outcomes(result)["t[group]"] == (Outcome.PASS, "")
 
 
+@pytest.mark.parametrize(
+    ("step", "outcome"),
+    [("{state: off, transition: 0.6}", Outcome.PASS), ("{state: off}", Outcome.FAIL)],
+)
+async def test_set_waits_out_a_transition_beyond_the_tolerance(tmp_path, step, outcome):
+    """A light's own fade outlasts a short tolerance: with a transition `set` waits tol + transition for it, and
+    without one the same fade is a failure at tol."""
+
+    class Fading(FakeHA):
+        async def call_service(self, domain, service, data=None, return_response=False):
+            if service != "turn_off":
+                return await super().call_service(domain, service, data, return_response)
+            self.calls.append((domain, service, dict(data or {})))
+            self.later(TOL + 0.2, data["entity_id"], "off")  # off just after tol, within tol + the transition
+
+    ha = Fading({"light.lamp": {"state": "on"}})
+    text = header("light_dimmable") + f"      - set: {step}\n"
+    result = await run_one(ha, suite(tmp_path, text), profile(light_dimmable="light.lamp"))
+    assert outcomes(result)["t[light_dimmable]"][0] is outcome
+
+
 async def test_admin_integrations_run_on_the_admin_connection(tmp_path):
     ha, admin = FakeHA({"switch.plug": {}}), FakeHA({"switch.plug": {}}, timer_on)
     await run_one(ha, suite(tmp_path, ON_THEN_OFF, "zha"), profile("zha", switch_plug="switch.plug"), admin=admin)
