@@ -36,7 +36,7 @@ estimate and coverage that can't complete.
 Intent: Option step files apply only to adapters whose scope declares every option they set. Selection, coverage,
 locks and the plan all agree with the engine.
 Touches: ha_rig/engine.py, ha_rig/coverage.py, scripts/rig.py, tests/rig_fakes.py, tests/test_rig.py,
-tests/test_rig_engine.py, tests/test_rig_coverage.py
+tests/test_rig_engine.py, tests/test_coverage.py
 
 ## Steps
 
