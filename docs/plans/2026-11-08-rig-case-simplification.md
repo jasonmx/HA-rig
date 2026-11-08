@@ -127,3 +127,25 @@ ha-rig `CLAUDE.md`, under **Changes**:
   gate's code comparison still holds; the deviceside tenet ("proven once per firmware version") is the rule change.
 - **One options pass** (decision 9): `engine.by_options` groups a run's suites by the options they pin, each set in
   the order it first appears, so each set is saved once per run (`run()`), not once per file.
+
+## Handoff
+
+**Done (2026-11-08):** steps 1–5 bar the rig run. Rig PR #37 (`wt/case-simplification`, worktree
+`~/projects/ha/ha-rig-wt-case-simplification`) and deviceside PR #301 (`wt/documented-tenet`, worktree
+`~/projects/ha/deviceside-wt-documented-tenet`), both drafts, CI green. The pre-PR audit's two ledger findings are fixed
+(0694d30). House dry run `--fresh`: 363 → 245 cases, 9,078 s → 5,329 s (baseline taken from main's rig the same day).
+The house profile has no `scene` role, so `set_scene` runs only on a profile with a rig-made scene (lab).
+
+**Next:**
+1. The rig run of the changed suites. It needs Jason's authorization; Shelly needs the bulb powered for the
+   non-auto suites, and the auto suites now need the plug. Run it from the deviceside worktree so the records land on
+   #301, then commit them there and regenerate `docs/compatibility.md` (`scripts/gen_compat.py`): the Shelly auto
+   records still name the bulb.
+2. Probe once that `set_scene.applies_while_on` fails with the call stubbed (lab profile).
+3. Check that `--coverage` at HEAD shows firmware facts as `N by firmware` after the run.
+4. A clean `/audit-code` over each PR's whole diff, then `gh pr ready`. Merge #37 with `merge-green 37 --squash
+   --delete-branch` after #301 merges. #301 targets deviceside's default branch, so it is Jason's to merge.
+
+**Open:** `rig_seconds` figures are proportional estimates; correct them from the run's timings. Low, not fixed: a
+`call` step naming another action inside a step with `only:` still marks the case `no <action> adapter` on
+integrations the step leaves out (engine `cases`, `test.calls`); no step file hits it yet.
