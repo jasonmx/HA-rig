@@ -4,6 +4,7 @@ registry whose adapters all take options, and the step files that tests/test_rig
 import asyncio
 import contextlib
 import copy
+import functools
 import json
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -14,6 +15,37 @@ from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
 from ha_rig.client import HAClient, HAError, device_ieee
 from ha_rig.profile import Profile, RigEntity, colon_ieee, hex_ieee
 from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
+
+
+@functools.cache
+def _discovered():
+    """deviceside's registry, discovered once. Imported here because conftest puts the checkout on sys.path after it
+    imports this module."""
+    from custom_components.deviceside.core.registry import AdapterRegistry
+
+    return AdapterRegistry.discover()
+
+
+class Roster:
+    """The adapters a test says exist, over deviceside's real registry. Which adapters an integration has changes the
+    path the engine takes (with both get_attributes and set_attributes it snapshots an off light first), so a test
+    that took whatever deviceside ships would change path when deviceside adds an adapter. `adapter` answers only for
+    declared pairs, and a declared pair the real registry lacks raises; every other attribute (actions,
+    integrations) is the real registry's, so scopes, kinds and titles stay honest."""
+
+    def __init__(self, declared: dict[str, set[str]]) -> None:
+        for integration, actions in declared.items():
+            for action in actions:
+                if _discovered().adapter(action, integration) is None:
+                    raise ValueError(f"deviceside has no {action} adapter for {integration}")
+        self._declared = declared
+
+    def adapter(self, action: str, integration: str):
+        return _discovered().adapter(action, integration) if action in self._declared.get(integration, ()) else None
+
+    def __getattr__(self, name: str):
+        return getattr(_discovered(), name)
+
 
 PENDING: list[asyncio.TimerHandle | asyncio.Task] = []
 

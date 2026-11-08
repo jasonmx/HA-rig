@@ -4,12 +4,10 @@ import datetime
 import json
 from pathlib import Path
 
-from custom_components.deviceside.core.registry import AdapterRegistry
-
 from ha_rig import progress as progress_module
 from ha_rig.engine import CaseResult, Device, Outcome, Suite, load_step_files, merge
 from ha_rig.progress import Progress, path_for
-from tests.rig_fakes import profile
+from tests.rig_fakes import Roster, profile
 
 SUITE = Suite(next(f for f in load_step_files() if f.action == "turn_on_for" and not f.options), "shelly")
 HUE = Suite(SUITE.file, "hue")
@@ -60,9 +58,7 @@ def test_facts_join_across_parts(tmp_path):
 
 def test_parts_rebuild_results_merge_joins(tmp_path):
     started(tmp_path)
-    [joined] = merge(
-        loaded(tmp_path).parts([SUITE]), profile(switch_plug="switch.plug"), AdapterRegistry.discover()
-    ).suites
+    [joined] = merge(loaded(tmp_path).parts([SUITE]), profile(switch_plug="switch.plug"), Roster({})).suites
     assert joined.cases[0].id in {PASSED.id, FAILED.id}
 
 
