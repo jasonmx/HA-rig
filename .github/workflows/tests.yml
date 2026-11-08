@@ -1,11 +1,14 @@
 name: Tests
 
 on:
+  # edited: a changed Tests-with line reruns the tests against the PR it names.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
+  # Not wt/** pushes: a push run has no PR body to read Tests-with from, so it would test a paired change apart, and
+  # ci-green gates on every run at the head. pr-draft opens a branch's PR on its first push.
   push:
     branches:
       - main
-      - "wt/**"
   # Deviceside moves without a commit here, and can break the rig's tests when it does: catch that daily.
   schedule:
     - cron: "0 0 * * *"
@@ -18,20 +21,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
 
     steps:
       - uses: actions/checkout@v7
 
-      # The rig imports deviceside's registry and actions, so it tests against deviceside's newest line of work:
-      # whichever of main and the release branches had the latest commit, as deviceside's PRs pick their base.
+      # The rig imports deviceside's registry and actions. A PR whose body has `Tests-with: jasonmx/deviceside#N`
+      # tests against that deviceside PR; anything else tests against deviceside's newest line of work. The script
+      # says which, and why.
       - name: Check out deviceside
-        run: |
-          git clone --quiet --filter=blob:none --no-checkout https://github.com/jasonmx/deviceside ../deviceside
-          cd ../deviceside
-          git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/release/*:refs/remotes/origin/release/*'
-          ref=$(git for-each-ref --sort=-committerdate --count=1 --format='%(refname:short)' refs/remotes/origin/main 'refs/remotes/origin/release/*')
-          echo "deviceside at $ref"
-          git checkout --quiet --detach "$ref"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RIG_PR: ${{ github.event.pull_request.number }}
+        run: scripts/ci_deviceside.sh ../deviceside "$RIG_PR"
 
       - uses: actions/setup-python@v7
         with:

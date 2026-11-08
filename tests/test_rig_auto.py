@@ -5,15 +5,14 @@ import asyncio
 from dataclasses import replace
 
 import pytest
-from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import engine
 from ha_rig.engine import Outcome, RunResult, load_step_file, run
 from ha_rig.engine import Suite as EngineSuite
 from ha_rig.journal import Journal
-from tests.rig_fakes import FakeHA, ShellyAuto, profile
+from tests.rig_fakes import FakeHA, Roster, ShellyAuto, profile
 
-REGISTRY = AdapterRegistry.discover()
+REGISTRY = Roster({"shelly": {"clear_auto_off", "get_attributes", "set_auto_off", "set_auto_on"}})
 TOLERANCE = {"shelly": 0.2}
 DEADLINE_S = 0.5
 PLUG = "switch.plug"
