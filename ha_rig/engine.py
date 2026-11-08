@@ -1501,7 +1501,8 @@ class _CaseRun:
             # reads is the one just set. Hue rounds to its own 0-100 scale, so allow a step either side.
             brightness = round(data["brightness_pct"] * 255 / 100)
             want["brightness"] = {"min": brightness - 2, "max": brightness + 2}
-        await self.await_state(entity_id, want, self.names["tol"])
+        # A transition is the light's own fade, which the state follows only at its end.
+        await self.await_state(entity_id, want, self.names["tol"] + data.get("transition", 0))
 
     async def z2m_ieee(self, entity_id: str) -> str:
         entry = await self.ha.command({"type": "config/entity_registry/get", "entity_id": entity_id})

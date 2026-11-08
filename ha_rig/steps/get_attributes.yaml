@@ -7,24 +7,11 @@ tests:
   # raises not_stored when one missed the write, so a dropped delivery fails here and not as a wrong read (#281).
   - name: reads_while_off  # §4.1
     roles: [light_ct, group]
-    only: [hue, zha, zigbee2mqtt]  # the integrations with a set_attributes adapter
     steps:
       - set: {state: off}
       - call: {action: set_attributes, brightness: 40, color_temp_kelvin: 2700}
       - expect_response: {status: expected, integration: self}
       - wait: 1  # Hue's set_attributes returns before the bridge's event reaches aiohue's cache, which get_attributes reads
-      - call: {}
-      - expect_response:
-          attributes: {brightness: {min: 39, max: 41}, color_temp_kelvin: {min: 2650, max: 2750}}
-
-  # Shelly has no set_attributes adapter yet, so its setup stays core's turn_on. Folds back into reads_while_off once
-  # Shelly has one (DeviceSide issue #284).
-  - name: reads_while_off_after_turn_on
-    roles: [light_ct]
-    only: [shelly]
-    steps:
-      - set: {state: on, brightness: 102, color_temp_kelvin: 2700}
-      - set: {state: off}
       - call: {}
       - expect_response:
           attributes: {brightness: {min: 39, max: 41}, color_temp_kelvin: {min: 2650, max: 2750}}
