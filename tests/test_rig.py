@@ -751,7 +751,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
     async def write_records(result, registry, records_dir, date, source, profile):
         written.append(source)
         assert profile == "house"
-        return []
+        return [], []
 
     monkeypatch.setattr(rig, "run", run)
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
@@ -1403,7 +1403,7 @@ def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path
 
     async def write_records(result, registry, records_dir, date, source, profile):
         written.append([part.suite.integration for part in result.suites if part.recordable])
-        return []
+        return [], []
 
     monkeypatch.setattr(rig, "write_records", write_records)
     profile, suites = resumable(tmp_path)
@@ -1468,7 +1468,7 @@ async def test_a_written_record_takes_its_suite_out_of_the_ledger_and_a_failure_
     async def write_records(result, registry, records_dir, date, source, profile):
         return [
             records_dir / part.suite.integration / f"{part.suite.name}.md" for part in result.suites if part.recordable
-        ]
+        ], []
 
     monkeypatch.setattr(rig, "write_records", write_records)
     result = engine.RunResult(progress.parts(suites))
@@ -1476,6 +1476,40 @@ async def test_a_written_record_takes_its_suite_out_of_the_ledger_and_a_failure_
     assert {key[0] for key in progress.done()} == {"zha"}  # shelly's record carries it now
     assert rig.end_code(result, True, None, progress, suites, profile, fakes.OPTION_REGISTRY) == 1
     assert not rig.Progress.load(tmp_path, "house").entries  # the failed suite reruns whole
+
+
+async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_path, monkeypatch, capsys):
+    profile, suites = resumable(tmp_path)
+    progress = planned(tmp_path, monkeypatch, suites, profile).progress
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
+    monkeypatch.setattr(rig, "REPO", tmp_path)
+    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", tmp_path / "docs" / "test-records")
+    for suite in suites:
+        for case_id in ("t[light_ct]", "u[light_ct]"):
+            result = engine.CaseResult(
+                case_id, "light_ct", "light", engine.Outcome.PASS, entity_ids=(ENTITY[suite.integration],)
+            )
+            progress.record(suite, result)
+        progress.facts(suite, "2026.10.1", [])
+
+    async def write_records(result, registry, records_dir, date, source, profile):
+        paths = {
+            part.suite.integration: records_dir / part.suite.integration / f"{part.suite.name}.md"
+            for part in result.suites
+        }
+        return [paths["zha"]], [(paths["shelly"], ["t[switch_plug]", "u[switch_plug]"])]
+
+    monkeypatch.setattr(rig, "write_records", write_records)
+    result = engine.RunResult(progress.parts(suites))
+    await rig.report(result, None, fakes.OPTION_REGISTRY, "c1", profile, progress=progress)
+
+    out = capsys.readouterr().out
+    assert "Kept docs/test-records/shelly/" in out
+    assert "skips t[switch_plug], u[switch_plug], which it passed; run a profile with those roles" in out
+    assert {key[0] for key in progress.done()} == {
+        "shelly"
+    }  # the kept suite still needs its run; zha's record is written
 
 
 TWO_LIGHTS = """
@@ -1497,7 +1531,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
 
     async def write_records(result, registry, records_dir, date, source, profile):
         written.append([part.suite.integration for part in result.suites if part.recordable])
-        return []
+        return [], []
 
     monkeypatch.setattr(rig, "write_records", write_records)
     entities = [RigEntity("light.a", frozenset({"light_ct"})), RigEntity("light.b", frozenset({"light_dimmable"}))]
