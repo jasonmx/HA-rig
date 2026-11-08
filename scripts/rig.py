@@ -2107,9 +2107,14 @@ async def report(
     today = datetime.date.today().isoformat()
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
-    written = await write_records(result, registry, TEST_RECORDS_DIR, today, source, profile.name)
+    written, kept = await write_records(result, registry, TEST_RECORDS_DIR, today, source, profile.name)
     for path in written:
         print(f"Wrote {path.relative_to(REPO)}; review the diff before committing it.")
+    for path, narrowed in kept:
+        print(
+            f"Kept {path.relative_to(REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "
+            "run a profile with those roles, or delete the record to narrow it."
+        )
     if progress is not None:
         for suite_result in result.suites:
             if TEST_RECORDS_DIR / suite_result.suite.integration / f"{suite_result.suite.name}.md" in written:

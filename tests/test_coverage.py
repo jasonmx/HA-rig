@@ -2,6 +2,7 @@
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
@@ -18,6 +19,14 @@ PKG = "custom_components/deviceside/integrations"
 IDS = ["on_then_off[switch_plug]", "on_then_off[light_onoff]"]
 
 
+def plan(ids=IDS, absent=()) -> list:
+    """The cases a profile plans: those in `absent` skipped for lacking the role, as engine.cases marks them."""
+    return [
+        SimpleNamespace(id=i, skip="no role entity in the profile" if i in absent else None, absent=i in absent)
+        for i in ids
+    ]
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
 
@@ -31,8 +40,10 @@ def commit(repo: Path, files: dict[str, str], message: str = "change") -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def record(suite: Suite, cited: str, ids=IDS, date: str = "2026-11-01") -> str:
-    rows = "\n".join(f"| `{case_id}` | `switch` (switch_plug) | pass |" for case_id in ids)
+def record(suite: Suite, cited: str, ids=IDS, date: str = "2026-11-01", skipped=()) -> str:
+    rows = "\n".join(
+        f"| `{case_id}` | `switch` (switch_plug) | {'skipped' if case_id in skipped else 'pass'} |" for case_id in ids
+    )
     return (
         f"# Shelly · {suite.name}\n\n| | |\n|---|---|\n| Result | pass |\n| Date | {date} |\n"
         f"| Source | rig run (`scripts/rig.py`), commit `{cited[:7]}` |\n\n## Tests\n\n"
@@ -96,29 +107,29 @@ def test_a_record_stays_fresh_until_its_adapters_code_changes(repo):
     commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited)})
     commit(repo, {f"docs/test-records/hue/{OTHER.name}.md": record(OTHER, cited)})
     core = commit(repo, {"custom_components/deviceside/core/engine.py": "y = 2\n"})
-    fresh = coverage.freshness(repo, SUITE, core, shelly(repo), IDS)
+    fresh = coverage.freshness(repo, SUITE, core, shelly(repo), plan())
     assert fresh.fresh  # a core/ change stales nothing, as the gate decides
     assert str(fresh) == f"record 2026-11-01, commit {cited[:7]}"
     changed = commit(repo, {f"{PKG}/hue/turn_on_for.py": "x = 2\n"})
-    assert coverage.freshness(repo, SUITE, changed, shelly(repo), IDS).fresh
-    stale = coverage.freshness(repo, OTHER, changed, hue(repo), IDS)
+    assert coverage.freshness(repo, SUITE, changed, shelly(repo), plan()).fresh
+    stale = coverage.freshness(repo, OTHER, changed, hue(repo), plan())
     assert (stale.fresh, str(stale)) == (False, "stale: hue/turn_on_for.py")
 
 
 def test_a_record_whose_cases_differ_is_stale(repo):
     cited = git(repo, "rev-parse", "HEAD")
     head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited)})
-    stale = coverage.freshness(repo, SUITE, head, shelly(repo), [IDS[0], "new[switch_plug]"])
+    stale = coverage.freshness(repo, SUITE, head, shelly(repo), plan([IDS[0], "new[switch_plug]"]))
     assert str(stale) == f"stale: cases changed: new new[switch_plug]; gone {IDS[1]}"
 
 
 def test_no_record_an_unknown_commit_or_none_cited(repo):
     head = git(repo, "rev-parse", "HEAD")
-    assert str(coverage.freshness(repo, SUITE, head, shelly(repo), IDS)) == "no record"
+    assert str(coverage.freshness(repo, SUITE, head, shelly(repo), plan())) == "no record"
     head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, "abcdef1234")})
-    assert "which git can't find" in str(coverage.freshness(repo, SUITE, head, shelly(repo), IDS))
+    assert "which git can't find" in str(coverage.freshness(repo, SUITE, head, shelly(repo), plan()))
     head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": "# no source\n"})
-    assert str(coverage.freshness(repo, SUITE, head, shelly(repo), IDS)) == "stale: cites no commit"
+    assert str(coverage.freshness(repo, SUITE, head, shelly(repo), plan())) == "stale: cites no commit"
 
 
 PROFILE_TEXT = (
@@ -139,3 +150,39 @@ def test_coverage_omits_a_suite_whose_options_the_adapter_lacks(repo, tmp_path, 
     suites = [Suite(stop[0], "hue"), Suite(stop[0], "shelly")]
     plan = coverage.of(suites, Profile.load(profile_path), registry, repo, git(repo, "rev-parse", "HEAD").strip(), None)
     assert [item.suite.integration for item in plan] == ["hue"]
+
+
+def test_a_narrower_profiles_record_does_not_cover_a_broader_one(repo):
+    cited = git(repo, "rev-parse", "HEAD")
+    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited, skipped=[IDS[0]])})
+    bulb = coverage.freshness(repo, SUITE, head, shelly(repo), plan(absent=[IDS[0]]))
+    assert bulb.fresh
+    full = coverage.freshness(repo, SUITE, head, shelly(repo), plan())
+    assert str(full) == f"stale: this profile runs what the record skipped: {IDS[0]}"
+
+
+def suite_coverage(repo: Path, head: str, planned: list, saved=None) -> coverage.SuiteCoverage:
+    fresh = coverage.freshness(repo, SUITE, head, shelly(repo), planned)
+    return coverage.SuiteCoverage(SUITE, "fp", fresh, planned, saved or {})
+
+
+def test_a_broader_record_covers_the_narrower_profile_and_a_stale_one_warns_it_will_not_be_narrowed(repo):
+    cited = git(repo, "rev-parse", "HEAD")
+    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited)})
+    bulb = suite_coverage(repo, head, plan(absent=[IDS[0]]))
+    assert bulb.covered and bulb.narrows == [IDS[0]]  # fresh: covered, nothing to warn of
+    assert str(bulb) == f"covered (record 2026-11-01, commit {cited[:7]})"
+
+    changed = commit(repo, {f"{PKG}/shelly/turn_on_for.py": "x = 2\n"})
+    stale = suite_coverage(repo, changed, plan(absent=[IDS[0]]))
+    warning = f"; won't write a record: this profile skips {IDS[0]}, which the record passed"
+    assert not stale.covered and stale.narrows == [IDS[0]]
+    assert str(stale).endswith(warning) and str(stale).startswith("uncovered (stale: ")
+
+    saved = {case.id: object() for case in stale.planned}
+    assert (
+        str(suite_coverage(repo, changed, plan(absent=[IDS[0]]), saved)) == "covered (saved; no record yet)" + warning
+    )
+
+    full = suite_coverage(repo, changed, plan())
+    assert full.narrows == [] and "won't write" not in str(full)
