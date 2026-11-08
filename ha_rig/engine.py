@@ -10,6 +10,7 @@ No pytest here: scripts/rig.py calls run().
 import ast
 import asyncio
 import contextlib
+import datetime
 import hashlib
 import json
 import logging
@@ -655,6 +656,9 @@ class Case:
     # The skip is for a device that is offline now (--ignore-unreachables), not for the profile: never saved, and the
     # suite stays incomplete.
     unreachable: bool = False
+    # The skip is for a role the profile lacks (`no <role> entity in the profile`), so a record written from it would
+    # narrow what an earlier profile proved.
+    absent: bool = False
 
     @property
     def id(self) -> str:
@@ -715,7 +719,7 @@ def cases(
                 needed = test.roles_needed(role)
                 entities = {name: profile.entity(suite.integration, name) for name in needed}
                 if missing := [name for name, entity_id in entities.items() if entity_id is None]:
-                    case = Case(suite, test, role, {}, f"no {missing[0]} entity in the profile", observed)
+                    case = Case(suite, test, role, {}, f"no {missing[0]} entity in the profile", observed, absent=True)
                 else:
                     group = next((name for name in entities if name in GROUP_ROLES), None)
                     members = profile.members(suite.integration, entities[group]) if group else ()
@@ -906,6 +910,7 @@ class CaseResult:
     entity_ids: tuple[str, ...] = ()
     twin: str | None = None  # Case.twin
     unreachable: bool = False  # Case.unreachable
+    absent: bool = False  # Case.absent
 
 
 @dataclass(slots=True)
@@ -2245,7 +2250,9 @@ class _Run:
 
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
     domain = case.entities[case.role].partition(".")[0] if case.entities else None
-    return CaseResult(case.id, case.role, domain, outcome, detail, twin=case.twin, unreachable=case.unreachable)
+    return CaseResult(
+        case.id, case.role, domain, outcome, detail, twin=case.twin, unreachable=case.unreachable, absent=case.absent
+    )
 
 
 def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunResult:
@@ -2283,7 +2290,7 @@ def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
         target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
         outcome = str(case.outcome) + (f": {case.detail}" if details and case.detail else "")
         if case.outcome is Outcome.PASS and _firmware_fact(suite_result.suite, case.id):
-            outcome += " (firmware fact)"
+            outcome += FIRMWARE_FACT
         lines.append(f"| `{case.id}` | {target} | {outcome} |")
     return lines
 
@@ -2317,6 +2324,55 @@ async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[
         if (device := devices.get(device_ids.get(entity_id))) is not None:
             found[Device(device.get("model"), device.get("model_id"), device.get("sw_version"))] = None
     return config["version"], list(found)
+
+
+CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # check_release's
+DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
+FIRMWARE_FACT = " (firmware fact)"  # after a firmware fact's PASS in a record's Tests table
+CASE_ROW = re.compile(r"^\| `([^`]+)` \|.*\| ([^|]*?) \|$", re.MULTILINE)  # id, then the result column
+
+
+@dataclass(frozen=True, slots=True)
+class Record:
+    """What the rig reads from a test record: the commit it cites, its date, the case IDs in its Tests table and
+    which of them passed or were skipped (a record writes no skip detail)."""
+
+    path: Path
+    commit: str | None
+    date: str | None
+    case_ids: frozenset[str]
+    passed: frozenset[str] = frozenset()
+    skipped: frozenset[str] = frozenset()
+
+    @classmethod
+    def read(cls, path: Path) -> Record | None:
+        if not path.is_file():
+            return None
+        text = path.read_text()
+        cited, date = CITED_COMMIT.search(text), DATE.search(text)
+        _, _, tests = text.partition("## Tests")
+        rows = [(case_id, result.removesuffix(FIRMWARE_FACT)) for case_id, result in CASE_ROW.findall(tests)]
+        return cls(
+            path,
+            cited and cited[1],
+            date and date[1],
+            frozenset(case_id for case_id, _ in rows),
+            frozenset(case_id for case_id, result in rows if result == Outcome.PASS),
+            frozenset(case_id for case_id, result in rows if result == Outcome.SKIPPED),
+        )
+
+    @property
+    def age_days(self) -> int | None:
+        try:
+            return (datetime.date.today() - datetime.date.fromisoformat(self.date)).days if self.date else None
+        except ValueError:
+            return None
+
+
+def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[str]:
+    """The IDs of the cases `record` passed that the profile skips for lacking the role: a record with these
+    rewritten would lose what an earlier profile proved."""
+    return sorted(case.id for case in cases if record and case.absent and case.id in record.passed)
 
 
 def render_record(
@@ -2371,19 +2427,25 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
 
 async def write_records(
     result: RunResult, registry: Any, records_dir: Path, date: str, source: str, profile: str
-) -> list[Path]:
-    """One record per suite that fully passed with its facts taken; a partial or failed suite, or one whose facts
-    lookup failed, writes nothing: a record naming no device would replace one that did."""
-    written = []
+) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
+    """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
+    one whose facts lookup failed, writes nothing: a record naming no device would replace one that did.
+
+    A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
+    the file stays as it is, and the suite is `kept` with those case IDs. To narrow on purpose, delete the record."""
+    written, kept = [], []
     for suite_result in result.suites:
         if not suite_result.recordable or suite_result.ha_version is None:
             continue
         suite = suite_result.suite
         title = registry.integrations[suite.integration].title
         path = records_dir / suite.integration / f"{suite.name}.md"
+        if narrowed := narrows(suite_result.cases, Record.read(path)):
+            kept.append((path, narrowed))
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, profile)
         )
         written.append(path)
-    return written
+    return written, kept

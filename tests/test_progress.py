@@ -253,3 +253,21 @@ def test_a_failed_device_lookup_leaves_the_fact_pending(tmp_path):
     suite = facts_suite(tmp_path)
     ran_a_fact(tmp_path, suite, devices=())  # rig_facts failed: no devices
     assert loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite) == {}
+
+
+def test_a_saved_case_with_no_absent_key_still_loads(tmp_path):
+    started(tmp_path)
+    path = path_for(tmp_path, "lab")
+    data = json.loads(path.read_text())
+    for entry in data["suites"]:
+        for case in entry["cases"]:
+            assert case.pop("absent") is False
+    path.write_text(json.dumps(data))
+    assert loaded(tmp_path).done()[("shelly", SUITE.name, PASSED.id)] == PASSED
+
+
+def test_an_absent_skip_round_trips(tmp_path):
+    absent = CaseResult("c[switch_plug]", "switch_plug", None, Outcome.SKIPPED, "no switch_plug entity", absent=True)
+    progress = loaded(tmp_path)
+    progress.record(SUITE, absent)
+    assert loaded(tmp_path).done()[("shelly", SUITE.name, absent.id)].absent

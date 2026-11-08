@@ -347,4 +347,5 @@ def _result(case: dict) -> CaseResult:
         case["detail"],
         tuple(case["entity_ids"]),
         case["twin"],
+        absent=case.get("absent", False),
     )

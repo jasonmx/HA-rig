@@ -65,7 +65,9 @@ an Adaptive Lighting switch). `.env.rig` (from `ha_rig/env.example`) holds what 
 address, tokens, deploy commands and Hue bridge.
 
 `--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
-records from different profiles of the same suite overwrite each other. A record is public, so name a profile for its
+a record never narrows: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`) writes no record
+over one that passed a case on it, and says `Kept <record>`. Run a profile with the role, or, to narrow on purpose
+(a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's (through
 `.private-terms.rig`) and this repo's (`scripts/check_private.py`), keep every profile's entity IDs, members, supplies,
 pause list and IEEEs out of commits.
@@ -153,8 +155,9 @@ action's, and those its `call` steps name), as deviceside's `check_release.py --
 `ha_rig/coverage.py`.
 
 A suite is **covered** when its record (`docs/test-records/<integration>/<suite>.md`) cites a commit at which that
-code is unchanged and lists exactly the cases the suite plans now, or when the ledger holds a result for every case
-it plans. A run leaves a selected suite that is covered out, saying `covered (record <date>, commit <c>), skipped`,
+code is unchanged and lists exactly the cases the suite plans now (and shows none as skipped that this profile
+runs: a narrower profile's record doesn't cover a broader one), or when the ledger holds a result for every case it
+plans. A run leaves a selected suite that is covered out, saying `covered (record <date>, commit <c>), skipped`,
 and runs only the cases of the rest with no saved result; a run whose every selected suite is covered says so and
 stops. `--fresh` ignores the records and the saved cases of the selected suites and reruns them whole. The selection
 (`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so a `-k` run's cases count towards their
@@ -350,4 +353,5 @@ completes it (Coverage, above). The PR that clears an adapter's `experimental` f
 imports from its integration package) differs from the commit one of its records cites: deviceside's
 `scripts/check_release.py --records`. The record's Source row names `scripts/rig.py` and the deviceside commit HA
 loaded, never one of this repo's. So every adapter changed since its last run needs a new run before the next RC:
-`scripts/rig.py --coverage` lists them.
+`scripts/rig.py --coverage` lists them. A run never overwrites a record with one that skips, for a role its profile
+lacks, a case the record passed (Profiles, above); `--coverage` says `won't write a record` for such a suite.

@@ -19,11 +19,9 @@ only the suite's other cases rerun after a code change, and its next record carr
 Pure file and git reading: --coverage and the plan run it before anything changes.
 """
 
-import datetime
 import hashlib
 import importlib.util
 import inspect
-import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
@@ -31,13 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .engine import Case, CaseResult, Outcome, Suite, adapters_for, applies, cases
+from .engine import Case, CaseResult, Outcome, Record, Suite, adapters_for, applies, cases, narrows
 from .profile import Profile
 from .progress import Progress
 
-CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # check_release's
-DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
-CASE_ROW = re.compile(r"^\| `([^`]+)` \|", re.MULTILINE)
 RECORDS = Path("docs") / "test-records"
 INTEGRATIONS = "custom_components/deviceside/integrations/"  # left off the changed files a stale record names
 
@@ -90,32 +85,6 @@ def fingerprint(repo: Path, commit: str, files: Iterable[str], step_file: Path) 
     return digest.hexdigest()[:16]
 
 
-@dataclass(frozen=True, slots=True)
-class Record:
-    """What coverage reads from a test record: the commit it cites, its date and the case IDs in its Tests table."""
-
-    path: Path
-    commit: str | None
-    date: str | None
-    case_ids: frozenset[str]
-
-    @classmethod
-    def read(cls, path: Path) -> Record | None:
-        if not path.is_file():
-            return None
-        text = path.read_text()
-        cited, date = CITED_COMMIT.search(text), DATE.search(text)
-        _, _, tests = text.partition("## Tests")
-        return cls(path, cited and cited[1], date and date[1], frozenset(CASE_ROW.findall(tests)))
-
-    @property
-    def age_days(self) -> int | None:
-        try:
-            return (datetime.date.today() - datetime.date.fromisoformat(self.date)).days if self.date else None
-        except ValueError:
-            return None
-
-
 def record_path(repo: Path, suite: Suite) -> Path:
     return repo / RECORDS / suite.integration / f"{suite.name}.md"
 
@@ -140,9 +109,10 @@ class Freshness:
         return f"record {self.record.date or 'undated'}, commit {self.record.commit}"
 
 
-def freshness(repo: Path, suite: Suite, commit: str, files: Iterable[str], planned: Iterable[str]) -> Freshness:
+def freshness(repo: Path, suite: Suite, commit: str, files: Iterable[str], planned: Iterable[Case]) -> Freshness:
     """Whether the suite's record is fresh at `commit` (see the module docstring), given its code `files` and the
-    case IDs it `planned`."""
+    cases it `planned`. A record is also stale when this profile runs a case it shows as skipped: a narrower
+    profile's record doesn't cover a broader one."""
     if (record := Record.read(record_path(repo, suite))) is None:
         return Freshness(None, None)
     if record.commit is None:
@@ -153,11 +123,14 @@ def freshness(repo: Path, suite: Suite, commit: str, files: Iterable[str], plann
         return Freshness(record, f"git can't compare {record.commit} with {commit}: {diff.stderr.strip()}")
     if changed := diff.stdout.split():
         return Freshness(record, ", ".join(path.removeprefix(INTEGRATIONS) for path in changed))
-    planned = frozenset(planned)
-    if record.case_ids != planned:
-        new, gone = sorted(planned - record.case_ids), sorted(record.case_ids - planned)
+    planned = list(planned)
+    ids = frozenset(case.id for case in planned)
+    if record.case_ids != ids:
+        new, gone = sorted(ids - record.case_ids), sorted(record.case_ids - ids)
         why = [f"new {', '.join(new)}" if new else "", f"gone {', '.join(gone)}" if gone else ""]
         return Freshness(record, "cases changed: " + "; ".join(filter(None, why)))
+    if runs := sorted(case.id for case in planned if case.skip is None and case.id in record.skipped):
+        return Freshness(record, f"this profile runs what the record skipped: {', '.join(runs)}")
     return Freshness(record, None)
 
 
@@ -183,6 +156,12 @@ class SuiteCoverage:
         return bool(self.planned) and all(case.id in self.saved for case in self.planned)
 
     @property
+    def narrows(self) -> list[str]:
+        """The IDs of the cases the record passed that this profile skips for lacking the role: a run of it writes no
+        record (engine.write_records)."""
+        return narrows(self.planned, self.freshness.record)
+
+    @property
     def missing(self) -> list[Case]:
         return [case for case in self.planned if case.id not in self.saved]
 
@@ -190,11 +169,16 @@ class SuiteCoverage:
         if self.freshness.fresh:
             return f"covered ({self.freshness})"
         firmware = f", {len(self.by_firmware)} by firmware" if self.by_firmware else ""
+        refusal = (
+            f"; won't write a record: this profile skips {', '.join(self.narrows)}, which the record passed"
+            if self.narrows
+            else ""
+        )
         if self.complete:
-            return f"covered (saved{firmware}; no record yet)"
+            return f"covered (saved{firmware}; no record yet){refusal}"
         if self.saved:
-            return f"partial {len(self.saved)}/{len(self.planned)}{firmware}"
-        return f"uncovered ({self.freshness})"
+            return f"partial {len(self.saved)}/{len(self.planned)}{firmware}{refusal}"
+        return f"uncovered ({self.freshness}){refusal}"
 
 
 def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
@@ -261,6 +245,6 @@ def of(
             if not fresh:
                 lent = lend(suite, planned, saved, progress, unattended)
         saved |= lent
-        record = Freshness(None, None) if fresh else freshness(repo, suite, commit, files, [c.id for c in planned])
+        record = Freshness(None, None) if fresh else freshness(repo, suite, commit, files, planned)
         found.append(SuiteCoverage(suite, suite_fingerprint, record, planned, saved, frozenset(lent)))
     return found
