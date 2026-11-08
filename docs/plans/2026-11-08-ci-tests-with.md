@@ -15,6 +15,7 @@ its deviceside PR still holds.
 Intent: A rig PR whose body has `Tests-with: jasonmx/deviceside#N` runs its pytest job against that deviceside PR,
 so a paired change is tested together before either side merges.
 Touches: .github/workflows/tests.yml, scripts/ci_deviceside.sh, CLAUDE.md
+Depends-on: #32
 
 ## Steps
 
