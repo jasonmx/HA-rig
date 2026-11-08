@@ -8,6 +8,7 @@ from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import coverage
 from ha_rig.engine import Suite, load_step_files
+from ha_rig.profile import Profile
 from ha_rig.target import deviceside_repo
 
 FILES = {st.action: st for st in load_step_files() if not st.options and st.name is None}
@@ -118,3 +119,23 @@ def test_no_record_an_unknown_commit_or_none_cited(repo):
     assert "which git can't find" in str(coverage.freshness(repo, SUITE, head, shelly(repo), IDS))
     head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": "# no source\n"})
     assert str(coverage.freshness(repo, SUITE, head, shelly(repo), IDS)) == "stale: cites no commit"
+
+
+PROFILE_TEXT = (
+    "hue:\n  - entity_id: light.a\n    roles: [light_dimmable]\n"
+    "shelly:\n  - entity_id: light.b\n    roles: [light_dimmable]\n"
+)
+
+
+def test_coverage_omits_a_suite_whose_options_the_adapter_lacks(repo, tmp_path, monkeypatch):
+    profile_path = tmp_path / "house.yaml"
+    profile_path.write_text(
+        "hue:\n  - entity_id: light.a\n    roles: [light_dimmable]\n"
+        "shelly:\n  - entity_id: light.b\n    roles: [light_dimmable]\n"
+    )
+    monkeypatch.setattr(coverage, "code", lambda suite, registry, repo: ())
+    registry = AdapterRegistry.discover()
+    stop = [st for st in load_step_files() if st.action == "stop" and st.options == {"predicted_state"}]
+    suites = [Suite(stop[0], "hue"), Suite(stop[0], "shelly")]
+    plan = coverage.of(suites, Profile.load(profile_path), registry, repo, git(repo, "rev-parse", "HEAD").strip(), None)
+    assert [item.suite.integration for item in plan] == ["hue"]

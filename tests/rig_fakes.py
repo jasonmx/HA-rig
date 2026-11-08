@@ -43,6 +43,12 @@ class Roster:
     def adapter(self, action: str, integration: str):
         return _discovered().adapter(action, integration) if action in self._declared.get(integration, ()) else None
 
+    def matrix(self):
+        """The declared pairs only, so a check over every adapter sees what the test declared."""
+        for integration, actions in sorted(self._declared.items()):
+            for action in sorted(actions):
+                yield action, integration, self.adapter(action, integration)
+
     def __getattr__(self, name: str):
         return getattr(_discovered(), name)
 

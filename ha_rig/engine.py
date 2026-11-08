@@ -1,7 +1,8 @@
 """Runs the rig's YAML step files against the live HA and renders test records from the results.
 
 One file per action (`steps/<action>.yaml`) runs on every integration in the profile that has that action's adapter; a
-file with `options` (`steps/<action>-<option>.yaml`) runs it again with those DeviceSide options on. The registry
+file with `options` (`steps/<action>-<option>.yaml`) runs it again with those DeviceSide options on, only on adapters
+whose scope declares them. The registry
 supplies what differs per integration: the expected status, the tolerance, and the options in scope.
 No pytest here: scripts/rig.py calls run().
 """
@@ -634,6 +635,26 @@ def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
     """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
     return frozenset(action for action in called if registry.adapter(action, suite.integration) is not None)
+
+
+def applies(suite: Suite, registry: Any) -> bool:
+    """Whether the suite runs on its integration: the adapter exists and its scope has every option the file sets (a
+    file with none applies wherever there is an adapter). An option file that doesn't apply is not part of the run."""
+    adapter = registry.adapter(suite.action, suite.integration)
+    return adapter is not None and suite.file.options <= adapter.scope.options
+
+
+def check_options(step_files: Iterable[StepFile], registry: Any) -> None:
+    """Raise SchemaError for an option that no adapter of the file's action, on any integration, declares: a typo."""
+    for step_file in step_files:
+        declared = {
+            option
+            for action, _, adapter in registry.matrix()
+            if action == step_file.action and adapter is not None
+            for option in adapter.scope.options
+        }
+        if unknown := sorted(step_file.options - declared):
+            raise SchemaError(f"{step_file.path.name}: no {step_file.action} adapter has option {unknown[0]}")
 
 
 def cases(
@@ -2023,12 +2044,9 @@ def _plan(
         if adapter is None:
             out(f"{suite.integration} / {suite.action}: no adapter, skipped")
             continue
-        if suite.file.options and not adapter.scope.options:
-            # Another integration's option file, such as Hue's predicted_state: this adapter has none to pin.
-            out(f"{suite.integration} / {suite.action}: no options, {suite.file.path.name} skipped")
+        if not applies(suite, registry):
+            # Another integration's option file, such as Hue's predicted_state: selection drops it silently.
             continue
-        if unknown := sorted(suite.file.options - adapter.scope.options):
-            raise SchemaError(f"{suite.file.path.name}: {suite.integration} {suite.action} has no option {unknown[0]}")
         client = admin if suite.integration in ADMIN_INTEGRATIONS else ha
         if client is None or ((adapter.scope.options or suite.file.moves_entry) and admin is None):
             out(f"{suite.integration} / {suite.action}: needs HA_ADMIN_TOKEN, skipped")

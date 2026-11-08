@@ -1634,3 +1634,42 @@ def test_readme_shows_the_current_help(monkeypatch, capsys):
     assert "<!-- rig-help -->" in readme and "<!-- /rig-help -->" in readme, "README lost its rig-help markers"
     block = readme.split("<!-- rig-help -->\n```text\n", 1)[1].split("\n```\n<!-- /rig-help -->", 1)[0]
     assert block == capsys.readouterr().out.rstrip("\n"), "regenerate README's block: COLUMNS=100 scripts/rig.py --help"
+
+
+FADE_ROSTER = fakes.Roster(
+    {
+        "hue": {"raise_brightness", "lower_brightness", "stop"},
+        "shelly": {"raise_brightness", "lower_brightness", "stop"},
+    }
+)
+
+
+def fade_profile(tmp_path, *integrations: str) -> Profile:
+    body = "".join(f"{name}:\n  - entity_id: light.{name}\n    roles: [light_dimmable]\n" for name in integrations)
+    return Profile.load(write(tmp_path, "fade.yaml", body))
+
+
+def test_run_suites_keeps_an_option_file_only_for_the_adapter_that_declares_the_option(tmp_path):
+    profile = fade_profile(tmp_path, "hue", "shelly")
+    suites = rig.run_suites(run_args(action=["stop"]), profile, FADE_ROSTER)
+    assert {(suite.integration, suite.file.path.stem) for suite in suites} == {
+        ("hue", "stop"),
+        ("shelly", "stop"),
+        ("hue", "stop-predicted_state"),
+    }
+
+
+def test_a_shelly_only_run_with_the_option_files_holds_ha_shared(tmp_path):
+    profile = fade_profile(tmp_path, "shelly")
+    suites = rig.run_suites(run_args(), profile, FADE_ROSTER)
+    assert not any(suite.file.options for suite in suites)
+    deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
+    setup = rig.Setup({}, profile, FADE_ROSTER, suites, False, False, deploy, selected=suites)
+    assert rig.claim(types.SimpleNamespace(no_deploy=False, roam_check=False), setup).ha == "shared"
+
+
+def test_the_dry_run_plan_lists_no_option_case_for_shelly(tmp_path, capsys):
+    profile = fade_profile(tmp_path, "shelly")
+    suites = rig.run_suites(run_args(), profile, FADE_ROSTER)
+    rig.print_phases(profile, suites, FADE_ROSTER, None, False)
+    assert "predicted_state" not in capsys.readouterr().out
