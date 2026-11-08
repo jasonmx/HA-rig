@@ -2610,3 +2610,60 @@ async def test_skipped_cases_are_still_reported_after_the_budget_is_spent(tmp_pa
     await run_.automated(steps, ha, [skipped])
     assert reported == [(case.id, Outcome.SKIPPED)]
     assert not budget.stopped
+
+
+async def test_a_step_with_only_runs_only_on_those_integrations(tmp_path):
+    """A step limited to ZHA (`wait: 2  # ZHA ignores…`) is left out of every other integration's case."""
+    text = ON_THEN_OFF.replace(
+        "      - expect_response: {status: expected, integration: self}\n",
+        "      - expect_response: {status: expected, integration: self}\n"
+        "      - {expect_state: {state: off}, only: [zha]}\n",
+    )
+    ha = FakeHA({"switch.plug": {"state": "on"}}, timer_on)
+    result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug"))
+    assert outcomes(result) == {"on_then_off[switch_plug]": (Outcome.PASS, "")}
+
+
+def test_suites_pinning_the_same_options_run_side_by_side():
+    """Each save reloads the entry, so `move` and `move-predicted_state` pairs are regrouped: every suite with the
+    options off, then every one with them on; a suite pinning none stays where it was."""
+    off_a, on_a, plain, off_b, on_b = (object() for _ in range(5))
+    options = {
+        id(off_a): {"predicted_state": False},
+        id(on_a): {"predicted_state": True},
+        id(off_b): {"predicted_state": False},
+        id(on_b): {"predicted_state": True},
+    }
+    planned = [(off_a,), (on_a,), (plain,), (off_b,), (on_b,)]
+    assert engine.by_options(planned, options) == [(off_a,), (off_b,), (on_a,), (on_b,), (plain,)]
+
+
+FIRMWARE_FACT = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: plain
+    roles: [switch_plug]
+    steps:
+      - wait: 0
+  - name: wins
+    roles: [switch_plug]
+    firmware_fact: true
+    steps:
+      - wait: 0
+"""
+
+
+def test_a_record_marks_its_firmware_facts(tmp_path):
+    facts = suite(tmp_path, FIRMWARE_FACT)
+    cases = [
+        CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS),
+        CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS),
+    ]
+    devices = [engine.Device("Plug", "P1", "1.4.2")]
+    record = render_record(SuiteResult(facts, cases, True), "Shelly", "2026.10.1", devices, "2026-11-08", "t", "lab")
+    assert "| `plain[switch_plug]` | `switch` (switch_plug) | pass |" in record
+    assert "| `wins[switch_plug]` | `switch` (switch_plug) | pass (firmware fact) |" in record
+    assert "its pass stands at the firmware listed under Device" in record
+    plain = render_record(SuiteResult(facts, cases[:1], True), "Shelly", "2026.10.1", devices, "d", "t", "lab")
+    assert "firmware fact" not in plain
