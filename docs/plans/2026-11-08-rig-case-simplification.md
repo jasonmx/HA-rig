@@ -136,16 +136,19 @@ ha-rig `CLAUDE.md`, under **Changes**:
 (0694d30). House dry run `--fresh`: 363 → 245 cases, 9,078 s → 5,329 s (baseline taken from main's rig the same day).
 The house profile has no `scene` role, so `set_scene` runs only on a profile with a rig-made scene (lab).
 
-**Next:**
-1. The rig run of the changed suites. It needs Jason's authorization; Shelly needs the bulb powered for the
-   non-auto suites, and the auto suites now need the plug. Run it from the deviceside worktree so the records land on
-   #301, then commit them there and regenerate `docs/compatibility.md` (`scripts/gen_compat.py`): the Shelly auto
-   records still name the bulb.
+**Merged without the rig run** (Jason, 2026-11-08): #301 and #37 merge on CI and a clean audit; the rig run is
+deferred to 2026-11-09. Main's "records never narrow" (#35) was merged in; a firmware fact's `pass (firmware fact)`
+now reads as a pass.
+
+**Next (2026-11-09, from deviceside main):**
+1. The rig run of the changed suites. It needs Jason's authorization (the restricted sensor was on), and
+   on 2026-11-08 seven house entities were unavailable, the Shelly bulb among them; Shelly needs the bulb powered for
+   the non-auto suites and the plug for the auto suites. Commit the records on a deviceside branch and regenerate
+   `docs/compatibility.md` (`scripts/gen_compat.py`): the Shelly auto records still name the bulb.
 2. Probe once that `set_scene.applies_while_on` fails with the call stubbed (lab profile).
 3. Check that `--coverage` at HEAD shows firmware facts as `N by firmware` after the run.
-4. A clean `/audit-code` over each PR's whole diff, then `gh pr ready`. Merge #37 with `merge-green 37 --squash
-   --delete-branch` after #301 merges. #301 targets deviceside's default branch, so it is Jason's to merge.
+4. Correct the `rig_seconds` estimates from the run's timings.
 
-**Open:** `rig_seconds` figures are proportional estimates; correct them from the run's timings. Low, not fixed: a
+**Open:** Low, not fixed: a
 `call` step naming another action inside a step with `only:` still marks the case `no <action> adapter` on
 integrations the step leaves out (engine `cases`, `test.calls`); no step file hits it yet.
