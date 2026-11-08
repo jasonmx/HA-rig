@@ -1415,10 +1415,10 @@ async def test_set_waits_for_every_member_to_reach_the_brightness(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("step", "outcome"),
-    [("{state: off, transition: 0.6}", Outcome.PASS), ("{state: off}", Outcome.FAIL)],
+    ("step", "outcome", "failure"),
+    [("{state: off, transition: 0.6}", Outcome.PASS, ""), ("{state: off}", Outcome.FAIL, "step 1 (set)")],
 )
-async def test_set_waits_out_a_transition_beyond_the_tolerance(tmp_path, step, outcome):
+async def test_set_waits_out_a_transition_beyond_the_tolerance(tmp_path, step, outcome, failure):
     """A light's own fade outlasts a short tolerance: with a transition `set` waits tol + transition for it, and
     without one the same fade is a failure at tol."""
 
@@ -1432,7 +1432,9 @@ async def test_set_waits_out_a_transition_beyond_the_tolerance(tmp_path, step, o
     ha = Fading({"light.lamp": {"state": "on"}})
     text = header("light_dimmable") + f"      - set: {step}\n"
     result = await run_one(ha, suite(tmp_path, text), profile(light_dimmable="light.lamp"))
-    assert outcomes(result)["t[light_dimmable]"][0] is outcome
+    got, detail = outcomes(result)["t[light_dimmable]"]
+    assert got is outcome
+    assert detail.startswith(failure)
 
 
 async def test_admin_integrations_run_on_the_admin_connection(tmp_path):
