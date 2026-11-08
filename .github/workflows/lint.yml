@@ -39,7 +39,7 @@ jobs:
       contents: read
 
     env:
-      # Same version as the pre-commit hook.
+      # The pre-commit hook's version too: the job fails when they differ.
       BETTERLEAKS_VERSION: "1.10.0"
       BETTERLEAKS_SHA256: "9d9ad503cd5d80d18a939352266c3fcca52f10da9b83cd5cfe646989b13940fe"
 
@@ -47,6 +47,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Check the hook pins the same betterleaks
+        run: |
+          grep -q "# frozen: v${BETTERLEAKS_VERSION}$" .pre-commit-config.yaml || {
+            echo "::error::.pre-commit-config.yaml pins a different betterleaks than v${BETTERLEAKS_VERSION}"
+            exit 1
+          }
 
       # The runner is thrown away after each run, so the binary is cached by version: a run only downloads it on a
       # cache miss, and GitHub's release CDN sometimes answers 504.
