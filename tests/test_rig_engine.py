@@ -11,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import engine
 from ha_rig.bridge import BridgeError
@@ -41,12 +40,22 @@ from tests.rig_fakes import (
     WAITING_MIDWAY,
     FakeAdmin,
     FakeHA,
+    Roster,
     profile,
 )
 
 TOL = 0.2
 TOLERANCE = {"shelly": TOL, "zha": TOL, "zigbee2mqtt": TOL, "hue": TOL, "fake": TOL}
-REGISTRY = AdapterRegistry.discover()
+# Shelly's snapshot pair (get_attributes and set_attributes) is off, as it was before deviceside added Shelly's
+# set_attributes; ZHA, Zigbee2MQTT and Hue have it, so the tests that need the snapshot path run as one of them.
+REGISTRY = Roster(
+    {
+        "shelly": {"turn_on_for", "get_attributes"},
+        "zha": {"turn_on_for", "raise_hue", "get_attributes", "set_attributes"},
+        "zigbee2mqtt": {"turn_on_for", "raise_brightness", "raise_hue", "get_attributes", "set_attributes"},
+        "hue": {"set_scene", "get_attributes", "set_attributes"},
+    }
+)
 
 ON_THEN_OFF = """
 action: turn_on_for
@@ -304,6 +313,34 @@ tests:
     assert ha.calls[-2:] == [
         ("light", "turn_off", {"entity_id": "light.lamp"}),
         ("deviceside", "set_attributes", {"entity_id": "light.lamp", "brightness": 40, "color_temp_kelvin": 2700}),
+    ]
+
+
+async def test_an_off_light_is_read_before_the_case_and_restored_after(tmp_path):
+    # With get_attributes and set_attributes both declared (ZHA), the snapshot reads an off light first. The read
+    # never reaches the case's own respond, and the restore turns the light off, then writes back what was stored.
+    stored = {"brightness": 40, "color_temp_kelvin": 2700}
+    own: list[str] = []  # what the case's own respond saw, apart from the snapshot's read and the restore
+
+    def respond(ha, action, data):
+        if action == "get_attributes":
+            return {data["entity_id"]: stored}
+        if action == "set_attributes":
+            return {data["entity_id"]: {"status": "sent", "integration": "zha"}}
+        own.append(action)
+        return {entity_id: {**row, "integration": "zha"} for entity_id, row in timer_on(ha, action, data).items()}
+
+    ha = FakeAdmin({"light.lamp": {"state": "off"}}, respond)
+    text = ON_THEN_OFF.replace("switch_plug", "light_onoff")
+    result = await run_one(ha, suite(tmp_path, text, "zha"), profile("zha", light_onoff="light.lamp"), admin=ha)
+
+    assert outcomes(result) == {"on_then_off[light_onoff]": (Outcome.PASS, "")}
+    assert own == ["turn_on_for"]
+    services = [call[1] for call in ha.calls]
+    assert services.index("get_attributes") < services.index("turn_on_for")
+    assert ha.calls[-2:] == [
+        ("light", "turn_off", {"entity_id": "light.lamp"}),
+        ("deviceside", "set_attributes", {"entity_id": "light.lamp", **stored}),
     ]
 
 

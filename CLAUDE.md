@@ -18,7 +18,8 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 - `ha_rig/`: the engine, HA and Hue clients, locks, journal, baseline, roaming, run logs, profiles, the target
   checkout (`target.py`) and the household terms for deviceside's check (`terms.py`)
 - `ha_rig/steps/`: one step file per action, named as deviceside's action modules are
-- `tests/`: the rig's own tests, with fakes; they import deviceside's registry and actions from the target checkout
+- `tests/`: the rig's own tests, with fakes; they import deviceside's registry and actions from the target checkout; the
+  engine tests take adapters from a declared roster over that registry (`tests/rig_fakes.py`, `Roster`)
 
 ## Changes
 
