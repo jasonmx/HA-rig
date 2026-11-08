@@ -39,6 +39,9 @@ Depends-on: #32
    - Add `pull-requests: read` to the job's permissions, and pass `GH_TOKEN: ${{ github.token }}`.
    - Pass the PR number through `env`, never `${{ }}`-interpolated into the script.
    - Update the comment above the step.
+   - Drop `wt/**` from the push trigger (decided while implementing): a push run has no PR body, so on a paired PR it
+     would test deviceside main and stay red, and `ci-green` gates on every run at the head. The PR run covers wt/
+     branches; `pr-draft` opens the PR on the first push.
 3. **CLAUDE.md**, Changes: extend the rule on new or renamed actions. The rig PR names the deviceside PR with
    `Tests-with: jasonmx/deviceside#N` in its plan's Coordination section, which `pr-draft` copies verbatim into the
    PR body.
