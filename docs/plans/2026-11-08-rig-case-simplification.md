@@ -16,9 +16,9 @@ First step of the implementing session: copy this plan to `ha-rig/docs/plans/202
 ## Coordination
 
 Intent: Cut duplicate rig cases, add a firmware-version tier for firmware-fact cases, codify "default to Documented".
-Touches: ha-rig: ha_rig/steps/*.yaml, ha_rig/engine.py, ha_rig/coverage.py, ha_rig/progress.py, tests/, docs/rig.md,
-CLAUDE.md; deviceside: CLAUDE.md, docs/hardware-the-rig-lacks.md, docs/integrations.md, custom_components/deviceside/integrations/shelly/addressing.py (auto capabilities), integrations/zha (group_color scope), scripts/check_release.py if records rules change
-Depends-on: none. Rig PR carries `Tests-with: jasonmx/deviceside#N` for the deviceside PR.
+Touches: ha_rig/engine.py, ha_rig/coverage.py, ha_rig/progress.py, ha_rig/steps/*.yaml, tests/test_rig_steps.py,
+tests/test_rig_engine.py, tests/test_progress.py, tests/test_coverage.py, tests/test_rig.py, docs/rig.md, CLAUDE.md
+Tests-with: jasonmx/deviceside#301
 
 ## Design decisions (settled)
 
