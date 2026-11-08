@@ -37,15 +37,35 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+
+    env:
+      # Same version as the pre-commit hook.
+      GITLEAKS_VERSION: "8.24.2"
+      GITLEAKS_SHA256: "fa0500f6b7e41d28791ebc680f5dd9899cd42b58629218a5f041efa899151a8e"
 
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      # Version matches the pre-commit hook. A personal account needs no GITLEAKS_LICENSE.
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
-        env:
-          GITLEAKS_VERSION: "8.24.2"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The runner is thrown away after each run, so the binary is cached by version: a run only downloads it on a
+      # cache miss, and GitHub's release CDN sometimes answers 504.
+      - name: Cache gitleaks
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/gitleaks-bin
+          key: gitleaks-${{ env.GITLEAKS_VERSION }}-${{ env.GITLEAKS_SHA256 }}
+
+      - name: Install gitleaks
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL --retry 5 --retry-delay 10 --retry-all-errors -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          mkdir -p ~/gitleaks-bin
+          tar -xzf gitleaks.tar.gz -C ~/gitleaks-bin gitleaks
+          rm gitleaks.tar.gz
+
+      - name: Scan full history
+        run: ~/gitleaks-bin/gitleaks git . --log-opts=--all --redact --verbose
