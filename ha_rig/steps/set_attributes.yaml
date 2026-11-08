@@ -53,7 +53,7 @@ tests:
     roles: [light_color, group_color]
     setup:
       - set: {state: on, hs_color: [240, 90]}
-      - wait: 2  # as in get_attributes' reads_while_off: let the color land before the off
+      - wait: 2  # Z2M sends color after on, and a bulb drops it if the off lands first
       - set: {state: off}
     steps:
       - call: {hs_color: [30, 80]}
