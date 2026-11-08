@@ -2,8 +2,8 @@
 
 One file per action (`steps/<action>.yaml`) runs on every integration in the profile that has that action's adapter; a
 file with `options` (`steps/<action>-<option>.yaml`) runs it again with those DeviceSide options on, only on adapters
-whose scope declares them. The registry
-supplies what differs per integration: the expected status, the tolerance, and the options in scope.
+whose scope declares them. The registry supplies what differs per integration: the expected status, the tolerance,
+and the options in scope.
 No pytest here: scripts/rig.py calls run().
 """
 
