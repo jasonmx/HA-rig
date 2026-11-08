@@ -25,12 +25,12 @@ fail() {
 # Prints N from the body's Tests-with line, or nothing when there's none. Read fresh rather than from the event
 # payload, which a re-run replays as it was.
 tests_with() {
-    local body line found=
+    local body line found='' looks_like='^[[:space:]`*>-]*tests-with[[:space:]]*:'
     body=$(gh pr view "$rig_pr" -R "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}" --json body --jq .body)
     while IFS= read -r line; do
         line=${line%$'\r'}
         # Any line that starts like Tests-with must be one exactly: a typo shouldn't quietly test the default.
-        [[ ${line,,} =~ ^[[:space:]]*tests-with[[:space:]]*: ]] || continue
+        [[ ${line,,} =~ $looks_like ]] || continue
         [[ $line =~ ^Tests-with:[[:space:]]*jasonmx/deviceside#([0-9]+)[[:space:]]*$ ]] ||
             fail "rig PR #$rig_pr: '$line' isn't 'Tests-with: $deviceside#N'"
         [[ -z $found ]] || fail "rig PR #$rig_pr names more than one Tests-with PR"

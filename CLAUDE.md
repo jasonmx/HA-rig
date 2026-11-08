@@ -31,5 +31,6 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
   --help`); `tests/test_rig.py` fails until it does.
 - A new or renamed deviceside action needs its step file here, landed with or before the deviceside PR it tests.
   Its plan's Coordination section names that PR, `Tests-with: jasonmx/deviceside#N`, so CI tests the pair together
-  (`scripts/ci_deviceside.sh`).
+  (`scripts/ci_deviceside.sh`). Nothing reruns it when that PR moves or merges, and `ci-green` counts every run at the
+  head: before merging, `gh run rerun` the PR's Tests runs, which read both afresh.
 - Async throughout; American English, matching HA.
