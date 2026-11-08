@@ -1842,30 +1842,45 @@ async def test_a_suite_whose_adapter_has_options_needs_the_admin_token(tmp_path)
     assert "fake / raise_brightness: needs HA_ADMIN_TOKEN, skipped" in out
 
 
-async def test_an_option_outside_the_adapters_scope_is_a_schema_error(tmp_path):
-    with pytest.raises(engine.SchemaError, match="has no option nope"):
-        await run_one(
-            FakeAdmin({"light.a": {}}),
-            suite(tmp_path, option_file("nope"), "fake"),
-            profile("fake", light_ct="light.a"),
-            registry=OPTION_REGISTRY,
-            admin=None,
-        )
+HUE_FADE = Roster({"hue": {"raise_brightness", "stop"}, "shelly": {"raise_brightness"}, "zha": {"raise_brightness"}})
 
 
-async def test_an_option_file_skips_an_adapter_without_the_option(tmp_path):
-    # raise_brightness-predicted_state.yaml is Hue's: Zigbee2MQTT's raise_brightness has no predicted_state.
+def test_an_option_no_adapter_declares_is_a_schema_error(tmp_path):
+    path = tmp_path / "steps.yaml"
+    path.write_text(option_file("predicted_stat"))
+    with pytest.raises(engine.SchemaError, match="steps.yaml: no raise_brightness adapter has option predicted_stat"):
+        engine.check_options([load_step_file(path)], HUE_FADE)
+
+
+def test_an_option_one_integrations_adapter_declares_passes(tmp_path):
+    path = tmp_path / "steps.yaml"
+    path.write_text(option_file("predicted_state"))
+    engine.check_options([load_step_file(path)], HUE_FADE)
+
+
+@pytest.mark.parametrize(("integration", "expected"), [("hue", True), ("shelly", False), ("zha", False)])
+def test_an_option_file_applies_only_where_the_adapter_declares_the_option(tmp_path, integration, expected):
+    assert engine.applies(suite(tmp_path, option_file("predicted_state"), integration), HUE_FADE) is expected
+
+
+def test_a_plain_file_applies_wherever_there_is_an_adapter(tmp_path):
+    assert engine.applies(suite(tmp_path, option_file(), "shelly"), HUE_FADE)
+    assert not engine.applies(suite(tmp_path, option_file(), "zigbee2mqtt"), HUE_FADE)
+
+
+async def test_an_option_file_is_dropped_silently_for_an_adapter_without_the_option(tmp_path):
+    # raise_brightness-predicted_state.yaml is Hue's: Shelly's raise_brightness has no predicted_state.
     out: list[str] = []
     result = await run(
-        [suite(tmp_path, option_file("predicted_state"), "zigbee2mqtt")],
-        profile("zigbee2mqtt", light_ct="light.a"),
-        REGISTRY,
+        [suite(tmp_path, option_file("predicted_state"), "shelly")],
+        profile("shelly", light_ct="light.a"),
+        HUE_FADE,
         FakeAdmin({"light.a": {}}),
         tolerance=TOLERANCE,
         out=out.append,
     )
     assert result.suites == []
-    assert "zigbee2mqtt / raise_brightness: no options, steps.yaml skipped" in out
+    assert out == []
 
 
 def test_a_step_file_lists_options_by_name(tmp_path):

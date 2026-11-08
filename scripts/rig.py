@@ -149,7 +149,9 @@ from ha_rig.engine import (  # noqa: E402
     Suite,
     SuiteResult,
     adapters_for,
+    applies,
     cases,
+    check_options,
     in_head,
     load_step_files,
     merge,
@@ -224,7 +226,8 @@ def select(
 ) -> list[Suite]:
     """Every step file on every integration in the profile, narrowed to --integration and --action. An action takes
     every step file for it (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its
-    record; a file with a `name` (lifecycle) goes by that instead."""
+    record; a file with a `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is
+    run_suites's job (engine.applies)."""
     return [
         Suite(step_file, integration)
         for step_file in step_files
@@ -1469,7 +1472,14 @@ def run_suites(args: argparse.Namespace, profile: Profile, registry: AdapterRegi
         if not profile.roam:
             raise SystemExit(f"--roam-check needs a profile with roam:, and {profile.name} has none")
         return []
-    suites = select(load_step_files(), profile, args.integration, args.action)
+    step_files = load_step_files()
+    check_options(step_files, registry)
+    # No adapter stays, so the dry-run still says `no adapter, will skip`; an option file the adapter lacks goes.
+    suites = [
+        suite
+        for suite in select(step_files, profile, args.integration, args.action)
+        if registry.adapter(suite.action, suite.integration) is None or applies(suite, registry)
+    ]
     if not any(registry.adapter(suite.action, suite.integration) for suite in suites):
         raise SystemExit("No rig test matches the profile's integrations.")
     return suites

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .engine import Case, CaseResult, Outcome, Suite, adapters_for, cases
+from .engine import Case, CaseResult, Outcome, Suite, adapters_for, applies, cases
 from .profile import Profile
 from .progress import Progress
 
@@ -212,12 +212,13 @@ def of(
     fresh: bool = False,
     unattended: bool = False,
 ) -> list[SuiteCoverage]:
-    """Each suite's coverage at `commit`, for those with an adapter; tracking each in `progress` at its fingerprint.
-    Saved results that no longer hold are forgotten, and a suite with a saved failure is dropped, to rerun whole.
+    """Each suite's coverage at `commit`, for those with an adapter whose scope has the file's options; tracking each
+    in `progress` at its fingerprint. Saved results that no longer hold are forgotten, and a suite with a saved
+    failure is dropped, to rerun whole.
     `fresh` (--fresh) ignores the records and drops the saved cases."""
     found = []
     for suite in suites:
-        if registry.adapter(suite.action, suite.integration) is None:
+        if not applies(suite, registry):
             continue
         files = code(suite, registry, repo)
         suite_fingerprint = fingerprint(repo, commit, files, suite.file.path)
