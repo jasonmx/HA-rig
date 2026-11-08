@@ -191,6 +191,12 @@ saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next
 - **Records.** The report joins the saved cases to the session's, so a suite finished across sessions writes its
   record, dated the finishing session and citing its commit. Its cases may have run at earlier commits, all with the
   same code for the suite, which is what deviceside's gate checks.
+- **Firmware facts.** A `firmware_fact` case's pass is also kept apart from its suite's entry, with the devices it
+  ran on, and outlives the entry, the suite's record and HA's version. While its test is as written then and the
+  profile plans it on the same entities, coverage lends it to the suite at the code tested now, so it counts as
+  saved (`--coverage` says `N by firmware`) and the next record carries it, marked `(firmware fact)`, with its
+  devices' firmware under Device. It goes when it fails or reruns, and when a later part of its suite shows a device
+  of the same model at another firmware. `--fresh` reruns it.
 - **Not covered by a record:** a step-file edit that keeps every case ID. The record doesn't name the step file's
   version, so such an edit reruns a suite only while it is in the ledger; use `--fresh` to rerun a recorded one.
 
@@ -234,7 +240,14 @@ tests:
 Any step takes `target: <role>` to act on another role the test lists; a `group` case that targets a light role is
 skipped where the profile lists the group's `members` and that light isn't one. Durations accept numbers, `duration`
 (the last call's), `tol` (the integration's timing tolerance) and `+ - *`. `only: [<integration>]` limits a test to
-some integrations; when those pile up, split the file.
+some integrations; when those pile up, split the file. A step takes `only` too, beside its kind (`- {wait: 2, only:
+[zha]}`), for a step one integration needs and the others would only wait through; it names integrations the test
+runs on.
+
+`firmware_fact: true` marks a test that proves how the device behaves (which of two calls wins, the bounds it
+takes, a timing it keeps), not a branch of the adapter's code. Its pass stands across code changes while no device
+of the same model shows another firmware (Coverage, below), so a code change reruns only the suite's other cases.
+Mark only a test whose pass hangs on the device, not on the call the adapter sends: another case must prove the call.
 
 The roles are listed in `ha_rig/profile.example.yaml`. `group_color` is a native group whose members all take
 color: color moves groupcast only to a group like that, so it runs the color cases a `group` can't. Everything this
@@ -247,7 +260,9 @@ replaces the action's own.
 
 An adapter with options runs each file for its action with them pinned through DeviceSide's options flow:
 `options: [<name>]` at the top of a file turns those on, and every other option in the adapter's scope runs off. Its
-record is `<action>-<name>.md`, with an `Options` row. The rig's own options are put back when the run ends.
+record is `<action>-<name>.md`, with an `Options` row. The rig's own options are put back when the run ends. Each
+save reloads the entry, so a run pins each set of options once: the suites that share a set run together, rather
+than each `<action>` file and its `<action>-<name>` twin in turn.
 
 A test that means to make DeviceSide warn lists the line under `expected_log:` at the top of its file: regular
 expressions, each searched for in the whole log line, logger included. A matched line is counted in the summary and

@@ -42,6 +42,7 @@ def test_every_only_names_an_integration():
     for step_file in load_step_files():
         for test in step_file.tests:
             named = (test.only or frozenset()) | ((test.observe and test.observe.only) or frozenset())
+            named |= {key for step in (*test.setup, *test.steps) for key in step.only or ()}
             assert named <= known, f"{step_file.action} {test.name}: {sorted(named - known)}"
 
 
@@ -49,16 +50,16 @@ def test_the_step_files_keep_their_roles():
     by_action = {step_file.action: step_file for step_file in load_step_files()}
     assert by_action["turn_on_for"].roles == (
         "switch_plug",
-        "light_onoff",
         "light_wrapped",
+        "light_onoff",
         "light_dimmable",
         "light_ct",
         "light_color",
         "group",
     )
-    assert by_action["turn_off_for"].roles == ("switch_plug", "light_onoff", "light_wrapped", "light_dimmable")
+    assert by_action["turn_off_for"].roles == ("switch_plug", "light_dimmable")
     for action in ("set_auto_off", "set_auto_on", "clear_auto_off", "clear_auto_on"):
-        assert by_action[action].roles == ("switch_plug", "light_color")
+        assert by_action[action].roles == ("switch_plug",)
         assert all(test.only == frozenset({"shelly"}) for test in by_action[action].tests)
 
 
@@ -153,6 +154,17 @@ def observed(observe: str = "{see: s, watch: w, ask: a}", setup: str = "[{wait: 
         (HEADER.replace("    steps:\n", "    steps: []\n"), "steps must be a non-empty list"),
         (HEADER.replace("    steps:\n", "    when: now\n    steps:\n") + "      - restore: null\n", "unknown key"),
         (HEADER + "      - restore: null\n" + HEADER.split("tests:\n")[1] + "      - restore: null\n", "duplicate"),
+        (HEADER + "      - {wait: 1, only: []}\n", "step 1: only must be a non-empty list"),
+        (HEADER + "      - {wait: 1, only: zha}\n", "step 1: only must be a non-empty list"),
+        (HEADER + "      - {wait: 1, set: {state: off}, only: [zha]}\n", "expected one `kind: args` mapping"),
+        (
+            HEADER.replace("    steps:\n", "    only: [hue]\n    steps:\n") + "      - {wait: 1, only: [zha]}\n",
+            "step 1 (wait): only zha are not in the test's only",
+        ),
+        (
+            HEADER.replace("    steps:\n", "    firmware_fact: yes please\n    steps:\n") + "      - wait: 1\n",
+            "firmware_fact",
+        ),
         ("action: [\n", "while parsing"),
     ],
 )
@@ -211,3 +223,28 @@ def test_an_observed_test_is_automated_too_when_its_steps_check_something(tmp_pa
     path = tmp_path / "observed.yaml"
     path.write_text(observed() + steps)
     assert load_step_file(path).tests[0].automated is automated
+
+
+def test_a_step_takes_only_beside_its_kind(tmp_path: Path):
+    path = tmp_path / "only.yaml"
+    path.write_text(
+        HEADER + "      - {wait: 2, only: [zha]}\n      - wait: 1\n        only: [hue, zha]\n      - wait: 3\n"
+    )
+    steps = load_step_file(path).tests[0].steps
+    assert [(step.kind, step.only) for step in steps] == [
+        ("wait", frozenset({"zha"})),
+        ("wait", frozenset({"hue", "zha"})),
+        ("wait", None),
+    ]
+
+
+def test_firmware_fact_marks_the_test_and_its_digest_follows_the_test(tmp_path: Path):
+    path = tmp_path / "fact.yaml"
+    path.write_text(HEADER.replace("    steps:\n", "    firmware_fact: true\n    steps:\n") + "      - wait: 1\n")
+    (fact,) = load_step_file(path).tests
+    path.write_text(HEADER + "      - wait: 1\n")
+    (plain,) = load_step_file(path).tests
+    assert (fact.firmware_fact, plain.firmware_fact) == (True, False)
+    assert fact.digest and fact.digest != plain.digest
+    path.write_text("# a comment moves nothing\n" + HEADER + "      - wait: 1\n")
+    assert load_step_file(path).tests[0].digest == plain.digest

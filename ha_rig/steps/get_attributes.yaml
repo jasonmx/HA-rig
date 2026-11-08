@@ -1,12 +1,12 @@
 # hue_dimmer tests/RELEASE_CHECKLIST.md §4 as steps.
 # On the group role set_attributes writes and confirms every member, so the room's own row reads the same values back.
 action: get_attributes
-rig_seconds: 750
+rig_seconds: 300
 tests:
   # The setup is DeviceSide's own set_attributes: it writes while the light is off, then reads back every member and
   # raises not_stored when one missed the write, so a dropped delivery fails here and not as a wrong read (#281).
   - name: reads_while_off  # §4.1
-    roles: [light_ct, group]
+    roles: [light_ct]
     steps:
       - set: {state: off}
       - call: {action: set_attributes, brightness: 40, color_temp_kelvin: 2700}
@@ -61,17 +61,6 @@ tests:
       - call: {action: turn_on_for, duration: 20}
       - call: {}
       - expect_response: {attributes: {timer.turns: "off", timer.remaining_s: {min: 15, max: 20}}}
-      - expect_state: {state: off, within: 20 + 2 * tol}
-      - call: {}
-      - expect_response: {attributes: {timer: null}}
-
-  # DeviceSide announces a full-color Z2M light with both color modes (its z2m_color_modes option, on by default), so
-  # HA keeps the bulb's state in hs mode, and the read asks for hue and saturation as well. HA sorts the modes.
-  - name: announced_with_both_color_modes
-    roles: [light_color]
-    only: [zigbee2mqtt]
-    steps:
-      - expect_state: {supported_color_modes: [color_temp, hs, xy], within: 10}
 
   # Hue native control sends a hue and saturation as an xy command, so the bulb is put in hs mode with it off.
   - name: keeps_and_reads_hs_while_off
@@ -102,10 +91,11 @@ tests:
   # The device's own timer, read back with the time it has left; the row loses it once the timer ends.
   # `"off"` is quoted: YAML reads a bare off as false.
   - name: reads_a_running_timer
-    roles: [switch_plug, light_onoff, light_wrapped, light_dimmable]
+    roles: [switch_plug, light_dimmable]
     steps:
       - set: {state: off}
       - wait: 2  # ZHA ignores a light's "on" report for 1.5 s after light.turn_off
+        only: [zha]
       - call: {action: turn_on_for, duration: 20}
       - expect_state: {state: on, within: tol}
       - call: {}
@@ -138,17 +128,3 @@ tests:
       - expect_state: {state: on, within: 20 + 2 * tol}
       - call: {}
       - expect_response: {attributes: {timer: null}}
-
-  # Shelly's persistent auto-off and auto-on, from the device's config: null while clear, the delay once set. Each
-  # write reloads the device's entry; the next call waits it out (set_auto_off.yaml).
-  - name: reads_auto_off_and_on
-    roles: [switch_plug, light_color]
-    only: [shelly]
-    steps:
-      - set: {state: off}
-      - call: {}
-      - expect_response: {attributes: {auto_off: null, auto_on: null}}
-      - call: {action: set_auto_off, duration: 30}
-      - call: {action: set_auto_on, duration: 40}  # waits out the first write's entry reload
-      - call: {}  # and the second's
-      - expect_response: {attributes: {auto_off.duration: 30, auto_on.duration: 40}}

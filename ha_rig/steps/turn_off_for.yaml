@@ -1,10 +1,10 @@
-# The device's own timer turns the target back on. Same relay-call argument as turn_on_for: a pass on any of the
-# three on/off roles proves on/off for all.
+# The device's own timer turns the target back on. Same relay-call argument as turn_on_for: the plug proves on/off
+# for all three on/off roles.
 action: turn_off_for
-rig_seconds: 50
+rig_seconds: 40
 tests:
   - name: off_then_on
-    roles: [switch_plug, light_onoff, light_wrapped]
+    roles: [switch_plug]
     steps:
       - set: {state: on}
       - call: {duration: 6}

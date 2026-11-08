@@ -12,6 +12,10 @@ A **fresh record** (`docs/test-records/<integration>/<suite name>.md`) cites a c
 the same as at the one tested now, as the gate compares them (`git diff --name-only`), and lists exactly the case
 IDs the suite plans now.
 
+A **firmware fact** (a test with `firmware_fact: true`) is covered while the ledger keeps its pass at the device's
+firmware, whatever the code (ha_rig/progress.py, Firmware facts): coverage lends that pass to the suite's entry, so
+only the suite's other cases rerun after a code change, and its next record carries the fact. `fresh` reruns them too.
+
 Pure file and git reading: --coverage and the plan run it before anything changes.
 """
 
@@ -140,6 +144,7 @@ class SuiteCoverage:
     freshness: Freshness
     planned: list[Case]
     saved: dict[str, CaseResult]
+    by_firmware: frozenset[str] = frozenset()  # the saved case ids lent by firmware facts
 
     @property
     def covered(self) -> bool:
@@ -163,12 +168,17 @@ class SuiteCoverage:
     def __str__(self) -> str:
         if self.freshness.fresh:
             return f"covered ({self.freshness})"
-        refusal = f"; won't write a record: this profile skips {', '.join(self.narrows)}, which the record passed"
+        firmware = f", {len(self.by_firmware)} by firmware" if self.by_firmware else ""
+        refusal = (
+            f"; won't write a record: this profile skips {', '.join(self.narrows)}, which the record passed"
+            if self.narrows
+            else ""
+        )
         if self.complete:
-            return "covered (saved; no record yet)" + (refusal if self.narrows else "")
+            return f"covered (saved{firmware}; no record yet){refusal}"
         if self.saved:
-            return f"partial {len(self.saved)}/{len(self.planned)}" + (refusal if self.narrows else "")
-        return f"uncovered ({self.freshness})" + (refusal if self.narrows else "")
+            return f"partial {len(self.saved)}/{len(self.planned)}{firmware}{refusal}"
+        return f"uncovered ({self.freshness}){refusal}"
 
 
 def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
@@ -179,6 +189,25 @@ def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
     if result.outcome is Outcome.NOT_OBSERVED:
         return unattended
     return result.outcome is not Outcome.SKIPPED and result.entity_ids == tuple(case.entities.values())
+
+
+def lend(
+    suite: Suite, planned: list[Case], saved: dict[str, CaseResult], progress: Progress, unattended: bool
+) -> dict[str, CaseResult]:
+    """The firmware facts' passes that cover the suite's planned cases with no saved result, lent to its entry; those
+    that no longer hold for the profile are forgotten."""
+    facts = progress.fact_results(suite)
+    by_id = {case.id: case for case in planned}
+    lent = {
+        case_id: (result, devices)
+        for case_id, (result, devices) in facts.items()
+        if case_id in by_id and case_id not in saved and holds(by_id[case_id], result, unattended)
+    }
+    progress.forget_facts(
+        suite, [case_id for case_id in facts if case_id in by_id and case_id not in lent and case_id not in saved]
+    )
+    progress.lend(suite, lent.values())
+    return {case_id: result for case_id, (result, _) in lent.items()}
 
 
 def of(
@@ -204,6 +233,7 @@ def of(
         suite_fingerprint = fingerprint(repo, commit, files, suite.file.path)
         planned = cases(suite, profile, None, adapters_for(suite, registry))
         saved: dict[str, CaseResult] = {}
+        lent: dict[str, CaseResult] = {}
         if progress is not None:
             progress.track(suite, suite_fingerprint)
             entry = progress.saved(suite)
@@ -212,6 +242,9 @@ def of(
             else:
                 saved = {c.id: entry[c.id] for c in planned if c.id in entry and holds(c, entry[c.id], unattended)}
                 progress.forget(suite, set(entry) - set(saved))
+            if not fresh:
+                lent = lend(suite, planned, saved, progress, unattended)
+        saved |= lent
         record = Freshness(None, None) if fresh else freshness(repo, suite, commit, files, planned)
-        found.append(SuiteCoverage(suite, suite_fingerprint, record, planned, saved))
+        found.append(SuiteCoverage(suite, suite_fingerprint, record, planned, saved, frozenset(lent)))
     return found

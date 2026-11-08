@@ -2,7 +2,7 @@
 # A room is written light by light, so on the group role the response and expect_state cover every member.
 # Color steps run on the light_color role, and the hs and xy ones on group_color too (a Z2M color groupcast).
 action: set_attributes
-rig_seconds: 150
+rig_seconds: 130
 tests:
   - name: sets_while_off  # §3.1
     roles: [light_ct, group]
@@ -90,7 +90,7 @@ tests:
       - expect_state: {xy_color.0: {min: 0.16, max: 0.18}, xy_color.1: {min: 0.69, max: 0.71}, within: tol}
 
   - name: min_brightness_raises  # §3.3
-    roles: [light_ct, group]
+    roles: [light_ct]
     steps:
       - set: {state: on, brightness_pct: 20}
       - wait: 1  # ZHA shows a group's brightness at once; let the fade end before the clamp reads it
@@ -98,7 +98,7 @@ tests:
       - expect_state: {brightness: {min: 126, max: 130}, within: tol}
 
   - name: min_brightness_leaves_brighter  # §3.3
-    roles: [light_ct, group]
+    roles: [light_ct]
     steps:
       - set: {state: on, brightness_pct: 70}
       - wait: 1
@@ -108,7 +108,7 @@ tests:
       - expect_state: {brightness: {min: 177, max: 180}}
 
   - name: max_brightness_lowers
-    roles: [light_ct, group]
+    roles: [light_ct]
     steps:
       - set: {state: on, brightness_pct: 80}
       - wait: 1

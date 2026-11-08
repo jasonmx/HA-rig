@@ -11,6 +11,8 @@ import ast
 import asyncio
 import contextlib
 import datetime
+import hashlib
+import json
 import logging
 import operator
 import re
@@ -153,6 +155,7 @@ class Step:
     kind: str
     args: Any
     label: str
+    only: frozenset[str] | None = None  # the integrations it runs on; None for every one the test runs on
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +187,11 @@ class RigTest:
     steps: tuple[Step, ...]
     setup: tuple[Step, ...] = ()
     observe: Observe | None = None
+    # A device behavior (precedence, bounds, timing) rather than the adapter's code: its result stands across code
+    # changes while the device's model and firmware are those it ran at (ha_rig/progress.py, Firmware facts).
+    firmware_fact: bool = False
+    # A hash of the test as written, so a firmware fact's saved result goes when its test changes.
+    digest: str = field(default="", compare=False)
 
     @property
     def automated(self) -> bool:
@@ -431,6 +439,12 @@ PARSERS: dict[str, Callable[[Any], Any]] = {
 
 
 def _parse_step(raw: Any, label: str) -> Step:
+    """One `kind: args` mapping, with an optional `only: [<integration>]` beside it limiting the step to those."""
+    only = raw.get("only") if isinstance(raw, dict) else None
+    if isinstance(raw, dict) and "only" in raw:
+        raw = {key: value for key, value in raw.items() if key != "only"}
+        if not isinstance(only, list) or not only or not all(isinstance(i, str) and i for i in only):
+            raise ValueError(f"{label}: only must be a non-empty list of integration keys")
     if not isinstance(raw, dict) or len(raw) != 1:
         raise ValueError(f"{label}: expected one `kind: args` mapping, got {raw!r}")
     ((kind, args),) = raw.items()
@@ -440,7 +454,7 @@ def _parse_step(raw: Any, label: str) -> Step:
     if kind not in PARSERS:
         raise ValueError(f"{label}: unknown step; use one of {', '.join(PARSERS)}")
     try:
-        return Step(kind, PARSERS[kind](args), label)
+        return Step(kind, PARSERS[kind](args), label, frozenset(only) if only else None)
     except ValueError as err:
         raise ValueError(f"{label}: {err}") from None
 
@@ -482,7 +496,7 @@ def _parse_test(raw: Any) -> RigTest:
     try:
         if "brief" in raw:
             raise ValueError("brief is gone; give the test observe: {see, watch, ask}")
-        if unknown := sorted(set(raw) - {"name", "roles", "only", "setup", "steps", "observe"}):
+        if unknown := sorted(set(raw) - {"name", "roles", "only", "setup", "steps", "observe", "firmware_fact"}):
             raise ValueError(f"unknown key(s) {', '.join(unknown)}")
         roles = raw.get("roles")
         if not isinstance(roles, list) or not roles:
@@ -492,9 +506,14 @@ def _parse_test(raw: Any) -> RigTest:
         only = raw.get("only")
         if only is not None and (not isinstance(only, list) or not only):
             raise ValueError("only must be a non-empty list of integration keys")
+        if not isinstance(firmware_fact := raw.get("firmware_fact", False), bool):
+            raise ValueError("firmware_fact must be true or false")
         steps, setup, observe = _parse_phases(raw)
-        test = RigTest(name, tuple(roles), frozenset(only) if only else None, steps, setup, observe)
+        test = RigTest(
+            name, tuple(roles), frozenset(only) if only else None, steps, setup, observe, firmware_fact, _digest(raw)
+        )
         _check_observe_scope(test)
+        _check_step_scope(test)
     except ValueError as err:
         raise ValueError(f"test {name}, {err}") from None
     return test
@@ -511,6 +530,19 @@ def _check_observe_scope(test: RigTest) -> None:
         raise ValueError(f"observe only {', '.join(outside)} are not in the test's only")
     if not test.automated:
         raise ValueError("observe roles or only needs an automated run for what it leaves out")
+
+
+def _digest(raw: dict) -> str:
+    return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _check_step_scope(test: RigTest) -> None:
+    """A step's `only` names integrations the test runs on: one outside them would never run."""
+    if test.only is None:
+        return
+    for step in (*test.setup, *test.steps):
+        if step.only is not None and (outside := sorted(step.only - test.only)):
+            raise ValueError(f"{step.label}: only {', '.join(outside)} are not in the test's only")
 
 
 def _parse_phases(raw: dict) -> tuple[tuple[Step, ...], tuple[Step, ...], Observe | None]:
@@ -603,6 +635,11 @@ class Suite:
         """The name its record takes: the file's `name`, else the action, then any options it runs with on
         (`move-predicted_state`)."""
         return self.file.name or "-".join([self.action, *sorted(self.file.options)])
+
+    def test(self, case_id: str) -> RigTest | None:
+        """The test a case id (`name[role]`, maybe ` observed`) is a run of."""
+        name = case_id.partition("[")[0]
+        return next((test for test in self.file.tests if test.name == name), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1431,6 +1468,8 @@ class _CaseRun:
         return None
 
     async def steps(self, steps: tuple[Step, ...], relaxed: bool = False) -> None:
+        integration = self.case.suite.integration
+        steps = tuple(step for step in steps if step.only is None or integration in step.only)
         for index, step in enumerate(steps):
             following = steps[index + 1].kind if index + 1 < len(steps) else None
             handler = getattr(self, f"_{step.kind}")
@@ -1944,6 +1983,7 @@ async def run(
         id(suite): {name: name in suite.file.options for name in adapter.scope.options}
         for suite, adapter, *_ in planned
     }
+    planned = by_options(planned, options)
     rig_run = _Run(
         registry,
         tolerance,
@@ -2017,6 +2057,18 @@ async def _capture_facts(suite_result: SuiteResult, ha: HAClient, out: Callable[
         suite_result.ha_version, suite_result.devices = await rig_facts(ha, entity_ids)
     except Exception as err:  # noqa: BLE001
         out(f"Could not read the devices behind {suite_result.suite.name}, so it writes no record: {err}")
+
+
+def by_options[T: tuple](planned: list[T], options: dict[int, dict[str, bool]]) -> list[T]:
+    """The planned suites, those that pin the same DeviceSide options side by side, in the order each set first
+    appears, and in planned order within it: each save reloads the entry, so a run pins each set once rather than
+    once per file (`move` then `move-predicted_state`, then the next action's pair). A suite pinning none stays put."""
+    order: dict[tuple, int] = {}
+    keys = []
+    for index, entry in enumerate(planned):
+        wanted = tuple(sorted(options.get(id(entry[0]), {}).items()))
+        keys.append((order.setdefault(wanted, index), index) if wanted else (index, index))
+    return [entry for _, entry in sorted(zip(keys, planned, strict=True), key=lambda pair: pair[0])]
 
 
 def unfinished(
@@ -2237,8 +2289,14 @@ def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
     for case in suite_result.cases:
         target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
         outcome = str(case.outcome) + (f": {case.detail}" if details and case.detail else "")
+        if case.outcome is Outcome.PASS and _firmware_fact(suite_result.suite, case.id):
+            outcome += FIRMWARE_FACT
         lines.append(f"| `{case.id}` | {target} | {outcome} |")
     return lines
+
+
+def _firmware_fact(suite: Suite, case_id: str) -> bool:
+    return (test := suite.test(case_id)) is not None and test.firmware_fact
 
 
 @dataclass(frozen=True, slots=True)
@@ -2270,6 +2328,7 @@ async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[
 
 CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # check_release's
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
+FIRMWARE_FACT = " (firmware fact)"  # after a firmware fact's PASS in a record's Tests table
 CASE_ROW = re.compile(r"^\| `([^`]+)` \|.*\| ([^|]*?) \|$", re.MULTILINE)  # id, then the result column
 
 
@@ -2292,7 +2351,7 @@ class Record:
         text = path.read_text()
         cited, date = CITED_COMMIT.search(text), DATE.search(text)
         _, _, tests = text.partition("## Tests")
-        rows = CASE_ROW.findall(tests)
+        rows = [(case_id, result.removesuffix(FIRMWARE_FACT)) for case_id, result in CASE_ROW.findall(tests)]
         return cls(
             path,
             cited and cited[1],
@@ -2337,6 +2396,12 @@ def render_record(
     lines += ["", "## Tests", "", *table(suite_result)]
     if any(case.outcome is Outcome.NOT_OBSERVED for case in suite_result.cases):
         lines += ["", "Tests marked `not observed` had nobody watching."]
+    if any(_firmware_fact(suite, case.id) for case in suite_result.proven):
+        lines += [
+            "",
+            "A firmware fact proves the device's behavior, not the adapter's code: its pass stands at the firmware "
+            "listed under Device, and may come from an earlier commit at that firmware.",
+        ]
     return "\n".join(lines) + "\n"
 
 

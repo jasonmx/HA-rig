@@ -8,8 +8,9 @@ import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import coverage
-from ha_rig.engine import Suite, load_step_files
+from ha_rig.engine import CaseResult, Device, Outcome, Suite, load_step_file, load_step_files
 from ha_rig.profile import Profile
+from ha_rig.progress import Progress
 from ha_rig.target import deviceside_repo
 
 FILES = {st.action: st for st in load_step_files() if not st.options and st.name is None}
@@ -150,6 +151,33 @@ def test_coverage_omits_a_suite_whose_options_the_adapter_lacks(repo, tmp_path, 
     suites = [Suite(stop[0], "hue"), Suite(stop[0], "shelly")]
     plan = coverage.of(suites, Profile.load(profile_path), registry, repo, git(repo, "rev-parse", "HEAD").strip(), None)
     assert [item.suite.integration for item in plan] == ["hue"]
+
+
+def test_a_firmware_fact_covers_its_case_across_a_code_change_and_fresh_reruns_it(repo, tmp_path, monkeypatch):
+    step = tmp_path / "turn_on_for.yaml"
+    step.write_text(
+        "action: turn_on_for\nrig_seconds: 5\ntests:\n"
+        "  - name: plain\n    roles: [switch_plug]\n    steps:\n      - wait: 0\n"
+        "  - name: wins\n    roles: [switch_plug]\n    firmware_fact: true\n    steps:\n      - wait: 0\n"
+    )
+    suite = Suite(load_step_file(step), "shelly")
+    profile_path = tmp_path / "lab.yaml"
+    profile_path.write_text("shelly:\n  - entity_id: switch.plug\n    roles: [switch_plug]\n")
+    lab, registry = Profile.load(profile_path), AdapterRegistry.discover()
+    monkeypatch.setattr(coverage, "code", lambda suite, registry, repo: shelly(repo))
+    first = git(repo, "rev-parse", "HEAD")
+    ledger = Progress.load(tmp_path, "lab")
+    coverage.of([suite], lab, registry, repo, first, ledger)
+    ledger.record(suite, CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS, "", ("switch.plug",)))
+    ledger.facts(suite, "2026.10.1", [Device("Plug", "P1", "1.0")])
+
+    changed = commit(repo, {f"{PKG}/shelly/turn_on_for.py": "x = 2\n"})
+    [now] = coverage.of([suite], lab, registry, repo, changed, Progress.load(tmp_path, "lab"))
+    assert (set(now.saved), now.by_firmware) == ({"wins[switch_plug]"}, {"wins[switch_plug]"})
+    assert [case.id for case in now.missing] == ["plain[switch_plug]"]
+    assert str(now) == "partial 1/2, 1 by firmware"
+    [rerun] = coverage.of([suite], lab, registry, repo, changed, Progress.load(tmp_path, "lab"), fresh=True)
+    assert not rerun.saved and len(rerun.missing) == 2
 
 
 def test_a_narrower_profiles_record_does_not_cover_a_broader_one(repo):
