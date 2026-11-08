@@ -194,9 +194,15 @@ class Progress:
             if key[:2] != (suite.integration, suite.name):
                 continue
             if fact["devices"] is None:
-                self._set_fact(fact | {"devices": [asdict(device) for device in devices]})
+                if devices:  # a failed lookup names none: the fact stays pending, lending nothing
+                    self._set_fact(fact | {"devices": [asdict(device) for device in devices]})
             elif _moved(fact["devices"], devices):
                 self._drop_fact(key)
+                # Not run this run (that would have left it pending), so the entry holds it lent, at the old
+                # firmware, which the record would name: it reruns instead.
+                now = [asdict(device) for device in devices]
+                entry["cases"] = [case for case in entry["cases"] if case["id"] != key[2]]
+                entry["devices"] = [d for d in entry["devices"] if d in now or d not in fact["devices"]]
         self.save()
 
     def fact_results(self, suite: Suite) -> dict[str, tuple[CaseResult, list[Device]]]:
@@ -236,8 +242,8 @@ class Progress:
         self.facts_dropped.discard(key)
 
     def _drop_fact(self, key: FactKey) -> None:
-        if self.firmware.pop(key, None) is not None or key in self.facts_changed:
-            self.facts_dropped.add(key)
+        self.firmware.pop(key, None)
+        self.facts_dropped.add(key)
         self.facts_changed.discard(key)
 
     def forget(self, suite: Suite, case_ids: Iterable[str]) -> None:

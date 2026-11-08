@@ -2,6 +2,7 @@
 
 import datetime
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from ha_rig import progress as progress_module
@@ -235,3 +236,20 @@ def test_a_plain_case_is_never_a_firmware_fact(tmp_path):
     progress.facts(suite, "2026.10.1", [PLUG])
     assert progress.fact_results(suite) == {}
     assert "firmware" not in json.loads(path_for(tmp_path, "lab").read_text())
+
+
+def test_a_lent_fact_whose_firmware_moved_leaves_the_entry_to_rerun(tmp_path):
+    suite = facts_suite(tmp_path)
+    ran_a_fact(tmp_path, suite).drop(suite)
+    later = loaded(tmp_path, "fp2", "2026.10.1", suite)
+    later.lend(suite, later.fact_results(suite).values())
+    later.facts(suite, "2026.10.1", [Device("Plug", "P1", "1.1")])  # a part of the new run reads newer firmware
+    assert later.parts([suite]) == []  # nothing left to carry: the fact reruns
+    assert later.entry(suite)["devices"] == [asdict(Device("Plug", "P1", "1.1"))]  # the old firmware is gone too
+    assert later.fact_results(suite) == {}
+
+
+def test_a_failed_device_lookup_leaves_the_fact_pending(tmp_path):
+    suite = facts_suite(tmp_path)
+    ran_a_fact(tmp_path, suite, devices=())  # rig_facts failed: no devices
+    assert loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite) == {}
