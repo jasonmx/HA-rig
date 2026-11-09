@@ -71,6 +71,15 @@ def no_moved_files_check(monkeypatch) -> None:
     monkeypatch.setattr(target, "refuse_moved_files", lambda repo, rig_checkout: None)
 
 
+REAL_REFUSE_UNOWNED = target.refuse_unowned_checkout
+
+
+@pytest.fixture(autouse=True)
+def no_ownership_check(monkeypatch) -> None:
+    """The checkout the tests run from is not a PR's worktree in CI, and no test shells out to gh."""
+    monkeypatch.setattr(target, "refuse_unowned_checkout", lambda repo, env=None: None)
+
+
 @pytest.fixture(autouse=True)
 def no_approval(monkeypatch) -> None:
     """No test inherits an approval for restricted work, or the variable it replaced, from the shell running it."""

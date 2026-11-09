@@ -865,6 +865,7 @@ def leave(signum: int, _frame: object) -> None:
 
 
 def wait_or_run(args: argparse.Namespace) -> int:
+    target.refuse_unowned_checkout(REPO)
     target.refuse_moved_files(REPO, MAIN_CHECKOUT)
     try:
         terms.write(REPO)  # deviceside's household check reads the profiles' terms from here
