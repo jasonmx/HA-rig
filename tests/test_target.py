@@ -61,3 +61,84 @@ def test_a_household_file_left_in_deviceside_is_refused(tmp_path, stale):
         REAL_REFUSE_MOVED_FILES(repo, tmp_path / "ha-rig")
     (repo / stale).rmdir()
     REAL_REFUSE_MOVED_FILES(repo, tmp_path / "ha-rig")  # nothing left: passes
+
+
+def git(*args, cwd):
+    subprocess.run(
+        ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True
+    )
+
+
+def worktree(tmp_path, branch):
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", "-b", "main", cwd=main)
+    git("commit", "-q", "--allow-empty", "-m", "x", cwd=main)
+    wt = tmp_path / "wt"
+    git("worktree", "add", "-q", "-b", branch, str(wt), cwd=main)
+    return main, wt
+
+
+def fake_gh(monkeypatch, out):
+    real = subprocess.run
+
+    def run(cmd, **kwargs):
+        if cmd[0] == "gh":
+            assert cmd[:4] == ["gh", "pr", "list", "--head"]
+            if isinstance(out, Exception):
+                raise out
+            return subprocess.CompletedProcess(cmd, 0, stdout=out)
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(target.subprocess, "run", run)
+
+
+def test_a_wt_worktree_with_an_open_pr_is_owned(tmp_path, monkeypatch):
+    _, wt = worktree(tmp_path, "wt/topic")
+    fake_gh(monkeypatch, '[{"number": 7}]')
+    from tests.conftest import REAL_REFUSE_UNOWNED
+
+    REAL_REFUSE_UNOWNED(wt, {})
+
+
+def test_a_wt_branch_without_an_open_pr_is_refused(tmp_path, monkeypatch):
+    _, wt = worktree(tmp_path, "wt/topic")
+    fake_gh(monkeypatch, "[]")
+    from tests.conftest import REAL_REFUSE_UNOWNED
+
+    with pytest.raises(SystemExit, match=r"wt/topic has no open PR.*pr-draft"):
+        REAL_REFUSE_UNOWNED(wt, {})
+
+
+def test_a_failing_gh_refuses_rather_than_passes(tmp_path, monkeypatch):
+    _, wt = worktree(tmp_path, "wt/topic")
+    fake_gh(monkeypatch, FileNotFoundError("gh"))
+    from tests.conftest import REAL_REFUSE_UNOWNED
+
+    with pytest.raises(SystemExit, match="Could not look up"):
+        REAL_REFUSE_UNOWNED(wt, {})
+
+
+def test_a_worktree_on_another_branch_is_refused(tmp_path):
+    _, wt = worktree(tmp_path, "feature/x")
+    from tests.conftest import REAL_REFUSE_UNOWNED
+
+    with pytest.raises(SystemExit, match=r"not a wt/\* branch.*pr-draft"):
+        REAL_REFUSE_UNOWNED(wt, {})
+
+
+def test_a_detached_ci_style_clone_and_the_main_checkout_are_refused_without_the_opt_out(tmp_path):
+    main, wt = worktree(tmp_path, "wt/topic")
+    from tests.conftest import REAL_REFUSE_UNOWNED
+
+    with pytest.raises(SystemExit, match="not a linked worktree"):
+        REAL_REFUSE_UNOWNED(main, {})
+    git("checkout", "-q", "--detach", cwd=wt)
+    with pytest.raises(SystemExit, match="detached HEAD"):
+        REAL_REFUSE_UNOWNED(wt, {})
+
+
+def test_the_opt_out_passes_anywhere(tmp_path):
+    from tests.conftest import REAL_REFUSE_UNOWNED
+
+    REAL_REFUSE_UNOWNED(tmp_path, {target.UNOWNED_OK: "1"})

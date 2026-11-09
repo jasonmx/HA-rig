@@ -9,6 +9,7 @@ this rig's main checkout.
 Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 RIG_HOME = Path(__file__).resolve().parents[1]
 COMPONENT = "custom_components/deviceside"
 SIBLINGS = ("deviceside", "device-side")
+UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner
 
 
 def git_path(directory: Path, flag: str) -> Path | None:
@@ -65,3 +67,39 @@ def refuse_moved_files(repo: Path, rig_checkout: Path) -> None:
     if stale := [path for path in (old / ".env.rig", old / "tests" / "rig" / "profiles") if path.exists()]:
         listed = ", ".join(str(path) for path in stale)
         raise SystemExit(f"Move {listed} into {rig_checkout} (profiles/ and .env.rig there), then run again")
+
+
+def refuse_unowned_checkout(repo: Path, env: dict[str, str] | None = None) -> None:
+    """Refuse a run from a deviceside checkout that is not a worktree on a `wt/*` branch with an open PR: a run
+    deploys and records that code, and a PR's owner is whoever works in its worktree. UNOWNED_OK=1 opts out, for
+    the main checkout and for a detached CI clone."""
+    env = os.environ if env is None else env
+    if env.get(UNOWNED_OK) == "1":
+        return
+    fix = (
+        f"Open a draft PR from a wt/ worktree (pr-draft <plan>), or set {UNOWNED_OK}=1 to run from this checkout anyway"
+    )
+    git_dir, common = git_path(repo, "--git-dir"), git_path(repo, "--git-common-dir")
+    if git_dir is None or git_dir == common:
+        raise SystemExit(f"{repo} is not a linked worktree of deviceside. {fix}")
+    try:
+        branch = subprocess.run(
+            ["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except OSError, subprocess.CalledProcessError:
+        branch = ""
+    if not branch.startswith("wt/"):
+        raise SystemExit(f"{repo} is on {branch or 'a detached HEAD'}, not a wt/* branch. {fix}")
+    try:
+        listed = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        open_prs = json.loads(listed)
+    except (OSError, subprocess.CalledProcessError, ValueError) as err:
+        raise SystemExit(f"Could not look up {branch}'s open PR with gh ({err}). {fix}") from err
+    if not open_prs:
+        raise SystemExit(f"{branch} has no open PR. {fix}")
