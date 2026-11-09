@@ -224,7 +224,8 @@ def git(*args: str, check: bool = True) -> str:
 def select(
     step_files: list[StepFile], profile: Profile, integrations: list[str] | None, actions: list[str] | None = None
 ) -> list[Suite]:
-    """Every step file on every integration in the profile, narrowed to --integration and --action. An action takes
+    """Every step file on every integration in the profile it has a test for (`only:`), narrowed to --integration
+    and --action. A file with no adapter there stays, for the dry-run's `no adapter, will skip`. An action takes
     every step file for it (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its
     record; a file with a `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is
     run_suites's job (engine.applies)."""
@@ -234,6 +235,7 @@ def select(
         if not actions or (step_file.name or step_file.action) in actions
         for integration in profile.integrations
         if not integrations or integration in integrations
+        if step_file.runs_on(integration)
     ]
 
 
@@ -1481,7 +1483,7 @@ def run_suites(args: argparse.Namespace, profile: Profile, registry: AdapterRegi
         if registry.adapter(suite.action, suite.integration) is None or applies(suite, registry)
     ]
     if not any(registry.adapter(suite.action, suite.integration) for suite in suites):
-        raise SystemExit("No rig test matches the profile's integrations.")
+        raise SystemExit("No rig test matches the profile's integrations, --integration and --action.")
     return suites
 
 

@@ -240,6 +240,11 @@ class StepFile:
     def roles(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(role for test in self.tests for role in test.roles))
 
+    def runs_on(self, integration: str) -> bool:
+        """Whether any test runs on `integration`: one with no `only`, or naming it. A file with none has no cases
+        there, so it isn't selected (cases() applies the same test-level filter)."""
+        return any(test.only is None or integration in test.only for test in self.tests)
+
     @property
     def uses_bridge(self) -> bool:
         return any(step.kind == "bridge" for test in self.tests for step in (*test.setup, *test.steps))
@@ -703,6 +708,8 @@ def cases(
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
     ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped."""
+    if not suite.file.runs_on(suite.integration):
+        return []
     result = []
     for test in suite.file.tests:
         if test.only is not None and suite.integration not in test.only:
