@@ -356,7 +356,10 @@ planned (an unreachable skip isn't one). Any other end, a crash included, leaves
 the one command that promotes the staged records, `scripts/rig.py --promote <dir>`, which copies them in and takes
 their suites out of the ledger. It never overwrites a record that changed since staging: it names it and keeps it
 staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
-cleanly writes its record too; the staged copy is a convenience the temp folder may clear. A record holds the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
+cleanly, running any case, writes its record too. The staged copy sits in the temp folder, which the OS may clear:
+when every selected suite is covered there is no such run, and only `--promote` or `--fresh` writes the record.
+
+A record holds the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
 suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run
 completes it (Coverage, above). The PR that clears an adapter's `experimental` flag cites one, and
 `cut-release-candidate` and `cut-release` refuse a head where a released adapter's code (its module and the modules it

@@ -1276,7 +1276,11 @@ def run_approved(
 def pending(setup: Setup) -> set[tuple[str, str]]:
     """The selected suites with every case saved and no fresh record: an earlier run finished them but didn't end
     cleanly, so their records were staged and never promoted. A run that ends cleanly writes theirs too."""
-    return {(c.suite.integration, c.suite.name) for c in setup.coverage if c.complete and not c.freshness.fresh}
+    return {
+        (c.suite.integration, c.suite.name)
+        for c in setup.coverage
+        if c.complete and not c.freshness.fresh and not c.narrows  # a narrowing record is kept, never rewritten
+    }
 
 
 def aborted(setup: Setup, keyword: str | None) -> Callable[[], int]:
@@ -1920,12 +1924,16 @@ async def run_rig(
         finally:
             home, signalled = await wind_down(roamer, stopped, logs, levels, pauses, journal, (bridge, ha, admin))
             end_abort(home, signalled, sys.exception())
-        code = end_code(result, home, budget, progress, suites, profile, registry, keyword)
-        if code == 0:
+        ending = end_code(result, home, budget, progress, suites, profile, registry, keyword)
+        if ending == 0:
             unrun = unfinished_cases(result, progress, suites, profile, registry, keyword)
+        code = ending  # only now: anything raised before leaves the run unclean
     finally:
-        flagged = logs.settle(code == 0)
-        settle_records(staging, 1 if flagged else code, unrun, progress)
+        flagged = True
+        try:
+            flagged = logs.settle(code == 0)
+        finally:
+            settle_records(staging, 1 if flagged else code, unrun, progress)
     return 1 if flagged else code
 
 

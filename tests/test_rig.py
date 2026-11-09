@@ -1798,3 +1798,27 @@ def test_promote_runs_the_staged_dir_alone(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(rig.target, "is_deviceside", lambda path: path == tmp_path / "repo")
     assert rig.promote_staged(staging.directory) == 0
     assert (tmp_path / "repo" / "docs" / "test-records" / "shelly" / "raise_brightness.md").exists()
+
+
+def test_a_run_whose_logs_are_flagged_stages_its_records_and_keeps_its_suites_saved(tmp_path, monkeypatch, capsys):
+    ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
+    ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 200}}
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    records = tmp_path / "docs" / "test-records"
+    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", records)
+    written: list[list[str]] = []
+    monkeypatch.setattr(rig, "write_records", recording(written))
+    monkeypatch.setattr(rig.RunLogs, "settle", lambda self, clean: True)  # an unexpected DeviceSide line
+    profile, suites = resumable(tmp_path)
+    setup = planned(tmp_path, monkeypatch, suites, profile)
+    code = asyncio.run(
+        rig.run_rig(
+            {}, setup.suites, profile, fakes.OPTION_REGISTRY, None, True, "c1",
+            progress=setup.progress, selected=suites, pending=rig.pending(setup),
+        )
+    )  # fmt: skip
+    assert code == 1 and written == [["shelly", "zha"]]
+    assert not records.exists()
+    assert "the run didn't end cleanly (exit 1)" in capsys.readouterr().out
+    after = planned(tmp_path, monkeypatch, suites, profile)
+    assert rig.pending(after) == {("shelly", "raise_brightness"), ("zha", "raise_brightness")}

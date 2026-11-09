@@ -10,8 +10,9 @@ Promoting copies each record into the checkout, then drops its suite's ledger en
 from then on), then removes the staged dir. A record whose file in the checkout changed since it was staged (a later
 run wrote it, or this dir was promoted already) is left staged and named, never overwritten.
 
-The ledger keeps a staged suite's cases until promotion, so a staged dir lost with the temp folder loses nothing: the
-next run that ends cleanly stages and promotes the record from the ledger.
+The ledger keeps a staged suite's cases until promotion, so a staged dir lost with the temp folder loses no result: the
+next run that ends cleanly, running any case, stages and promotes the record from the ledger. When every selected
+suite is covered there is no such run, and `--fresh` reruns them.
 """
 
 import hashlib
@@ -84,7 +85,8 @@ class Staging:
 
     def command(self) -> str:
         """The one command that promotes these records, from any directory."""
-        return f"DEVICE_SIDE_REPO={shlex.quote(str(self.repo))} {RIG} --promote {shlex.quote(str(self.directory))}"
+        repo, rig, directory = (shlex.quote(str(path)) for path in (self.repo, RIG, self.directory))
+        return f"DEVICE_SIDE_REPO={repo} {rig} --promote {directory}"
 
     def promote(self, progress: Progress | None = None, out: Callable[[str], None] = print) -> list[Path]:
         """Copy each staged record into the checkout, drop its suite's ledger entry (from `progress`, else the
