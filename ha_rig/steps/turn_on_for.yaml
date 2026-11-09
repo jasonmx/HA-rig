@@ -66,8 +66,9 @@ tests:
       - expect_state: {state: on}
       - expect_state: {state: off, within: 2 * tol}
 
-  # Color temperature rides the same light.turn_on as brightness. On Z2M the option is turned off first, so the run
-  # proves the adapter turns Hue native control on (z2m_option steps do nothing elsewhere).
+  # Color temperature rides the same light.turn_on as brightness. On Z2M the option is turned off first, so the color
+  # landing proves the adapter turns Hue native control on for the turn_on, and the option after proves it put the
+  # user's value back (z2m_option steps do nothing elsewhere).
   - name: bulb_color_temp_then_off
     roles: [light_ct]
     only: [shelly, zha, zigbee2mqtt]
@@ -82,7 +83,7 @@ tests:
       - wait: duration - tol
       - expect_state: {state: on}
       - expect_state: {state: off, within: 2 * tol}
-      - expect_z2m_option: {hue_native_control: true}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
 
   # Shelly sends transition in the same Set as the timer: the bulb fades up to the brightness, then turns itself off.
   - name: bulb_transition_then_off
@@ -160,7 +161,7 @@ tests:
       - wait: duration - tol
       - expect_state: {state: on}
       - expect_state: {state: off, within: 2 * tol}
-      - expect_z2m_option: {hue_native_control: true}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
 
   - name: bulb_hs_then_off
     roles: [light_color]
@@ -176,7 +177,7 @@ tests:
       - wait: duration - tol
       - expect_state: {state: on}
       - expect_state: {state: off, within: 2 * tol}
-      - expect_z2m_option: {hue_native_control: true}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
 
   - name: bulb_xy_then_off
     roles: [light_color]
@@ -192,7 +193,7 @@ tests:
       - wait: duration - tol
       - expect_state: {state: on}
       - expect_state: {state: off, within: 2 * tol}
-      - expect_z2m_option: {hue_native_control: true}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
 
   # A Zigbee group takes one OnWithTimedOff on its group address, so every member runs the same timer: Z2M on its
   # group ID topic, ZHA as one groupcast followed by a read-back of each member.
