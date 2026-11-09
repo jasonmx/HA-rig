@@ -884,9 +884,16 @@ def leave(signum: int, _frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
-def wait_or_run(args: argparse.Namespace) -> int:
-    target.refuse_unowned_checkout(REPO)
+def refuse_checkout(args: argparse.Namespace) -> None:
+    """Refuse a checkout the run may not use. --check, --dry-run and --recover deploy and record nothing in it, so
+    whose code it is doesn't matter to them."""
+    if not (args.check or args.dry_run or args.recover):
+        target.refuse_unowned_checkout(REPO)
     target.refuse_moved_files(REPO, MAIN_CHECKOUT)
+
+
+def wait_or_run(args: argparse.Namespace) -> int:
+    refuse_checkout(args)
     try:
         terms.write(REPO)  # deviceside's household check reads the profiles' terms from here
     except ValueError as err:  # a bad profile must not stop --recover; a run's own refuses it in prepare

@@ -11,11 +11,12 @@ terminal, you say yes. `--dry-run` prints the plan and the decision, and stops.
 The rig lives here, apart from deviceside, which is public. It tests a deviceside checkout: the one you run it
 from, so each worktree tests its own code, or `DEVICE_SIDE_REPO`, else a `deviceside` (or `device-side`) checkout
 beside this one. A run refuses a checkout that is not a worktree on a `wt/*` branch with an open PR (`pr-draft`
-opens it); `HA_RIG_UNOWNED_CHECKOUT=1` opts out, for the main checkout or a CI clone. Run it from the deviceside
+opens it). `--check`, `--dry-run` and `--recover` skip that check, so they work from any checkout, while
+`HA_RIG_UNOWNED_CHECKOUT=1` opts the rest out, for the main checkout or a CI clone. Run it from the deviceside
 worktree under test:
 
 ```sh
-cd ~/src/deviceside            # or a linked worktree of it
+cd ~/src/deviceside-wt/my-change   # a wt/* worktree with an open PR
 ~/src/ha-rig/scripts/rig.py --dry-run
 ```
 
