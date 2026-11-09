@@ -201,6 +201,9 @@ class RigTest:
             return True
         return any(step.kind in CHECKS for step in self.steps) and not any(step.kind == "do" for step in self.setup)
 
+    def runs_on(self, integration: str) -> bool:
+        return self.only is None or integration in self.only
+
     def observed_on(self, role: str, integration: str) -> bool:
         """Whether the test has an observed case on `role` in `integration`'s suite."""
         if self.observe is None:
@@ -241,9 +244,9 @@ class StepFile:
         return tuple(dict.fromkeys(role for test in self.tests for role in test.roles))
 
     def runs_on(self, integration: str) -> bool:
-        """Whether any test runs on `integration`: one with no `only`, or naming it. A file with none has no cases
-        there, so it isn't selected (cases() applies the same test-level filter)."""
-        return any(test.only is None or integration in test.only for test in self.tests)
+        """Whether any test runs on `integration`. A file with none has no cases there, so it isn't selected;
+        cases() filters its tests with the same RigTest.runs_on."""
+        return any(test.runs_on(integration) for test in self.tests)
 
     @property
     def uses_bridge(self) -> bool:
@@ -708,11 +711,9 @@ def cases(
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
     ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped."""
-    if not suite.file.runs_on(suite.integration):
-        return []
     result = []
     for test in suite.file.tests:
-        if test.only is not None and suite.integration not in test.only:
+        if not test.runs_on(suite.integration):
             continue
         lacking = next((a for a in test.calls if adapters is not None and a not in adapters), None)
         for role in test.roles:

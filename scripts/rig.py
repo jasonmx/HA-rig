@@ -1483,7 +1483,7 @@ def run_suites(args: argparse.Namespace, profile: Profile, registry: AdapterRegi
         if registry.adapter(suite.action, suite.integration) is None or applies(suite, registry)
     ]
     if not any(registry.adapter(suite.action, suite.integration) for suite in suites):
-        raise SystemExit("No rig test matches the profile's integrations, --integration and --action.")
+        raise SystemExit("No rig test matches the profile's integrations (and --integration/--action, if given).")
     return suites
 
 

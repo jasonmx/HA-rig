@@ -934,7 +934,7 @@ def test_a_file_with_no_test_for_an_integration_is_not_selected_there(profile, t
     found = rig.coverage.of(
         rig.select(step_files, profile, None, ["lifecycle"]), profile, AdapterRegistry.discover(), tmp_path, "c1", None
     )
-    assert {(c.suite.integration, c.suite.name) for c in found} <= {("hue", "lifecycle")}
+    assert {(c.suite.integration, c.suite.name) for c in found} == {("hue", "lifecycle")}
 
 
 def test_main_recovers_before_the_plan_and_recover_alone_stops_there(tmp_path, monkeypatch, capsys):
