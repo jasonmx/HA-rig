@@ -662,6 +662,21 @@ async def test_only_and_missing_roles_narrow_the_cases(tmp_path):
     }
 
 
+def test_runs_on_is_true_where_any_test_runs(tmp_path):
+    def has(*only: str | None) -> dict[str, bool]:
+        tests = "".join(
+            f"  - name: t{i}\n    roles: [switch_plug]\n    steps: [{{wait: 0}}]\n"
+            + (f"    only: [{o}]\n" if o else "")
+            for i, o in enumerate(only)
+        )
+        text = f"action: turn_on_for\nrig_seconds: 5\ntests:\n{tests}"
+        return {key: suite(tmp_path, text, key).file.runs_on(key) for key in ("hue", "shelly")}
+
+    assert has(None) == {"hue": True, "shelly": True}
+    assert has("hue", "hue") == {"hue": True, "shelly": False}
+    assert has("hue", "shelly") == {"hue": True, "shelly": True}
+
+
 def test_observe_only_watches_in_those_integrations_and_runs_automated_elsewhere(tmp_path):
     text = OBSERVED.replace("ask: 'Did it click twice?'}", "ask: 'Did it click twice?', only: [zha]}")
     inv = Profile({key: [RigEntity("switch.plug", frozenset({"switch_plug"}))] for key in ("shelly", "zha")})
