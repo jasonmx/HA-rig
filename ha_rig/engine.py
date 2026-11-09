@@ -2434,14 +2434,23 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
 
 
 async def write_records(
-    result: RunResult, registry: Any, records_dir: Path, date: str, source: str, profile: str
+    result: RunResult,
+    registry: Any,
+    records_dir: Path,
+    date: str,
+    source: str,
+    profile: str,
+    into: Path | None = None,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
-    one whose facts lookup failed, writes nothing: a record naming no device would replace one that did.
+    one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
+    under `into` (a run's staging, ha_rig/staging.py), laid out as `records_dir`, else into `records_dir`.
 
     A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
-    the file stays as it is, and the suite is `kept` with those case IDs. To narrow on purpose, delete the record."""
+    the file in `records_dir` stays as it is, and the suite is `kept` with those case IDs (its `records_dir` path). To
+    narrow on purpose, delete the record."""
     written, kept = [], []
+    into = into or records_dir
     for suite_result in result.suites:
         if not suite_result.recordable or suite_result.ha_version is None:
             continue
@@ -2451,6 +2460,7 @@ async def write_records(
         if narrowed := narrows(suite_result.cases, Record.read(path)):
             kept.append((path, narrowed))
             continue
+        path = into / suite.integration / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, profile)

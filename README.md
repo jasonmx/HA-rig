@@ -21,7 +21,7 @@ cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--coverage] [--no-deploy]
               [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
               [--unattended] [--serial] [--debug-logs] [--deploy-only] [--for DURATION] [--fresh]
-              [--ignore-unreachables] [--recover] [--roam-check] [--wait-free]
+              [--ignore-unreachables] [--recover] [--promote DIR] [--roam-check] [--wait-free]
               [--hold INTEGRATION] [--exclusive] [--visual {none,profile}]
 
 Run the rig tests against the live HA, behind an authorization gate.
@@ -58,6 +58,9 @@ options:
                         fixed entity, and while any is, of fixed groups whose members the profile
                         doesn't list and of fixed scenes; their suites write no record
   --recover             put back what an aborted run left changed, then stop
+  --promote DIR         copy the test records a run staged in DIR (it prints the command) into the
+                        checkout's docs/test-records and take their suites out of the ledger; no
+                        lock, no HA
   --roam-check          move the profile's roam bulbs to every network and home, no suites
   --wait-free           wait until no rig run holds the locks (with --integration, those
                         integrations' and HA exclusively), without taking them; another run may

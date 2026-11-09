@@ -8,7 +8,7 @@ a suite's saved results to its own, so a suite finished across runs writes its r
 
 An entry goes when:
 - HA runs another version than its cases ran on: a record names one;
-- its suite's record is written, which carries its coverage from then on;
+- its suite's record is promoted into the checkout (ha_rig/staging.py), which carries its coverage from then on;
 - the run that saved a failure of one of its cases ends: the suite reruns whole, so a record never covers up a failure;
 - nothing has touched it for PRUNE_DAYS.
 
@@ -284,6 +284,11 @@ class Progress:
         """Drop the suite's entry at its fingerprint now (--fresh, or its record written), until the next save."""
         if (key := self.key(suite)) is not None:
             self._drop(key)
+
+    def drop_entries(self, keys: Iterable[EntryKey]) -> None:
+        """Drop these entries, tracked or not (their records promoted: ha_rig/staging.py), until the next save."""
+        for key in keys:
+            self._drop(tuple(key))
 
     def _drop(self, key: EntryKey) -> None:
         self.entries.pop(key, None)
