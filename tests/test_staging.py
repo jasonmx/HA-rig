@@ -74,3 +74,13 @@ def test_the_command_names_the_checkout_and_the_staging(tmp_path):
     command = staged.command()
     assert command.startswith(f"DEVICE_SIDE_REPO={tmp_path / 'repo'} ")
     assert command.endswith(f"scripts/rig.py --promote {staged.directory}")
+
+
+def test_a_staged_record_gone_missing_is_never_counted_promoted(tmp_path, capsys):
+    ledger(tmp_path)
+    staged = staging(tmp_path)
+    (staged.directory / "shelly" / "raise_brightness.md").unlink()  # the temp cleaner took it
+    assert staged.promote() == []
+    assert not (tmp_path / "repo").exists()
+    assert Progress.load(tmp_path, "lab").entries  # the saved results stay, for the next clean run
+    assert "is gone; its suite stays saved" in capsys.readouterr().out

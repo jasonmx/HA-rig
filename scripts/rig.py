@@ -1938,9 +1938,13 @@ async def run_rig(
 
 
 def staging_for(stamp: str, profile: Profile, progress: Progress | None) -> Staging:
-    """Where the run titled `rig run <stamp>` stages its records: next to its report, as `<report>.records/`."""
+    """Where the run titled `rig run <stamp>` stages its records: next to its report, as `<report>.records/`, or
+    `<report>.<pid>.records/` when a run started the same second has that."""
+    directory = report_path(REPORT_DIR, f"rig run {stamp}").with_suffix(".records")
+    if directory.exists():
+        directory = directory.with_suffix(f".{os.getpid()}.records")
     return Staging(
-        report_path(REPORT_DIR, f"rig run {stamp}").with_suffix(".records"),
+        directory,
         REPO,
         TEST_RECORDS_DIR,
         progress.path.parents[1] if progress is not None else None,

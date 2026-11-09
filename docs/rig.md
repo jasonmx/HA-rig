@@ -353,8 +353,8 @@ When every test of an adapter passes, the run stages its record, `<integration>/
 next to its report, and writes it to `docs/test-records/` in the deviceside checkout only when the run ends cleanly:
 exit 0 (no failure, not stopped, the bulbs home, no unexpected DeviceSide log line) with a result for every case it
 planned (an unreachable skip isn't one). Any other end, a crash included, leaves the checkout untouched and prints
-the one command that promotes the staged records, `scripts/rig.py --promote <dir>`, which copies them in and takes
-their suites out of the ledger. It never overwrites a record that changed since staging: it names it and keeps it
+the one command that promotes the staged records, `scripts/rig.py --promote <dir>` (any checkout of this repo runs
+it), which copies them in and takes their suites out of the ledger. It never overwrites a record that changed since staging: it names it and keeps it
 staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
 cleanly, running any case, writes its record too. The staged copy sits in the temp folder, which the OS may clear:
 when every selected suite is covered there is no such run, and only `--promote` or `--fresh` writes the record.

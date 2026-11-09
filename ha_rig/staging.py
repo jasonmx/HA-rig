@@ -92,10 +92,10 @@ class Staging:
         """Copy each staged record into the checkout, drop its suite's ledger entry (from `progress`, else the
         ledger on disk) and, once every record is promoted, remove the staged dir. Returns the checkout's paths
         written. A record whose file changed since staging stays staged, and is named."""
-        promoted, refused, dropped = [], [], []
+        promoted, refused, dropped = [], {}, []
         for relative, staged in sorted(self.records.items()):
-            if not self._copy(relative, staged.get("base")):
-                refused.append(relative)
+            if why := self._copy(relative, staged.get("base")):
+                refused[relative] = why
                 continue
             promoted.append(self.records_dir / relative)
             if staged.get("entry"):
@@ -103,11 +103,8 @@ class Staging:
         self._drop(dropped, progress)
         for target in promoted:
             out(f"Wrote {display(target, self.repo)}; review the diff before committing it.")
-        for relative in refused:
-            out(
-                f"Not promoted {relative}: {display(self.records_dir / relative, self.repo)} changed since it was "
-                f"staged in {self.directory}; compare them and copy it by hand if it should win."
-            )
+        for relative, why in refused.items():
+            out(f"Not promoted {relative}: {why}.")
         if refused:
             self.records = {relative: self.records[relative] for relative in refused}
             self.save()
@@ -115,17 +112,23 @@ class Staging:
             shutil.rmtree(self.directory, ignore_errors=True)
         return promoted
 
-    def _copy(self, relative: str, base: str | None) -> bool:
-        """Copy one staged record into the checkout, unless its file there changed since staging; whether it is
-        there now. One already there (an attempt that stopped part way) counts."""
+    def _copy(self, relative: str, base: str | None) -> str | None:
+        """Copy one staged record into the checkout; None once it is there (one already there, from an attempt that
+        stopped part way, counts), else why not: the staged file is gone, or the checkout's changed since staging.
+        Either keeps the suite in the ledger."""
         source, target = self.directory / relative, self.records_dir / relative
-        if (now := digest(target)) == digest(source):
-            return True
+        if (staged := digest(source)) is None:
+            return f"{source} is gone; its suite stays saved, and the next run that ends cleanly writes its record"
+        if (now := digest(target)) == staged:
+            return None
         if now != base:
-            return False
+            return (
+                f"{display(target, self.repo)} changed since it was staged in {self.directory}; compare them and "
+                "copy it by hand if it should win"
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
-        return True
+        return None
 
     def _drop(self, entries: list[EntryKey], progress: Progress | None) -> None:
         """Take the promoted records' entries out of the ledger: `progress`, else the one on disk."""
