@@ -23,6 +23,9 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 
 ## Changes
 
+- Plans live in `docs/plans/`. The planning session commits and pushes the plan on the `wt/` branch the work will
+  use, before handing off, so a fresh worktree has it: an untracked plan in the main checkout is invisible there
+  and blocks its fast-forward on merge.
 - Setup: `uv sync`. Keep the `dev` group's pins in step with deviceside's `pyproject.toml`.
 - Before each push: `.venv/bin/pytest` and `pre-commit run --all-files`.
 - Before opening the PR: `/audit-code` on the diff, then fix its findings and carry on to the PR; stop for Jason
