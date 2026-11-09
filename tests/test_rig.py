@@ -1824,7 +1824,7 @@ def test_a_run_whose_logs_are_flagged_stages_its_records_and_keeps_its_suites_sa
     assert rig.pending(after) == {("shelly", "raise_brightness"), ("zha", "raise_brightness")}
 
 
-def test_two_runs_started_the_same_second_stage_apart(tmp_path, profile):
+def test_two_runs_started_the_same_second_stage_apart(tmp_path, profile, monkeypatch):
     first = rig.staging_for("2026-11-09 10:00:00", profile, None)
-    first.directory.mkdir(parents=True)
+    monkeypatch.setattr(rig.os, "getpid", lambda: 1)
     assert rig.staging_for("2026-11-09 10:00:00", profile, None).directory != first.directory

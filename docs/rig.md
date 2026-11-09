@@ -177,8 +177,8 @@ entries are per suite, keyed by the suite's code at the commit tested, so runs f
 sit side by side, and a run on one integration never discards another's. A saved case holds while it planned the
 same entities (a profile change reruns it), and a `not observed` one only for an `--unattended` run. An entry goes
 when HA runs another version (a record names one), when its suite's record is promoted into the checkout (the record
-carries it from then on; Test records, below), when the run that saved a failure of one of its cases ends (the suite reruns whole, so a record never
-covers up a failure; the run's report keeps it), or after 30 days untouched. `--no-deploy` saves nothing, as it
+carries it from then on; Test records, below), when the run that saved a failure of one of its cases ends (the
+suite reruns whole, so a record never covers up a failure; the run's report keeps it), or after 30 days untouched. `--no-deploy` saves nothing, as it
 writes no record.
 
 A run that stops part way puts everything back as always and exits 75; rerun it and it picks up at the cases with no
@@ -354,8 +354,8 @@ next to its report, and writes it to `docs/test-records/` in the deviceside chec
 exit 0 (no failure, not stopped, the bulbs home, no unexpected DeviceSide log line) with a result for every case it
 planned (an unreachable skip isn't one). Any other end, a crash included, leaves the checkout untouched and prints
 the one command that promotes the staged records, `scripts/rig.py --promote <dir>` (any checkout of this repo runs
-it), which copies them in and takes their suites out of the ledger. It never overwrites a record that changed since staging: it names it and keeps it
-staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
+it), which copies them in and takes their suites out of the ledger. It never overwrites a record that changed since
+staging: it names it and keeps it staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
 cleanly, running any case, writes its record too. The staged copy sits in the temp folder, which the OS may clear:
 when every selected suite is covered there is no such run, and only `--promote` or `--fresh` writes the record.
 

@@ -182,8 +182,7 @@ from ha_rig.progress import Done, Progress  # noqa: E402
 from ha_rig.roam import BLUETOOTH_RESET, NAMES, Bulb, GroupError, Roamer, RoamError  # noqa: E402
 from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
 from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa: E402
-from ha_rig.staging import Staging  # noqa: E402
-from ha_rig.staging import display as relative_to  # noqa: E402
+from ha_rig.staging import Staging, display  # noqa: E402
 
 TEST_RECORDS_DIR = REPO / "docs" / "test-records"
 SERVICE = ("deviceside", "turn_on_for")
@@ -1938,13 +1937,10 @@ async def run_rig(
 
 
 def staging_for(stamp: str, profile: Profile, progress: Progress | None) -> Staging:
-    """Where the run titled `rig run <stamp>` stages its records: next to its report, as `<report>.records/`, or
-    `<report>.<pid>.records/` when a run started the same second has that."""
-    directory = report_path(REPORT_DIR, f"rig run {stamp}").with_suffix(".records")
-    if directory.exists():
-        directory = directory.with_suffix(f".{os.getpid()}.records")
+    """Where the run titled `rig run <stamp>` stages its records: next to its report, as `<report>.<pid>.records/`,
+    so runs started the same second never share one."""
     return Staging(
-        directory,
+        report_path(REPORT_DIR, f"rig run {stamp}").with_suffix(f".{os.getpid()}.records"),
         REPO,
         TEST_RECORDS_DIR,
         progress.path.parents[1] if progress is not None else None,
@@ -2236,7 +2232,7 @@ async def report(
         staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
     for path, narrowed in kept:
         print(
-            f"Kept {relative_to(path, REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "
+            f"Kept {display(path, REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "
             "run a profile with those roles, or delete the record to narrow it."
         )
 
