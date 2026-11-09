@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
-from ha_rig import baseline, engine
+from ha_rig import baseline, engine, target
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
@@ -230,6 +230,39 @@ def test_main_refuses_the_old_variable_in_every_mode(monkeypatch):
     for argv in ([], ["--deploy-only"], ["--recover"]):
         with pytest.raises(SystemExit, match="DEVICE_SIDE_RIG_APPROVED is gone"):
             rig.main(argv)
+
+
+class Stopped(SystemExit):
+    """Raised by a stub to end `wait_or_run` at a known point."""
+
+
+@pytest.mark.parametrize("argv", [[], ["--deploy-only"], ["--promote", "staged"], ["--roam-check"]])
+def test_a_writing_mode_runs_the_ownership_check(monkeypatch, argv):
+    # The autouse no_ownership_check stub hides a deleted or moved call in wait_or_run from every other test.
+    calls = []
+
+    def refuse(repo, env=None):
+        calls.append(repo)
+        raise Stopped("ownership")
+
+    monkeypatch.setattr(target, "refuse_unowned_checkout", refuse)
+    with pytest.raises(Stopped, match="ownership"):
+        rig.main(argv)
+    assert calls == [rig.REPO]
+
+
+@pytest.mark.parametrize("argv", [["--check"], ["--dry-run"], ["--recover"]])
+def test_a_read_only_mode_skips_the_ownership_check(monkeypatch, argv):
+    calls = []
+    monkeypatch.setattr(target, "refuse_unowned_checkout", lambda repo, env=None: calls.append(repo))
+
+    def stop(repo, rig_checkout):
+        raise Stopped("past the ownership check")
+
+    monkeypatch.setattr(target, "refuse_moved_files", stop)
+    with pytest.raises(Stopped, match="past the ownership check"):
+        rig.main(argv)
+    assert calls == []
 
 
 def fake_ha(monkeypatch, replies):

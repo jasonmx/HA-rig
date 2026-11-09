@@ -72,7 +72,8 @@ def refuse_moved_files(repo: Path, rig_checkout: Path) -> None:
 def refuse_unowned_checkout(repo: Path, env: dict[str, str] | None = None) -> None:
     """Refuse a run from a deviceside checkout that is not a worktree on a `wt/*` branch with an open PR: a run
     deploys and records that code, and a PR's owner is whoever works in its worktree. UNOWNED_OK=1 opts out, for
-    the main checkout and for a detached CI clone."""
+    the main checkout and for a detached CI clone. The read-only modes (--check, --dry-run, --recover) deploy and
+    record nothing in the checkout, so the runner does not call this for them."""
     env = os.environ if env is None else env
     if env.get(UNOWNED_OK) == "1":
         return
