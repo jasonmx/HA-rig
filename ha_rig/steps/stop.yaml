@@ -45,9 +45,11 @@ tests:
     steps:
       - set: {state: on, brightness_pct: 50}
       # ZHA holds a light's reports for 0.5 s after a turn_on, then applies the last: the bulb's report of the
-      # previous case's restore can land there, and HA shows that level until the next report.
+      # previous case's restore can land there, and HA shows that level until the next report. On Zigbee2MQTT with
+      # hue_native_control on, the set is a Hue bulb's own ~0.4 s fade, which a stop rightly halts: the rig stops
+      # only moves DeviceSide started, so the set's fade ends first.
       - wait: 2
-        only: [zha]
+        only: [zha, zigbee2mqtt]
       - call: {}
       - expect_response: {status: expected}
       - sample: {attribute: brightness, for: 2, expect: steady}
