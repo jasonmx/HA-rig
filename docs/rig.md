@@ -256,7 +256,8 @@ page says of a `group` holds for it too.
 A file with `entry` steps (`lifecycle.yaml`) tests DeviceSide's config entry through its action: reloading it, and
 the action refusing with `not_loaded` while it is disabled. It runs alone, holding HA exclusively, like an option
 file, and needs a top-level `name:`, which its record takes (`lifecycle.md`) and `--action` picks it by, so it never
-replaces the action's own.
+replaces the action's own. A file with no test for an integration (every test `only:` elsewhere, as `lifecycle.yaml`
+is for all but Hue) isn't selected there, so the record, the dry-run and `--coverage` don't show it.
 
 An adapter with options runs each file for its action with them pinned through DeviceSide's options flow:
 `options: [<name>]` at the top of a file turns those on, and every other option in the adapter's scope runs off. Its
