@@ -743,7 +743,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
 
     written = []
 
-    async def write_records(result, registry, records_dir, date, source, profile):
+    async def write_records(result, registry, records_dir, date, source, profile, into=None):
         written.append(source)
         assert profile == "house"
         return [], []
@@ -1403,17 +1403,36 @@ def test_an_edited_step_file_stales_its_saved_cases(tmp_path, monkeypatch):
     assert not planned(tmp_path, monkeypatch, suites, profile).done
 
 
-def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path, monkeypatch, capsys):
+def staged(directory: Path) -> list[str]:
+    """The records staged under `directory`, by integration/name."""
+    return sorted(str(path.relative_to(directory)) for path in directory.rglob("*.md"))
+
+
+def recording(written: list[list[str]]):
+    """A write_records that notes each call's recordable suites and writes a stub record for each, where it is told."""
+
+    async def write_records(result, registry, records_dir, date, source, profile, into=None):
+        paths = []
+        for part in result.suites:
+            if part.recordable:
+                path = (into or records_dir) / part.suite.integration / f"{part.suite.name}.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{part.suite.integration} {date}\n")
+                paths.append(path)
+        written.append([path.parent.name for path in paths])
+        return paths, []
+
+    return write_records
+
+
+def test_a_run_stopped_by_its_budget_stages_and_its_clean_resume_promotes_both(tmp_path, monkeypatch, capsys):
     ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
     ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 200}}
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    records = tmp_path / "docs" / "test-records"
+    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", records)
     written: list[list[str]] = []
-
-    async def write_records(result, registry, records_dir, date, source, profile):
-        written.append([part.suite.integration for part in result.suites if part.recordable])
-        return [], []
-
-    monkeypatch.setattr(rig, "write_records", write_records)
+    monkeypatch.setattr(rig, "write_records", recording(written))
     profile, suites = resumable(tmp_path)
 
     def session(budget=None) -> int:
@@ -1430,6 +1449,7 @@ def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path
                 progress=setup.progress,
                 selected=suites,
                 budget=budget,
+                pending=rig.pending(setup),
             )
         )
 
@@ -1448,16 +1468,24 @@ def test_a_run_stopped_by_its_budget_resumes_and_writes_its_record_once(tmp_path
         return budget
 
     assert session(spent_after(3)) == rig.RESUMABLE
-    assert "Stopped with 1 cases left (budget spent); rerun the same command to resume." in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Stopped with 1 cases left (budget spent); rerun the same command to resume." in out
     assert written == [["shelly"]]  # zha is one case short
+    assert not records.exists()  # the checkout is untouched
+    [staging] = (tmp_path / "reports").glob("*.records")
+    assert staged(staging) == ["shelly/raise_brightness.md"]
+    assert "No test records written to the checkout: the run didn't end cleanly (exit 75)" in out
+    assert f"rig.py --promote {staging}" in out
 
     monkeypatch.setattr(rig.Progress, "record", record)
     assert session() == 0
     assert "Resuming" not in capsys.readouterr().out
-    assert written == [["shelly"], ["zha"]]  # shelly's record isn't written again
+    assert written == [["shelly"], ["shelly", "zha"]]  # shelly's, still in the ledger, is staged again
+    assert staged(records) == ["shelly/raise_brightness.md", "zha/raise_brightness.md"]
+    assert not rig.Progress.load(tmp_path, "house").entries  # the records carry both now
 
 
-async def test_a_written_record_takes_its_suite_out_of_the_ledger_and_a_failure_drops_its_own(tmp_path, monkeypatch):
+async def test_a_staged_record_keeps_its_suite_in_the_ledger_until_promoted(tmp_path, monkeypatch):
     profile, suites = resumable(tmp_path)
     progress = planned(tmp_path, monkeypatch, suites, profile).progress
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
@@ -1473,17 +1501,20 @@ async def test_a_written_record_takes_its_suite_out_of_the_ledger_and_a_failure_
             )
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records_dir, date, source, profile):
-        return [
-            records_dir / part.suite.integration / f"{part.suite.name}.md" for part in result.suites if part.recordable
-        ], []
-
-    monkeypatch.setattr(rig, "write_records", write_records)
+    written: list[list[str]] = []
+    monkeypatch.setattr(rig, "write_records", recording(written))
+    staging = rig.staging_for("2026-11-09 10:00:00", profile, progress)
     result = engine.RunResult(progress.parts(suites))
-    await rig.report(result, None, fakes.OPTION_REGISTRY, "c1", profile, progress=progress)
-    assert {key[0] for key in progress.done()} == {"zha"}  # shelly's record carries it now
+    await rig.report(result, fakes.OPTION_REGISTRY, "c1", profile, staging, progress=progress)
+    assert written == [["shelly"]] and list(staging.records) == ["shelly/raise_brightness.md"]
+    assert {key[0] for key in progress.done()} == {"shelly", "zha"}  # nothing leaves before promotion
     assert rig.end_code(result, True, None, progress, suites, profile, fakes.OPTION_REGISTRY) == 1
-    assert not rig.Progress.load(tmp_path, "house").entries  # the failed suite reruns whole
+    assert {entry[0] for entry in rig.Progress.load(tmp_path, "house").entries} == {"shelly"}  # the failure reruns
+
+    staging.promote(progress)
+    assert not rig.Progress.load(tmp_path, "house").entries  # shelly's record carries it now
+    assert (tmp_path / "docs" / "test-records" / "shelly" / "raise_brightness.md").exists()
+    assert not staging.directory.exists()
 
 
 async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_path, monkeypatch, capsys):
@@ -1501,23 +1532,22 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
             progress.record(suite, result)
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records_dir, date, source, profile):
-        paths = {
-            part.suite.integration: records_dir / part.suite.integration / f"{part.suite.name}.md"
-            for part in result.suites
-        }
-        return [paths["zha"]], [(paths["shelly"], ["t[switch_plug]", "u[switch_plug]"])]
+    async def write_records(result, registry, records_dir, date, source, profile, into=None):
+        path = into / "zha" / "raise_brightness.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("zha\n")
+        return [path], [(records_dir / "shelly" / "raise_brightness.md", ["t[switch_plug]", "u[switch_plug]"])]
 
     monkeypatch.setattr(rig, "write_records", write_records)
+    staging = rig.staging_for("2026-11-09 10:00:00", profile, progress)
     result = engine.RunResult(progress.parts(suites))
-    await rig.report(result, None, fakes.OPTION_REGISTRY, "c1", profile, progress=progress)
+    await rig.report(result, fakes.OPTION_REGISTRY, "c1", profile, staging, progress=progress)
 
     out = capsys.readouterr().out
     assert "Kept docs/test-records/shelly/" in out
     assert "skips t[switch_plug], u[switch_plug], which it passed; run a profile with those roles" in out
-    assert {key[0] for key in progress.done()} == {
-        "shelly"
-    }  # the kept suite still needs its run; zha's record is written
+    staging.promote(progress)
+    assert {key[0] for key in progress.done()} == {"shelly"}  # the kept suite still needs its run; zha's is promoted
 
 
 TWO_LIGHTS = """
@@ -1537,7 +1567,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     written: list[list[str]] = []
 
-    async def write_records(result, registry, records_dir, date, source, profile):
+    async def write_records(result, registry, records_dir, date, source, profile, into=None):
         written.append([part.suite.integration for part in result.suites if part.recordable])
         return [], []
 
@@ -1715,3 +1745,56 @@ def test_the_dry_run_plan_lists_no_option_case_for_shelly(tmp_path, capsys):
     suites = rig.run_suites(run_args(), profile, FADE_ROSTER)
     rig.print_phases(profile, suites, FADE_ROSTER, None, False)
     assert "predicted_state" not in capsys.readouterr().out
+
+
+def one_staged(tmp_path: Path) -> rig.Staging:
+    """A run's staging holding one record, for the checkout at tmp_path/repo."""
+    repo = tmp_path / "repo"
+    staging = rig.Staging(tmp_path / "reports" / "run.records", repo, repo / "docs" / "test-records")
+    path = staging.directory / "shelly" / "raise_brightness.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("pass\n")
+    staging.add(path, None)
+    return staging
+
+
+@pytest.mark.parametrize(
+    ("code", "unrun", "why"),
+    [
+        (1, 0, "the run didn't end cleanly (exit 1)"),
+        (rig.RESUMABLE, 0, "the run didn't end cleanly (exit 75)"),
+        (0, 2, "2 planned cases have no result"),
+    ],
+)
+def test_a_run_that_doesnt_end_cleanly_leaves_the_checkout_untouched(tmp_path, capsys, code, unrun, why):
+    staging = one_staged(tmp_path)
+    rig.settle_records(staging, code, unrun, None)
+    assert not (tmp_path / "repo").exists()
+    out = capsys.readouterr().out
+    assert f"No test records written to the checkout: {why}. 1 staged in {staging.directory}" in out
+    assert staging.command() in out
+
+
+def test_a_clean_run_promotes_its_records(tmp_path, capsys):
+    staging = one_staged(tmp_path)
+    rig.settle_records(staging, 0, 0, None)
+    assert (tmp_path / "repo" / "docs" / "test-records" / "shelly" / "raise_brightness.md").read_text() == "pass\n"
+    assert "--promote" not in capsys.readouterr().out
+
+
+def test_without_a_ledger_an_unreachable_skip_is_a_case_with_no_result(tmp_path):
+    suite = target_suite(tmp_path)[0]
+    skipped = engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.SKIPPED, unreachable=True)
+    passed = engine.CaseResult("u[light_ct]", "light_ct", "light", engine.Outcome.PASS)
+    result = engine.RunResult([engine.SuiteResult(suite, [skipped, passed], complete=False)])
+    assert rig.unfinished_cases(result, None, [suite], fakes.profile("shelly"), fakes.OPTION_REGISTRY, None) == 1
+
+
+def test_promote_runs_the_staged_dir_alone(tmp_path, monkeypatch, capsys):
+    staging = one_staged(tmp_path)
+    with pytest.raises(SystemExit):
+        rig.main(["--promote", str(staging.directory), "--profile", "lab"])
+    assert "--promote takes only the staged directory" in capsys.readouterr().err
+    monkeypatch.setattr(rig.target, "is_deviceside", lambda path: path == tmp_path / "repo")
+    assert rig.promote_staged(staging.directory) == 0
+    assert (tmp_path / "repo" / "docs" / "test-records" / "shelly" / "raise_brightness.md").exists()

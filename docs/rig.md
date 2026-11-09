@@ -174,8 +174,8 @@ parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git comm
 entries are per suite, keyed by the suite's code at the commit tested, so runs from worktrees with different code
 sit side by side, and a run on one integration never discards another's. A saved case holds while it planned the
 same entities (a profile change reruns it), and a `not observed` one only for an `--unattended` run. An entry goes
-when HA runs another version (a record names one), when its suite's record is written (the record carries it from
-then on), when the run that saved a failure of one of its cases ends (the suite reruns whole, so a record never
+when HA runs another version (a record names one), when its suite's record is promoted into the checkout (the record
+carries it from then on; Test records, below), when the run that saved a failure of one of its cases ends (the suite reruns whole, so a record never
 covers up a failure; the run's report keeps it), or after 30 days untouched. `--no-deploy` saves nothing, as it
 writes no record.
 
@@ -335,7 +335,8 @@ and their paths are printed. When Z2M's coordinator crashed during the run (`ASH
 
 A run also reads HA's log for `WARNING`, `ERROR` and `CRITICAL` lines from `custom_components.deviceside`. Each one
 no step file of the run expects is listed in the summary, keeps the logs and fails the run, so a run that ends clean
-also proves DeviceSide logged nothing amiss; the test records it wrote stand. Another run on the same HA meanwhile
+also proves DeviceSide logged nothing amiss; the test records it staged stay staged, with the command that promotes
+them. Another run on the same HA meanwhile
 can put lines in, so read whose they are before chasing one. A log with no line dated from the run's start (HA
 logging in another time zone) is kept whole and not checked, which the summary says.
 
@@ -346,8 +347,14 @@ rig never sets it.
 
 ### Test records
 
-When every test of an adapter passes, the run writes `docs/test-records/<integration>/<action>.md` in the deviceside
-checkout: the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
+When every test of an adapter passes, the run stages its record, `<integration>/<action>.md`, in `<report>.records/`
+next to its report, and writes it to `docs/test-records/` in the deviceside checkout only when the run ends cleanly:
+exit 0 (no failure, not stopped, the bulbs home, no unexpected DeviceSide log line) with a result for every case it
+planned (an unreachable skip isn't one). Any other end, a crash included, leaves the checkout untouched and prints
+the one command that promotes the staged records, `scripts/rig.py --promote <dir>`, which copies them in and takes
+their suites out of the ledger. It never overwrites a record that changed since staging: it names it and keeps it
+staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
+cleanly writes its record too; the staged copy is a convenience the temp folder may clear. A record holds the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
 suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run
 completes it (Coverage, above). The PR that clears an adapter's `experimental` flag cites one, and
 `cut-release-candidate` and `cut-release` refuse a head where a released adapter's code (its module and the modules it

@@ -17,7 +17,9 @@ locks. Each run deploys and restarts HA onto its own checkout's tree when HA has
 another tests its own code; it reads the deploy state again once it holds its locks, and takes HA exclusively if it must
 deploy after all. Once its deploy is done and HA is back, a run with no option suites steps HA down to shared. Ctrl-C
 mid-deploy waits for the deploy and HA's restart to finish before releasing the locks. The tests are the step files in
-ha_rig/steps, run by ha_rig/engine.py; a full pass of an adapter rewrites its test record.
+ha_rig/steps, run by ha_rig/engine.py; a full pass of an adapter stages its test record next to the run's report,
+and only a run that ends cleanly, with a result for every case it planned, writes it to the checkout
+(ha_rig/staging.py). Any other end prints the one --promote command that does.
 
 Ctrl-C, SIGTERM and SIGHUP stop a run, putting the devices back; a second one leaves them. What a run changes is
 journaled first, in a journal of its own next to the locks (ha_rig/journal.py), so whatever a killed run leaves
@@ -94,6 +96,7 @@ Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] 
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
+       scripts/rig.py --promote DIR
        scripts/rig.py --wait-free [--integration KEY ...]
        scripts/rig.py [--profile NAME] --hold KEY [--hold KEY ...] [--exclusive] [--visual none|profile]
                       [--dry-run] -- COMMAND [ARGS ...]
@@ -155,6 +158,7 @@ from ha_rig.engine import (  # noqa: E402
     in_head,
     load_step_files,
     merge,
+    report_path,
     run,
     unfinished,
     write_records,
@@ -178,6 +182,8 @@ from ha_rig.progress import Done, Progress  # noqa: E402
 from ha_rig.roam import BLUETOOTH_RESET, NAMES, Bulb, GroupError, Roamer, RoamError  # noqa: E402
 from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
 from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa: E402
+from ha_rig.staging import Staging  # noqa: E402
+from ha_rig.staging import display as relative_to  # noqa: E402
 
 TEST_RECORDS_DIR = REPO / "docs" / "test-records"
 SERVICE = ("deviceside", "turn_on_for")
@@ -753,6 +759,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--recover", action="store_true", help="put back what an aborted run left changed, then stop")
     parser.add_argument(
+        "--promote",
+        type=Path,
+        metavar="DIR",
+        help="copy the test records a run staged in DIR (it prints the command) into the checkout's docs/test-records "
+        "and take their suites out of the ledger; no lock, no HA",
+    )
+    parser.add_argument(
         "--roam-check", action="store_true", help="move the profile's roam bulbs to every network and home, no suites"
     )
     parser.add_argument(
@@ -784,7 +797,8 @@ def main(argv: list[str] | None = None) -> int:
     approved()  # refuses the variable it replaced, in every mode
     refuse_conflicts(parser, args, command)
     args.dry_run |= args.check  # like a dry run, it holds no lock and changes nothing
-    colors = args.wait_free or not args.dry_run  # a dry run holds no lock and sets no color, so it clears none
+    # A dry run or a promote holds no lock and sets no color, so it clears none.
+    colors = args.wait_free or not (args.dry_run or args.promote)
     try:
         with handling_signals(leave):  # a run killed while it waits still clears its color
             return wait_or_run(args)
@@ -795,6 +809,13 @@ def main(argv: list[str] | None = None) -> int:
 
 def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, command: list[str]) -> None:
     """Stop, through argparse, on flags that don't go together."""
+    if args.promote and any(value for name, value in vars(args).items() if name != "promote"):  # command included
+        parser.error("--promote takes only the staged directory")
+    refuse_mode_conflicts(parser, args, command)
+
+
+def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, command: list[str]) -> None:
+    """refuse_conflicts, for the test-run modes and probes."""
     if args.deploy_only and (
         args.profile
         or args.no_deploy
@@ -870,6 +891,8 @@ def wait_or_run(args: argparse.Namespace) -> int:
         terms.write(REPO)  # deviceside's household check reads the profiles' terms from here
     except ValueError as err:  # a bad profile must not stop --recover; a run's own refuses it in prepare
         print(f"deviceside's household terms not refreshed: {err}")
+    if args.promote:
+        return promote_staged(args.promote)
     directory = common_dir()
     if args.wait_free:
         locks.wait_free(directory, args.integration)
@@ -893,6 +916,15 @@ def wait_or_run(args: argparse.Namespace) -> int:
     finally:
         if held is not None:
             held.close()
+
+
+def promote_staged(directory: Path) -> int:
+    """--promote: the records a run staged in `directory` into the checkout it staged them for; 0 once all are."""
+    staging = Staging.load(directory.expanduser().resolve())
+    if not target.is_deviceside(staging.repo):
+        raise SystemExit(f"{staging.repo}, where these records were staged for, is no longer a deviceside checkout")
+    left = len(staging.records) - len(staging.promote())
+    return 1 if left else 0
 
 
 def deploy_only(args: argparse.Namespace, directory: Path) -> int:
@@ -1111,6 +1143,11 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
     print_resume(args, setup)
     if setup.progress is not None and not runnable(setup):
         print("Nothing to run: every selected suite is covered (--fresh reruns them).")
+        if unwritten := pending(setup):
+            print(
+                f"{len(unwritten)} of them have no record yet: promote theirs with the --promote command the run that "
+                "finished them printed, or rerun them with --fresh."
+            )
         return 0
     print(f"Locks: {held.claim if held else claim(args, setup)}")
     if args.debug_logs:
@@ -1229,9 +1266,16 @@ def run_approved(
             progress=setup.progress,
             selected=setup.selected,
             budget=budget,
+            pending=pending(setup),
         ),
         aborted=aborted(setup, args.keyword) if setup.progress is not None else None,
     )
+
+
+def pending(setup: Setup) -> set[tuple[str, str]]:
+    """The selected suites with every case saved and no fresh record: an earlier run finished them but didn't end
+    cleanly, so their records were staged and never promoted. A run that ends cleanly writes theirs too."""
+    return {(c.suite.integration, c.suite.name) for c in setup.coverage if c.complete and not c.freshness.fresh}
 
 
 def aborted(setup: Setup, keyword: str | None) -> Callable[[], int]:
@@ -1789,11 +1833,16 @@ async def run_rig(
     progress: Progress | None = None,
     selected: list[Suite] | None = None,
     budget: Budget | None = None,
+    pending: set[tuple[str, str]] | None = None,
 ) -> int:
     """Run the step files, in lanes first when `lanes` (run_phases), then phase by phase, moving the roaming bulbs
-    before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then write a
+    before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then stage a
     test record for each adapter whose every test passed, citing `commit`; with no commit, none: a record nobody can
     trace to a commit proves nothing. Roaming and groups need the admin connection and the bridge (check_tokens).
+
+    The records are staged next to the report (ha_rig/staging.py) and promoted into the checkout only when the run
+    ends cleanly (settle_records); any other end leaves the checkout untouched and prints the command that promotes
+    them. The `pending` suites, finished by an earlier run whose records were never promoted, are staged too.
 
     Z2M's log (for a run that touches it) and HA's go next to the report as `<report>.z2m.log` and `.ha.log`: deleted
     after a clean run, kept and printed after any other, or with `debug_logs`, which also runs HA's DeviceSide and the
@@ -1829,7 +1878,9 @@ async def run_rig(
     expected = dict.fromkeys(pattern for suite in suites for pattern in suite.file.expected_log)
     logs = RunLogs(logs_dir or REPORT_DIR, f"rig run {stamp}", started, keep=debug_logs, expected=expected)
     levels = DebugLevels(Baseline.of(admin or ha, journal, "debug")) if debug_logs else None
-    code = 1  # only a run that returns 0 is clean; any other end keeps the logs
+    staging = staging_for(stamp, profile, progress)
+    code = 1  # only a run that returns 0 is clean; any other end keeps the logs and promotes no record
+    unrun = 0  # the cases the run planned with no result, once it ends 0
     try:
         try:
             await begin_logging(logs, levels, admin, suites, roaming)
@@ -1854,14 +1905,14 @@ async def run_rig(
             )
             result, touched = joined(result, progress, selected)
             if suites:
-                await report(result, ha, registry, commit, profile, stamp, touched, progress)
+                await report(result, registry, commit, profile, staging, stamp, touched | (pending or set()), progress)
         except RoamError as err:
             # A move that failed isn't retried here; the journal keeps where the bulbs are, for --recover. The groups
             # made so far still go, and after a group that couldn't be made, the bulbs still go home. The phases that
             # ran still get their report and records.
             if not isinstance(err, GroupError):
                 stopped, roamer = roamer, None
-            await report_ran(results, ha, registry, commit, profile, stamp)
+            await report_ran(results, registry, commit, profile, staging, stamp)
             if progress is not None:
                 progress.drop_failed()  # the run ends here, so its failed suites rerun whole
             raise SystemExit(f"Roaming stopped: {err}") from None
@@ -1869,9 +1920,60 @@ async def run_rig(
             home, signalled = await wind_down(roamer, stopped, logs, levels, pauses, journal, (bridge, ha, admin))
             end_abort(home, signalled, sys.exception())
         code = end_code(result, home, budget, progress, suites, profile, registry, keyword)
+        if code == 0:
+            unrun = unfinished_cases(result, progress, suites, profile, registry, keyword)
     finally:
         flagged = logs.settle(code == 0)
+        settle_records(staging, 1 if flagged else code, unrun, progress)
     return 1 if flagged else code
+
+
+def staging_for(stamp: str, profile: Profile, progress: Progress | None) -> Staging:
+    """Where the run titled `rig run <stamp>` stages its records: next to its report, as `<report>.records/`."""
+    return Staging(
+        report_path(REPORT_DIR, f"rig run {stamp}").with_suffix(".records"),
+        REPO,
+        TEST_RECORDS_DIR,
+        progress.path.parents[1] if progress is not None else None,
+        profile.name,
+    )
+
+
+def unfinished_cases(
+    result: RunResult,
+    progress: Progress | None,
+    suites: list[Suite],
+    profile: Profile,
+    registry: AdapterRegistry,
+    keyword: str | None,
+) -> int:
+    """How many cases the run planned (`keyword`'s, of `suites`) have no result: with the ledger, those it holds none
+    for; without (--no-deploy), the unreachable skips, which never count as one."""
+    if progress is None:
+        return sum(case.unreachable for part in result.suites for case in part.cases)
+    done = progress.done()
+    return sum(len(left(suite, profile, registry, done, keyword)) for suite in suites)
+
+
+def settle_records(staging: Staging, code: int, unrun: int, progress: Progress | None) -> None:
+    """At the run's end, its staged records: promoted into the checkout when the run ended cleanly (`code` 0) with a
+    result for every case it planned (`unrun` 0); else left staged, with the one command that promotes them. Never
+    raises: it runs as the run ends, whatever ended it."""
+    if not staging.records:
+        return
+    if code == 0 and not unrun:
+        try:
+            staging.promote(progress)
+            return
+        except Exception as err:  # noqa: BLE001 - say so, and leave the command that tries again
+            why = f"promoting them failed: {err}"
+    else:
+        why = f"{unrun} planned cases have no result" if code == 0 else f"the run didn't end cleanly (exit {code})"
+    count = len(staging.records)
+    print(
+        f"\nNo test records written to the checkout: {why}. {count} staged in {staging.directory}; promote them with:"
+    )
+    print(f"  {staging.command()}")
 
 
 async def wind_down(
@@ -2066,36 +2168,37 @@ def saving(progress: Progress | None) -> dict:
 
 async def report_ran(
     results: list[SuiteResult],
-    ha: HAClient,
     registry: AdapterRegistry,
     commit: str | None,
     profile: Profile,
+    staging: Staging,
     stamp: str | None = None,
 ) -> None:
-    """After a failed move, report the phases that ran before it. A report that fails is printed, never raised: the
-    move's error, with its recovery steps, must still show."""
+    """After a failed move, report the phases that ran before it, staging their records. A report that fails is
+    printed, never raised: the move's error, with its recovery steps, must still show."""
     if not results:
         return
     try:
-        await report(RunResult(results), ha, registry, commit, profile, stamp)
+        await report(RunResult(results), registry, commit, profile, staging, stamp)
     except Exception as err:  # noqa: BLE001
         print(f"The phases that ran couldn't be reported: {err}")
 
 
 async def report(
     result: RunResult,
-    ha: HAClient,
     registry: AdapterRegistry,
     commit: str | None,
     profile: Profile,
+    staging: Staging,
     stamp: str | None = None,
     touched: set[tuple[str, str]] | None = None,
     progress: Progress | None = None,
 ):
-    """The run's report, and a test record per fully passed suite when a commit names the tree HA ran. A suite whose
-    cases ran in parts (lanes, then phases, or runs) is joined first; one missing a part writes no record, and says
-    how far it got. With `touched`, only the suites with a case in this session write theirs: an earlier session wrote
-    the rest. A suite whose record is written leaves the ledger (`progress`): the record carries its coverage."""
+    """The run's report, and a test record per fully passed suite when a commit names the tree HA ran, staged in
+    `staging` with its suite's ledger entry (`progress`), which leaves the ledger only when the record is promoted. A
+    suite whose cases ran in parts (lanes, then phases, or runs) is joined first; one missing a part writes no record,
+    and says how far it got. With `touched`, only those suites write theirs: those with a case in this session, and
+    those an earlier one finished whose records were never promoted (pending)."""
     result = merge(result.suites, profile, registry)
     stamp = stamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for suite_result in result.suites:
@@ -2109,19 +2212,20 @@ async def report(
     today = datetime.date.today().isoformat()
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
-    written, kept = await write_records(result, registry, TEST_RECORDS_DIR, today, source, profile.name)
+    written, kept = await write_records(
+        result, registry, TEST_RECORDS_DIR, today, source, profile.name, into=staging.directory
+    )
+    by_path = {
+        staging.directory / part.suite.integration / f"{part.suite.name}.md": part.suite for part in result.suites
+    }
     for path in written:
-        print(f"Wrote {path.relative_to(REPO)}; review the diff before committing it.")
+        suite = by_path.get(path)
+        staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
     for path, narrowed in kept:
         print(
-            f"Kept {path.relative_to(REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "
+            f"Kept {relative_to(path, REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "
             "run a profile with those roles, or delete the record to narrow it."
         )
-    if progress is not None:
-        for suite_result in result.suites:
-            if TEST_RECORDS_DIR / suite_result.suite.integration / f"{suite_result.suite.name}.md" in written:
-                progress.drop(suite_result.suite)
-        progress.save()
 
 
 def report_saved(
