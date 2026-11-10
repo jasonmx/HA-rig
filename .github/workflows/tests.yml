@@ -14,7 +14,8 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   pytest:
@@ -24,7 +25,9 @@ jobs:
       pull-requests: read
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The rig imports deviceside's registry and actions. A PR whose body has `Tests-with: jasonmx/deviceside#N`
       # tests against that deviceside PR; anything else tests against deviceside's newest line of work. The script
@@ -35,7 +38,7 @@ jobs:
           RIG_PR: ${{ github.event.pull_request.number }}
         run: scripts/ci_deviceside.sh ../deviceside "$RIG_PR"
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
