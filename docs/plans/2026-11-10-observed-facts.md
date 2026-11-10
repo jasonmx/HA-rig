@@ -179,7 +179,9 @@ Decisions taken while building, beyond the Design above:
    --unattended --debug-logs --fresh`, from the deviceside worktree) was captured only from part way through: the
    first listener used the non-admin token. Script `listen.py` and the partial capture `wire.jsonl` are in
    `/private/tmp/claude-501/-Users-jason-projects-ha-ha-rig-wt-observed-facts/83ab9897-4f19-4856-9b88-150fb7cedc94/scratchpad/spike/`
-   (household entity IDs: never into the repo). Already seen: Hue's raise sends `transition_time: 8972` (ms, from the
+   (household entity IDs: never into the repo); 137 events. Run 1 exited 1 on case failures unrelated to the spike
+   (Hue `sets_after_a_soft_off[group]`, Z2M `hue_stop_raise[light_color]`; report
+   `$TMPDIR/deviceside-rig/rig-run-2026-11-10-123905.md`), lights put back, records only staged. Already seen: Hue's raise sends `transition_time: 8972` (ms, from the
    brightness at the call), a likely jitter that `observed.normalize` must reduce without dropping it. Easier now: let
    the rig's own trace do the spike: print each case's calls into the run report (step 4's "full calls in the run
    report", not built yet), run twice and diff. Then fill `normalize` and write the results here.
