@@ -147,26 +147,43 @@ wrong call would let slip past tests.
 
 ## Handoff
 
-**Done (step 1).** deviceside draft PR jasonmx/deviceside#329, branch `wt/wire-trace`, worktree
-`~/projects/ha/deviceside-wt/wire-trace`; this branch's draft PR comes from `pr-draft`. Decisions taken while building
-the trace, which steps 3 and 4 build on:
+**Done.** Step 1 (jasonmx/deviceside#329, draft, branch `wt/wire-trace`, worktree `~/projects/ha/deviceside-wt/wire-trace`;
+this branch's draft PR is #48). Steps 3 to 6 are coded in WIP commit `18b331a` on `wt/observed-facts` (not pushed):
+`ha_rig/observed.py` with `tests/test_observed.py`; `HAClient.subscribe_wire` / `wire_tap` / `drain_wire` /
+`set_logger_level`; `_CaseRun.slots` / `tap` / `trace` and `starting_state` in the engine; `CaseResult.trace` and `.lent`,
+saved in the ledger; `_Run.lent` in the automated phase; `observations` / `write_observed` / `load_observations`; the
+`pass (observed <date>)` suffix, `LENT` in `Record.read` and the footnote; `--reobserve`; `coverage.observed_hints`
+and `Progress.traces`; a Baseline `logger_level` kind that `DebugLevels.raise_wire` holds for every run with an admin
+token (`begin_logging`). Engine, coverage and observed tests for the lend pass.
 
-- Event `deviceside_wire`, data `{entity_id, transport, command, params}`, fired *before* the send. On while
-  `custom_components.deviceside.wire` is at DEBUG (a child of `custom_components.deviceside`, so `--debug-logs` turns
-  it on too); `core/wire.py`, `wire_enabled()`.
-- Transports and command names: `zcl` `0x<cluster>/0x<cmd>` (params by zigpy name; a groupcast is `{"args": [...]}` on
-  the ZHA group's light entity; Hue's multiColor is `0xfc03/0x00` `{"data": <hex>}`); `clip`
-  `<light|grouped_light>.set_state` (aiohue kwargs, Nones dropped) or `.put` (raw body), the entity found from the
-  resource ID through the registry; `rpc` `<Component>.<Set|DimStop|SetConfig>` (params without `id`); `mqtt` `set`
-  (the payload); `matter` `OnOff.OnWithTimedOff`; `ha` `light.turn_on` (data without `entity_id`, from the ZHA and
-  Z2M `turn_on_for`).
-- `entity_id` is the target's `reported_id` (the switch_as_x light, where one wraps the switch). A Hue room stop that
-  writes per light, and a scene, trace each member light under its own entity, so the rig maps them to member slots.
-- Not traced: reads (Z2M `get` and `read` publishes included), `homeassistant.update_entity` refreshes, and Z2M
-  `ensure_options` (bridge settings, not device calls). If the spike shows a pattern depends on a Z2M option, revisit.
+Decisions taken while building, beyond the Design above:
 
-**Next:** step 2, the spike. Deploy `wt/wire-trace` (the rig runs from the deviceside worktree; check
-`pre_authorized` or the sensor first), run `stop`, `set_attributes` and `raise_hue` `--unattended` twice with the trace
-on, compare the sequences, and write the results here. Then steps 3 to 7.
+- **Only an admin user may subscribe to `deviceside_wire`** (HA refuses custom events to others), so the tap sits on
+  the admin connection; no `HA_ADMIN_TOKEN`, no trace, no lend (`begin_logging` says so). The rig's own `set` in steps
+  first pings the admin socket (`drain_wire`) so the wire events of earlier calls land in the tap before it.
+- **Slots:** the case's own role is `target`, another role its name, a group's members `<slot>.member<n>`. With
+  `target`, and the case's role named `target` in the starting-state hash, a pass on one role lends to another.
+- **Rows:** one per device behind the case's entities (maker = registry manufacturer, model = `model_id` or model).
+  A fail row only for a person's `n` (`NOT_SEEN`); a failure in the steps writes none. A lent case adds none.
+- `_observed.md` is written in `report()` before the commit check (observations stand whatever the code), staged with
+  no ledger entry. Known gap: rows from a resumed session's saved cases are re-dated to the finishing session.
+
+**Next:**
+
+1. Fix the full suite: `tests/test_rig.py::test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal[2]` fails
+   and errors because the baseline now holds `logger_level:custom_components.deviceside.wire` (FakeHA's `call_service`
+   has no `logger.set_level`, so `raise_wire` prints `stays as it is: 'entity_id'` but still records the hold). Teach
+   FakeHA `logger.set_level`, then decide whether the test's expected baseline should include it. Run the rest of the
+   suite (`-x` stopped there).
+2. Spike (step 2) is not done. Run 1 (`--profile lab --action stop --action set_attributes --action raise_hue
+   --unattended --debug-logs --fresh`, from the deviceside worktree) was captured only from part way through: the
+   first listener used the non-admin token. Script `listen.py` and the partial capture `wire.jsonl` are in
+   `/private/tmp/claude-501/-Users-jason-projects-ha-ha-rig-wt-observed-facts/83ab9897-4f19-4856-9b88-150fb7cedc94/scratchpad/spike/`
+   (household entity IDs: never into the repo). Already seen: Hue's raise sends `transition_time: 8972` (ms, from the
+   brightness at the call), a likely jitter that `observed.normalize` must reduce without dropping it. Easier now: let
+   the rig's own trace do the spike: print each case's calls into the run report (step 4's "full calls in the run
+   report", not built yet), run twice and diff. Then fill `normalize` and write the results here.
+3. Steps 6 (docs: `docs/rig.md` Observed tests, Coverage, Test records; README `--help` block via
+   `COLUMNS=100 scripts/rig.py --help`) and 7 as planned.
 
 **Open:** #329's CLAUDE.md sentence awaits Jason's review. No audit has run on either PR.
