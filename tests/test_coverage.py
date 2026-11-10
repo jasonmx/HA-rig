@@ -219,7 +219,7 @@ def test_a_broader_record_covers_the_narrower_profile_and_a_stale_one_warns_it_w
 
 
 def test_a_missing_observed_case_hints_its_lend_when_its_twins_last_calls_are_covered(tmp_path):
-    seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": 1}))])
+    seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": 1}, {}))])
     acme, newer = ObservedDevice("Acme", "S3", "2.0"), ObservedDevice("Acme", "S3", "3.0")
     twin, watched = "t[switch_plug]", "t[switch_plug] observed"
     planned = [

@@ -10,7 +10,6 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
 from ha_rig.client import HAClient, HAError, device_ieee
@@ -127,10 +126,11 @@ class FakeHA(HAClient):
         self._z2m_responses: list[asyncio.Queue[str]] = []  # live bridge/response/device/remove subscriptions
         self._z2m_device_topics: dict[str, asyncio.Queue[str]] = {}  # live zigbee2mqtt/<name> subscriptions
         # DeviceSide's wire trace, once subscribed (subscribe_wire): each DeviceSide call is one `fake` call on the
-        # entity, with the call's data, unless `wire_for` gives the (transport, command, params) it sends instead.
+        # entity, with the call's data, unless `wire_for` gives the (transport, command, params[, options]) it sends
+        # instead.
         self._taps: list[tuple[frozenset[str], list[dict]]] = []
         self._wire_events: int | None = None
-        self.wire_for: Callable[[str, dict], list[tuple[str, str, Any]]] | None = None
+        self.wire_for: Callable[[str, dict], list[tuple]] | None = None
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
@@ -377,8 +377,11 @@ class FakeHA(HAClient):
         if self._wire_events is None:
             return
         params = {key: value for key, value in data.items() if key != "entity_id"}
-        for transport, command, sent in self.wire_for(action, data) if self.wire_for else [("fake", action, params)]:
-            self.wire({"entity_id": data["entity_id"], "transport": transport, "command": command, "params": sent})
+        for transport, command, sent, *options in (
+            self.wire_for(action, data) if self.wire_for else [("fake", action, params)]
+        ):
+            event = {"entity_id": data["entity_id"], "transport": transport, "command": command, "params": sent}
+            self.wire(event | ({"options": options[0]} if options else {}))
 
     def _mqtt_publish(self, topic: str, payload: dict) -> None:
         """A Z2M bridge request, or a device's `/get`, answered while the device is there."""

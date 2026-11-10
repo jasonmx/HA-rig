@@ -35,7 +35,6 @@ from typing import Any
 
 from .engine import Case, CaseResult, Outcome, Record, Suite, adapters_for, applies, cases, narrows
 from .observed import Observation
-from .observed import lend as lend_observed
 from .profile import Profile
 from .progress import Progress
 
@@ -270,7 +269,7 @@ def observed_hints(
         for case in suite_coverage.missing:
             if not case.observed or (trace := traces.get(case.twin or "")) is None:
                 continue
-            if (row := lend_observed(rows, trace.state, trace.sequence, trace.devices)) is None:
+            if (row := trace.lent_by(rows)) is None:
                 continue
             hint = f"observed {row.date}, if the calls are unchanged"
             if row.device not in trace.devices:
