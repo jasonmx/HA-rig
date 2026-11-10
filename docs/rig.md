@@ -320,13 +320,13 @@ Such a test runs twice, so you are asked only what a machine can't check:
    `nothing to observe` and the reason.
 
 `roles: [<role>]` in `observe:` limits the observed run to those roles, and `only: [<integration>]` to those
-integrations; the rest run automated only. `--unattended` skips the observed runs and reports them `not observed`.
-They don't fail, but a test counts toward a test record only when both of its runs pass.
+integrations; the rest run automated only. `--unattended` doesn't ask, so an observed case is lent a pass where
+`_observed.md` covers its calls (below) and else reports `not observed`. Neither fails, but a test counts toward a test record only when both of its runs pass.
 
 **An observed pass proves a call pattern, not a test** (`ha_rig/observed.py`). It shows how a maker's devices,
 started from a state, respond to a sequence of calls, and to any sequence that sequence begins with: a device can't
 know which calls are still to come. Every attended answer adds a row per device to the integration's
-`docs/test-records/<integration>/_observed.md`: maker, model, firmware, starting state, the calls its automated run
+`docs/test-records/<integration>/_observed.md`: maker, model, firmware, starting state, the calls the observed case
 sent, the case it was seen in, the date and `pass` or `fail` (a `n`; a step that broke adds nothing). A row with the
 same device, state and calls is replaced. Its Calls section maps each call's hash to the call.
 
@@ -392,8 +392,9 @@ staging: it names it and keeps it staged. A staged suite stays in the ledger, so
 cleanly, running any case, writes its record too. The staged copy sits in the temp folder, which the OS may clear:
 when every selected suite is covered there is no such run, and only `--promote` or `--fresh` writes the record.
 
-A run that observed anything stages its integrations' `_observed.md` the same way, whether or not a suite record
-is written, and `--promote` copies it in with the records: observations stand whatever the code.
+A run that observed anything writes its integrations' `_observed.md` straight into the checkout, merged with the rows
+there, whether or not a suite record is written and however the run ends: observations stand whatever the code, and a
+`fail` row only blocks a lend once it is there. Review the diff before committing it.
 
 A record holds the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
 suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run

@@ -2437,7 +2437,7 @@ class Device:
 
 
 async def entity_makers(ha: HAClient) -> dict[str, Maker]:
-    """The maker, model and firmware of the device behind each entity that has one."""
+    """The maker, model and firmware of the device behind each entity whose device names a maker and model."""
     listed, registered = await asyncio.gather(
         ha.command({"type": "config/entity_registry/list_for_display"}),
         ha.command({"type": "config/device_registry/list"}),
@@ -2445,11 +2445,11 @@ async def entity_makers(ha: HAClient) -> dict[str, Maker]:
     devices = {device["id"]: device for device in registered}
     found = {}
     for entry in listed["entities"]:
-        if (device := devices.get(entry.get("di"))) is not None:
-            model = device.get("model_id") or device.get("model") or "unknown"
-            found[entry["ei"]] = Maker(
-                device.get("manufacturer") or "unknown", model, device.get("sw_version") or "unknown"
-            )
+        if (device := devices.get(entry.get("di"))) is None:
+            continue
+        # A device that names no maker or model can't lend to, or take a block from, another unnamed one.
+        if (maker := device.get("manufacturer")) and (model := device.get("model_id") or device.get("model")):
+            found[entry["ei"]] = Maker(maker, model, device.get("sw_version") or "unknown")
     return found
 
 

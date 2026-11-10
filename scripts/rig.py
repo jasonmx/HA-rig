@@ -2261,9 +2261,11 @@ async def report(
         if partial := suite_result.partial:
             print(f"{suite_result.suite.integration} / {suite_result.suite.name}: {partial}")
     print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
-    # What a person saw stands whatever the code (ha_rig/observed.py), so it is kept even with no commit.
-    for path in write_observed(result, registry, TEST_RECORDS_DIR, today, into=staging.directory):
-        staging.add(path, None)
+    # What a person saw stands whatever the code (ha_rig/observed.py), so it goes straight into the checkout, merged
+    # with the rows there, even with no commit or a failed run: a fail row only blocks a lend once it is there, and a
+    # failed observation always fails its run, which would leave it staged.
+    for path in write_observed(result, registry, TEST_RECORDS_DIR, today):
+        print(f"Wrote {display(path, REPO)}; review the diff before committing it.")
     if commit is None:
         print("No test records: no commit names the tree HA ran (--no-deploy, or origin moved before the deploy).")
         return

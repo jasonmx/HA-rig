@@ -2836,6 +2836,16 @@ async def test_what_a_person_saw_fail_is_a_fail_row_and_a_failed_step_is_none(tm
     assert engine.observations(saw_else, "2026-11-01") == {}
 
 
+async def test_a_fail_row_stops_a_lend_of_the_pass_it_follows(tmp_path):
+    _, first = await traced_run(tmp_path, answers("", "y")[1])
+    [trace] = [case.trace for case in first.suites[0].cases if case.id == WATCHED]
+    passed = trace.rows(AUTOMATED, "2026-11-01", True)
+    _, saw_else = await traced_run(tmp_path, answers("", "n")[1])
+    [failed] = engine.observations(saw_else, "2026-11-05")["shelly"][0]
+    _, second = await traced_run(tmp_path, rows=[*passed, failed])
+    assert outcomes(second)[WATCHED] == (Outcome.NOT_OBSERVED, "")
+
+
 async def test_a_trace_keeps_the_calls_per_slot_and_the_rigs_own_ha_calls_in_order(tmp_path):
     text = OBSERVED.replace("    steps:\n", "    steps:\n      - set: {state: on}\n", 1)
     ha, result = await traced_run(tmp_path, text=text)

@@ -157,8 +157,8 @@ def lend(rows: Iterable[Observation], state: str, candidate: Sequence, devices: 
     rows, devices = list(rows), list(devices)
     if not devices or not candidate:
         return None
-    for model in {device.model for device in devices}:
-        on_model = [row for row in rows if row.device.model == model]
+    for maker, model in {(device.maker, device.model) for device in devices}:
+        on_model = [row for row in rows if (row.device.maker, row.device.model) == (maker, model)]
         failed = max((row.date for row in on_model if blocks(row, state, candidate)), default=None)
         passed = max((row.date for row in on_model if covers(row, state, candidate)), default=None)
         if failed is not None and (passed is None or passed <= failed):
