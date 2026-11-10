@@ -7,25 +7,30 @@ Issue: #36. Branch: `wt/observed-facts`.
 Issue #36: when an unattended run reruns a suite, it writes `not observed` over an earlier observed pass, so the
 record narrows. Jason's rule (2026-11-10) reframes the issue:
 
-- **An observed run proves a capability.** It shows how a device responds to a call pattern (for example, which
-  color-change pattern doesn't jump). Once observed, the capability stays proven.
-- **A code change that still sends the same calls needs no new observed run.**
-- **The approach is optimistic.** Firmware upgrades, HA upgrades, other models from the same maker, other entities
-  and other roles never void an observation. An occasional regression will be missed; users report it, and an
-  attended run then records the failure.
-- **Only these void or block a lend:** a different call pattern (fingerprint), an edited test, or an observed
-  failure on that model.
+- **An observed run proves a call pattern, not a test.** It shows how a maker's devices respond to a sequence of calls
+  from a given starting state (for example, which color-change pattern doesn't jump). Once observed, the pattern
+  stays proven, whichever test sends it.
+- **Prefixes are covered.** A device can't know which calls are still to come, so observing raise-stop-raise also
+  observed raise-stop, from the same starting state.
+- **The approach is optimistic.** Firmware upgrades, HA upgrades, other models from the same maker, other entities,
+  roles and tests, and timing between calls never void an observation. An occasional regression will be missed;
+  users report it, and an attended run then records the failure.
+- **Only these block a lend:** calls that no observed pass covers, or an observed failure on that model whose
+  sequence the candidate begins with.
 
-The observations live in the deviceside test records, in a new `## Observed` section. That section is the only
-store: they ride the existing staging/promote path (`ha_rig/staging.py`), stay public, and are versioned with the
-code they describe. No deviceside record has an observed pass today, so nothing needs migrating.
+Observations live in deviceside, in one file per integration, `docs/test-records/<integration>/_observed.md`. One
+file per integration is needed because a prefix can match across suites (raise-stop-raise is in the raise suite,
+raise-stop in the stop suite). `check_release.py` only reads `<action>(-<option>).md`, so it skips this file. It is
+staged and promoted with the records (`ha_rig/staging.py`), stays public, and is versioned with the code. No
+deviceside record has an observed pass today, so nothing needs migrating.
 
 ## Coordination
 
-Intent: Observed results are kept in each record's `## Observed` section, keyed by test, maker and call fingerprint.
-A run lends an observed pass when its automated twin sends the same calls, so an unattended run never narrows a
-record. Closes #36.
-Touches: ha_rig/engine.py, ha_rig/client.py, ha_rig/coverage.py, ha_rig/staging.py, docs/rig.md, README.md, tests/
+Intent: Observed results are kept per integration in `_observed.md`, keyed by maker, starting state and call sequence.
+A run lends an observed pass when its automated twin's calls are covered by an observed pass, prefixes included, so an
+unattended run never narrows a record. Closes #36.
+Touches: ha_rig/engine.py, ha_rig/client.py, ha_rig/coverage.py, ha_rig/staging.py, ha_rig/observed.py,
+docs/rig.md, README.md, tests/
 Tests-with: jasonmx/deviceside#<wire-trace PR>
 Depends-on: jasonmx/deviceside#<wire-trace PR>
 
@@ -38,57 +43,66 @@ Depends-on: jasonmx/deviceside#<wire-trace PR>
   (`shelly/rpc.py`) and MQTT (`zigbee2mqtt/bridge.py`). It fires the HA event `deviceside_wire` only while the logger
   `custom_components.deviceside.wire` is at DEBUG. `params` carries only the payload, never the target's addressing
   (IEEE, Hue resource ID, Shelly ID, MQTT device topic). The target goes in `entity_id`. Reads are not traced.
-- **CLAUDE.md** ("Proof follows the call"): one sentence on what a row in `## Observed` proves. An observed pass
-  proves a maker's devices respond as seen to that fingerprint's calls. It stands across firmware, HA and code until
-  the calls change, the test changes, or an observed failure on a model blocks lends to that model. A rule change is
-  outward-facing, so Jason reviews that sentence.
-- **`check_release.py --records`**: confirm it ignores the new section, and add a test that pins this.
+- **CLAUDE.md** ("Proof follows the call"): one sentence on what an `_observed.md` pass proves. A maker's devices,
+  started from that state, respond as seen to that call sequence and to any sequence it begins with. It stands across
+  firmware, HA and code; an observed failure on a model blocks lends to that model for sequences that begin with the
+  failed one. A rule change is outward-facing, so Jason reviews that sentence.
+- **`check_release.py --records`**: add a test pinning that `_observed.md` is never read as a record.
 - Unit tests check that each transport emits the trace and that no addressing reaches `params`.
 
 ### rig PR
 
-**Capture and fingerprint (`client.py`, `engine.py`)**
+**Capture (`client.py`, `engine.py`)**
 - Subscribe to `deviceside_wire`, as `client.py` already subscribes to `state_changed`. Raise the wire logger with
   the `set_log_level` / `Baseline` that `--debug-logs` already uses, and restore it afterwards.
-- During a case's `steps` (not its setup), keep the events for that case's entities only, which keeps parallel lanes
-  apart.
-- The fingerprint is each entity's ordered list of `(transport, command, params)`, with consecutive repeats collapsed.
-  Entities are ordered by their role or member slot, never by entity ID. Interleaving between entities and timing
-  are ignored. It is stored on `CaseResult` as a 12-hex hash. The run report lists the full calls.
+- During a case's `steps`, keep the events for that case's entities only, which keeps parallel lanes apart. Steps
+  that call HA services directly (not a deviceside action) bypass the trace, so the rig adds them itself as
+  `("ha", "<domain>.<service>", data)` in order.
+- **Starting state:** the case's `setup` steps as written, with entities replaced by their role or member slot,
+  hashed. This uses the rig's own definition of the setup, not the trace, because setup often uses plain HA calls.
 
-**Record (`engine.py`: `Record`, `render_record`, `write_records`)**
-- A new `## Observed` table, written after `## Tests`. Columns: test, maker, model, firmware, fingerprint, test
-  digest, date, result (`pass` / `fail`). `Record.read` parses it.
-- **Writing:** start from the rows of the existing record in `records_dir`. Add a row for each observed case this run
-  actually observed (attended pass or fail). A row with the same (test, maker, model, firmware, fingerprint, digest)
-  is replaced, so only its date changes. Drop rows whose test no longer exists in the step file. `not observed`
-  adds nothing. The rows carry forward even when the #35 narrowing rule keeps the record.
-- **Tests table:** a lent observed case shows `pass (observed <date>)`. `CASE_ROW` parsing strips that suffix, as it
-  strips `FIRMWARE_FACT`.
-- The footnote is one line on what a lent observed pass means.
+**Call sequences (`ha_rig/observed.py`, new)**
+- A call is `(transport, command, params)`, normalized (step 2's spike settles which fields need it) and hashed to 6
+  hex characters. A sequence is, for each slot (role or member slot, never an entity ID), the ordered list of call
+  hashes, with consecutive repeats collapsed. Interleaving between slots and timing are ignored.
+- **Covers:** a pass with sequence P covers a candidate C when the starting states match, the slots match, and for
+  each slot C's list is a prefix of P's (equal counts as a prefix).
+- **Blocks:** a fail with sequence F on model M blocks C on M when F's list is a prefix of C's for every slot and the
+  starting states match, and when the fail is newer than the latest pass on M that covers C. A failure of the longer
+  sequence never blocks a shorter one.
+- Pure functions, unit-tested without HA.
+
+**The `_observed.md` file (`observed.py`; written via `write_records`)**
+- `## Observed`: one row per observation: maker, model, firmware, starting state (hash), sequence (per slot:
+  `slot: h1 h2 …`), observed in (`test[role]`, for information only), date, result (`pass` / `fail`).
+- `## Calls`: a legend from each call hash to its readable call, so a user's regression report can be checked
+  against what was observed.
+- **Writing:** read the integration's file from `records_dir`. Add a row for each case this run actually observed
+  (attended pass or fail). A row with the same (maker, model, firmware, starting state, sequence) is replaced, so
+  only its date and "observed in" change. `not observed` adds nothing. No pruning: rows are few and a pattern
+  can come back. It is staged and promoted like a record, and is written whenever a run observed something, even if
+  no suite record is written.
+- **Suite record:** a lent observed case shows `pass (observed <date>)` in its Tests table, plus a one-line footnote
+  pointing to `_observed.md`. `CASE_ROW` parsing strips the suffix, as it strips `FIRMWARE_FACT`.
 
 **Lending (`engine.py`, observed phase)**
 - Every observed test takes part, with no flag.
-- Lending happens after the automated twin has run, because it needs the twin's fingerprint from this run. An
-  observed case is lent (not run, not asked, result `PASS` with an observed origin) when the record has a `pass` row
-  that matches all of these:
-  - the same test name (any role), digest and fingerprint as the twin's
-  - the same maker as every device in the case
-  - no `fail` row for one of the case's models that is newer than the latest `pass` on that model
-- If the twin passed but captured no trace, or there is no matching row, nothing is lent. The observed case runs
-  attended, or reports `not observed` when unattended. This is what fixes #36: an unattended run writes
-  `not observed` only where no observation covers the calls the code sends now.
-- An attended run still lends. Add `--reobserve` to force observed cases to run (it reruns everything they would
-  have lent), for spot checks after a major firmware upgrade. README `--help` block is regenerated.
+- Lending happens after the automated twin has run, because it needs the twin's sequence from this run. An observed
+  case is lent (not run, not asked, result `PASS` with an observed origin) when a `pass` row covers the twin's
+  sequence, every device in the case has that row's maker, and no fail row blocks it on the case's models.
+- If the twin passed but captured no trace, or no row covers it, nothing is lent. The observed case runs attended,
+  or reports `not observed` when unattended. This is what fixes #36.
+- An attended run still lends. `--reobserve` forces observed cases to run, for spot checks after a major firmware
+  upgrade. The README `--help` block is regenerated.
 - The ledger saves a lent result like any other, for resume.
 
 **Coverage (`coverage.py`)**
-- `--coverage` can't confirm a lend without a run (it has no fingerprint). It shows an observed case with a matching
-  row as `observed <date>, if the calls are unchanged`, and counts it as covered only for an unattended plan. It also
-  notes, for information, rows observed on another firmware or model than the profile's devices.
+- `--coverage` can't confirm a lend without a run (it has no sequence yet). For each observed case, it shows whether
+  an earlier run's twin sequence (from the ledger, if any) is covered: `observed <date>, if the calls are unchanged`.
+  It also notes, for information, rows observed on another firmware or model than the profile's devices.
 
 **Out of scope:** test-level `firmware_fact` (ledger-based) stays as it is. A follow-up issue considers moving it to
-this record-based, optimistic model.
+this call-based, optimistic model.
 
 **Docs:** `docs/rig.md` (Observed, Records, Coverage, Firmware facts cross-reference); `coverage.py` docstring.
 
@@ -97,34 +111,36 @@ this record-based, optimistic model.
 1. `pr-draft` this plan. In a deviceside worktree, build the wire trace and open its draft PR, then fill in the
    `#<wire-trace PR>` placeholders above.
 2. **Spike:** deploy that worktree; run the suites with observed tests (`stop`, `set_attributes`, `raise_hue`)
-   `--unattended` twice with the trace on. Confirm the fingerprints match across the two runs at the same code. Where
+   `--unattended` twice with the trace on. Confirm the sequences match across the two runs at the same code. Where
    they don't, normalize the field that jitters (round it, or keep only its key), but never drop a field that decides
-   the pattern, such as a transition time. Write the result into the plan.
-3. Capture and fingerprint on `CaseResult`; full calls in the run report.
-4. `## Observed` read/write in `Record`, `render_record`, `write_records`; the carry-forward, replace and prune rules.
-5. The lend in the observed phase; `--reobserve`; the README `--help` block.
-6. `--coverage` wording; docs.
+   the pattern, such as a transition time. Also note which observed tests share prefixes today. Write the results
+   into the plan.
+3. `observed.py`: sequences, covers, blocks, the file's read and write.
+4. Capture in `client.py` and the engine: sequences on `CaseResult`, full calls in the run report.
+5. The lend in the observed phase; writing `_observed.md` through staging; the suite record's suffix and footnote.
+6. `--reobserve`, the README `--help` block, `--coverage` wording, docs.
 7. Live check (below), `/audit-code`, then mark both PRs ready. The deviceside PR merges first; then `gh run rerun`
    the rig PR's Tests runs before merging.
 
 ## Verification
 
 - Unit tests (`tests/`, fakes):
-  - `## Observed` round-trips; rows carry forward through unattended runs and through a #35 keep.
-  - Same key replaces the row; a deleted test prunes its rows.
-  - Lend when test, digest, maker and fingerprint match, on another model, firmware or role.
-  - No lend when the fingerprint differs, the twin captured nothing, the maker differs, or a newer `fail` on that
-    model exists.
-  - An unattended run with a lend writes `pass (observed …)`, not `not observed`.
-  - `--reobserve` runs the observed cases.
-- `.venv/bin/pytest`, `pre-commit run --all-files`, and `tests/test_rig.py` (the `--help` block).
-- Live, through `scripts/rig.py` behind its gate, on one suite:
-  1. Attended: the `## Observed` rows are written.
-  2. A no-op adapter change, then `--unattended`: the observed cases are lent and the record shows
-     `pass (observed …)`.
+  - `observed.py`: equal sequences cover; a prefix covers; a longer one doesn't; the starting state must match; the
+    slots must match; repeats collapse.
+  - Blocks: a fail on M blocks sequences that begin with it on M only; a newer pass on M lifts it; a fail of
+    raise-stop-raise doesn't block raise-stop.
+  - `_observed.md` round-trips; same key replaces; rows survive unattended runs and #35 keeps; promoted with records.
+  - Lend across tests, suites, roles, models and firmware of one maker; no lend for another maker, a missing trace,
+    or an uncovered sequence.
+  - An unattended run with a lend writes `pass (observed …)`, not `not observed`; `--reobserve` runs them.
+- deviceside: the `check_release.py` test that `_observed.md` isn't a record.
+- `.venv/bin/pytest`, `pre-commit run --all-files`, `tests/test_rig.py` (the `--help` block).
+- Live, through `scripts/rig.py` behind its gate:
+  1. Attended, on the suite with the longer sequence: rows are written to `_observed.md`.
+  2. `--unattended` on a suite whose observed test is a prefix of it: lent, `pass (observed …)`.
   3. Change the adapter's call on a scratch branch, then `--unattended`: `not observed`, no lend.
 
 ## Model
 
-opus: two repos, a rule change in deviceside's `CLAUDE.md`, a new section in a public record format, and a
-fingerprint normalization that a wrong call would let slip past tests.
+opus: two repos, a rule change in deviceside's `CLAUDE.md`, a new public file format, and a call normalization that a
+wrong call would let slip past tests.
