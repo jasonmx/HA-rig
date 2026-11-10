@@ -32,7 +32,7 @@ from .client import HAClient, HAError, device_ieee
 from .journal import Journal
 from .observed import FILE as OBSERVED_FILE
 from .observed import Device as Maker
-from .observed import Observation, ObservedFile, Trace, lend, sequence, short_hash
+from .observed import Observation, ObservedFile, Trace, lend, render_call, sequence, short_hash
 from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
 _LOGGER = logging.getLogger(__name__)
@@ -2562,6 +2562,21 @@ def report_path(directory: Path, title: str) -> Path:
     return directory / f"{title.replace(' ', '-').replace(':', '')}.md"
 
 
+def calls(suite_result: SuiteResult) -> list[str]:
+    """The report's calls section: each traced case's starting state and, per slot, the calls it sent as hashed (a
+    run's own, or the twin's a lent case took), so two runs of the same code can be diffed for calls that jitter."""
+    lines = []
+    for case in suite_result.cases:
+        if (trace := case.trace) is None:
+            continue
+        lent = f", lent from {case.lent}" if case.lent else ""
+        lines.append(f"- `{case.id}`: state `{trace.state}`{lent}")
+        for slot, hashes in trace.sequence:
+            lines.append(f"  - {slot}")
+            lines += [f"    - `{digest}` `{render_call(trace.legend[digest])}`" for digest in hashes]
+    return ["", "### Calls", "", *lines] if lines else []
+
+
 def write_report(result: RunResult, directory: Path, title: str) -> Path:
     """Every suite's table with each failure's and skip's reason, for any run: failed, partial or unattended."""
     lines = [f"# {title}"]
@@ -2571,6 +2586,7 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
         if partial := suite_result.partial:
             lines += [f"{partial}: no record.", ""]
         lines += table(suite_result, details=True)
+        lines += calls(suite_result)
     directory.mkdir(parents=True, exist_ok=True)
     path = report_path(directory, title)
     path.write_text("\n".join(lines) + "\n")

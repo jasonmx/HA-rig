@@ -170,7 +170,9 @@ suite's record.
 lock, no deploy, nothing written. A suite is `covered`, `partial N/M` with its missing cases and the entities they
 need, or `uncovered`, with its record stale (naming the files changed since) or missing. It ends with the total and
 every device the missing cases need: what to power up for the next run. With no selection it covers the whole
-profile, which is the RC view, and exits 0 only when every suite is covered.
+profile, which is the RC view, and exits 0 only when every suite is covered. It can't confirm a lend (Observed tests,
+below) without a run, so a missing observed case whose automated twin's last saved calls an `_observed.md` pass covers
+says `observed <date>, if the calls are unchanged`, noting a pass seen on another model or firmware.
 
 **The ledger.** A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's
 parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). Its
@@ -321,12 +323,36 @@ Such a test runs twice, so you are asked only what a machine can't check:
 integrations; the rest run automated only. `--unattended` skips the observed runs and reports them `not observed`.
 They don't fail, but a test counts toward a test record only when both of its runs pass.
 
+**An observed pass proves a call pattern, not a test** (`ha_rig/observed.py`). It shows how a maker's devices,
+started from a state, respond to a sequence of calls, and to any sequence that sequence begins with: a device can't
+know which calls are still to come. Every attended answer adds a row per device to the integration's
+`docs/test-records/<integration>/_observed.md`: maker, model, firmware, starting state, the calls its automated run
+sent, the case it was seen in, the date and `pass` or `fail` (a `n`; a step that broke adds nothing). A row with the
+same device, state and calls is replaced. Its Calls section maps each call's hash to the call.
+
+- **A call** is what DeviceSide's wire trace (the `deviceside_wire` event, on while its
+  `custom_components.deviceside.wire` logger is at DEBUG) says a transport sent: `(transport, command, params)`, with
+  no device addressing, plus the rig's own HA service calls in steps. The starting state is the case's `setup` as
+  written, with entities replaced by their slot. **A sequence** is, per slot (`target` for the case's role, another
+  role by name, `<slot>.member<n>` for a group's members), the calls in order, repeats collapsed; timing and
+  interleaving between slots don't count.
+- **Lent.** After the automated run of an observed test passes, its observed case is lent a pass, not run or asked,
+  when a `pass` row of the same starting state has calls the automated run's begin (or equal), every device in the
+  case has that row's maker, and no newer `fail` row on one of the case's models has calls the run's begin with. It
+  holds across tests, suites, roles, models and firmware of that maker, and across HA and DeviceSide versions: a
+  regression an upgrade brings is missed until someone reports it and an attended run records the failure. Its record
+  row reads `pass (observed <date>)`, with a footnote to `_observed.md`.
+- **Not lent**, and run (or `not observed` unattended), when the automated run sent calls no pass covers, or sent no
+  trace: the trace needs `HA_ADMIN_TOKEN` (HA lets only an admin subscribe to the event), and the run says so.
+- **`--reobserve`** runs every observed case regardless, as a spot check after a major firmware upgrade.
+
 ## After a run
 
 ### Run reports
 
 Every run, failed, partial or unattended, ends by writing a report to `deviceside-rig/` in the system temp folder and
-printing its path: each suite's results with the reason for every failure and skip.
+printing its path: each suite's results with the reason for every failure and skip, then, under Calls, each traced
+case's starting state and its calls per slot, by hash, as `_observed.md` keys them.
 
 ### Run logs
 
@@ -359,6 +385,9 @@ it), which copies them in and takes their suites out of the ledger. It never ove
 staging: it names it and keeps it staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
 cleanly, running any case, writes its record too. The staged copy sits in the temp folder, which the OS may clear:
 when every selected suite is covered there is no such run, and only `--promote` or `--fresh` writes the record.
+
+A run that observed anything stages its integrations' `_observed.md` the same way, whether or not a suite record
+is written, and `--promote` copies it in with the records: observations stand whatever the code.
 
 A record holds the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
 suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run

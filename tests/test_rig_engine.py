@@ -2846,6 +2846,15 @@ async def test_a_trace_keeps_the_calls_per_slot_and_the_rigs_own_ha_calls_in_ord
     assert [slot for slot, _ in trace.sequence] == ["target"]
 
 
+async def test_a_report_lists_each_traced_cases_calls_by_slot(tmp_path):
+    _, result = await traced_run(tmp_path)
+    text = write_report(result, tmp_path, "rig run").read_text()
+    calls = text.split("### Calls\n\n", 1)[1]
+    trace = next(case.trace for case in result.suites[0].cases if case.id == AUTOMATED)
+    [(_, [digest])] = trace.sequence
+    assert f"- `{AUTOMATED}`: state `{trace.state}`\n  - target\n    - `{digest}` `fake turn_on_for " in calls
+
+
 def test_a_traced_and_lent_result_survives_the_ledger():
     seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": {"seconds": 0.6}}))])
     case = CaseResult(WATCHED, "switch_plug", "switch", Outcome.PASS, twin=AUTOMATED, lent="2026-11-01")

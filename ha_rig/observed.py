@@ -42,6 +42,12 @@ def normalize(call: Call) -> Call:
     return transport, command, params
 
 
+def render_call(call: Call) -> str:
+    """One call on a line: its transport, command and canonical params."""
+    transport, command, params = call
+    return f"{transport} {command} {_canonical(params)}"
+
+
 def call_hash(call: Call) -> str:
     return short_hash(list(normalize(call)))
 
