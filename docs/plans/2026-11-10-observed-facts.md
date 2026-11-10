@@ -176,26 +176,35 @@ wrong call would let slip past tests.
 
 ## Handoff
 
-**Done** (branch `wt/observed-facts`, worktree `~/projects/ha/ha-rig-wt/observed-facts`, draft PR #48; deviceside
-jasonmx/deviceside#329 draft, `wt/wire-trace`, worktree `~/projects/ha/deviceside-wt/wire-trace`):
+Branch `wt/observed-facts`, worktree `~/projects/ha/ha-rig-wt/observed-facts`, draft PR #48 (head `f681677`, pushed).
+Paired: jasonmx/deviceside#329 (draft, `wt/wire-trace`, Jason approved its CLAUDE.md sentence). Follow-on live check:
+PR #49, plan `2026-11-10-observed-facts-live-check.md` (Depends-on #48). Issues from audit 1: #50, #51, #52.
 
-- Steps 1, 3-6 coded (`18b331a`); full suite green (1044) after `714f4bf` (FakeHA `logger.set_level`, the wire hold in
-  the signal test, README `--help` regenerated). `8a71198`: the run report's `### Calls` section per traced case
-  (`engine.calls`, `observed.render_call`), and `docs/rig.md` for observed lends (Observed tests, Coverage, Run reports,
-  Test records).
-- Step 2's spike: two runs, results and the normalization decision above (Spike results; Design, Call sequences).
-- #329: Jason approved its observed-pass sentence in `CLAUDE.md` as written, and had "passed on one light (PR #204)"
-  generalized to "one device" (`fca797f`, pushed).
-
-**Also done:** `observed.normalize` (numbers to their sign, bool exact), legend keeps the exact call, tests, `docs/rig.md`
-(sign rule, ZHA `move_mode` blind spot), shared-prefix result in Spike results (none).
+**Done:** steps 1-6; sign normalization; audit 1's High (observed rows now go straight into the checkout, not
+staging); unnamed devices don't lend; blocks key on (maker, model). Audit 2 (report
+`~/.local/state/audit-gate/jasonmx-HA-rig/wt/observed-facts/reports/2-pr-be2700b2f6e4.md`) is NOT-CLEAN, gate in
+HANDOFF. Jason has decided: fix the High and both Mediums in this PR, then merge.
 
 **Next:**
 
-1. Step 7, live check (Verification, Live 1-3) through `scripts/rig.py` behind its gate. It needs Jason at the rig
-   (Live 1 is attended) and a prefix pair built for Live 2, as today's tests have none.
-2. `audit-gate brief pr` and the audit; both PRs ready; #329 merges first, then `gh run rerun` #48's Tests runs
-   before merging.
+1. **High (H1):** `report()` (scripts/rig.py ~2264) writes `_observed.md` from the joined ledger result, re-dating
+   earlier sessions' rows to today, and `ObservedFile.add` replaces by key, so an old pass can overwrite a newer fail.
+   Write each row once, when its case finishes, dated then: wrap `on_result` (the report has the snippet) and drop the
+   `write_observed` call from `report()`. Make `ObservedFile.add` keep the newer row of a key, a fail winning a
+   same-date tie. Also closes M1 (an interrupted run wrote nothing; docs/rig.md says "however the run ends").
+2. **M2:** a rig.py-level test with `TEST_RECORDS_DIR` monkeypatched: `_observed.md` lands in the checkout on a failed
+   run and with `commit=None`; a second report leaves a row's date alone; an old pass doesn't replace a newer fail;
+   a same-day pass and fail on one key keep the fail.
+3. Lows: remove `write_observed`'s unused `into` (and its staging docstring); update this plan (it still says staged
+   and promoted; drop `ha_rig/staging.py` from Touches); make `ObservedFile.write` atomic (temp file then
+   `os.replace`, as `journal.write_whole`). Fold into this PR since they touch the same lines; anything left goes
+   in #52.
+4. `.venv/bin/pytest`, `pre-commit run --all-files`, README `--help` if options changed. Commit with an
+   `Audit-fix:` trailer, push, then `audit-gate brief pr`, spawn its Agent (opus: the diff changes what a record
+   proves), `audit-gate record`, `audit-gate status`.
+5. On CLEAN: `gh pr ready 48` and ready #329 (`gh pr ready 329 -R jasonmx/deviceside`). Jason asked for the merge:
+   #329 merges first, then `gh run rerun` #48's Tests runs, then merge #48 (`pr-merge`; PRs into the default branch
+   are Jason's, and this is his explicit instruction to merge). If a third audit is NOT-CLEAN, stop and report to Jason.
+6. After #48 merges, #49 (live check) stays draft waiting on Jason at the rig.
 
-**Open:** nothing for Jason. Known gap from before: rows from a resumed session's saved cases are re-dated to the
-finishing session.
+**Open:** nothing for Jason. Known gap: rows from a resumed session's saved cases were re-dated; step 1 removes it.
