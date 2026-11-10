@@ -62,8 +62,12 @@ Depends-on: jasonmx/deviceside#329
   hashed. This uses the rig's own definition of the setup, not the trace, because setup often uses plain HA calls.
 
 **Call sequences (`ha_rig/observed.py`, new)**
-- A call is `(transport, command, params)`, normalized (step 2's spike settles which fields need it) and hashed to 6
-  hex characters. A sequence is, for each slot (role or member slot, never an entity ID), the ordered list of call
+- A call is `(transport, command, params)`, normalized and hashed to 6 hex characters. **Normalized: every number
+  becomes its sign** (`-`, `0`, `+`), recursively through dicts and lists; keys, strings, booleans and None stay as
+  they are. So the hash is the call's structure: which command, which fields, which strings, zero or not, and a signed
+  rate's direction. The legend (`## Calls` in `_observed.md`, and the run report) keeps each call as sent, exact
+  values included. Decided 2026-11-10 from the spike (below): observed tests gate whether firmware behaves as expected
+  (jumps, flashes, drift at a stop), which no step file or firmware fact ties to a magnitude. A sequence is, for each slot (role or member slot, never an entity ID), the ordered list of call
   hashes, with consecutive repeats collapsed. Interleaving between slots and timing are ignored.
 - **Covers:** a pass with sequence P covers a candidate C when the starting states match, the slots match, and for
   each slot C's list is a prefix of P's (equal counts as a prefix).
@@ -106,6 +110,27 @@ this call-based, optimistic model.
 
 **Docs:** `docs/rig.md` (Observed, Records, Coverage, Firmware facts cross-reference); `coverage.py` docstring.
 
+## Spike results (step 2, 2026-11-10)
+
+Two `--unattended --fresh` runs of `stop`, `set_attributes` and `raise_hue` on `lab` at the same DeviceSide code
+(reports `rig-run-2026-11-10-130051.md` and `-131711.md` in `$TMPDIR/deviceside-rig/`; both exited 1 on things
+outside the spike: a Z2M `get_attributes` timeout warning, and Hue `sets_after_a_soft_off[group]` failing in run B).
+
+- 65 traced cases; every starting state matched. 53 sent identical calls.
+- 11 differed (one more was run B's failed case, which sends fewer calls; only a passing twin lends), all in `stop` /
+  `stop-predicted_state`, all numbers computed from where the light was when stopped, so timing showing up in the
+  values: Hue's pinned `dimming.brightness` (68.27 vs 69.14) and `color.xy` (4th decimal), Hue `transition_time` of the
+  remaining span (5860 vs 5892, 6875 vs 6898), Z2M pinned `brightness` (167-174) and `transition` (6.6-6.9), ZHA
+  `transition_time` (57 vs 58). Largest gap 4.5 %.
+- Rejected: 2 significant figures (68 vs 69 already splits); 1 significant figure (uneven precision, rounding edges);
+  a 10 % tolerance (works, but isn't transitive, so can't be hashed: a rework of matching and the file format); an
+  exact-values-but-blank-live-fields list (goes stale per transport); keeping integers 0-15 exact for enums (a second,
+  arbitrary rule).
+- **Known blind spot, accepted:** ZHA's EnhancedMoveHue (`integrations/zha/fade.py`, `hue_move`) carries direction as
+  `move_mode` 1 (up) vs 3 (down), which both normalize to `+`. It matters only if an observed `lower_hue` test gets
+  `raise_hue`'s setup on ZHA; none exists. One line for it in `docs/rig.md`, Observed tests.
+- Not done: which observed tests share prefixes today. Compute it from the two reports once `normalize` is in.
+
 ## Steps
 
 1. `pr-draft` this plan. In a deviceside worktree, build the wire trace and open its draft PR, then fill in the
@@ -147,45 +172,31 @@ wrong call would let slip past tests.
 
 ## Handoff
 
-**Done.** Step 1 (jasonmx/deviceside#329, draft, branch `wt/wire-trace`, worktree `~/projects/ha/deviceside-wt/wire-trace`;
-this branch's draft PR is #48). Steps 3 to 6 are coded in WIP commit `18b331a` on `wt/observed-facts` (not pushed):
-`ha_rig/observed.py` with `tests/test_observed.py`; `HAClient.subscribe_wire` / `wire_tap` / `drain_wire` /
-`set_logger_level`; `_CaseRun.slots` / `tap` / `trace` and `starting_state` in the engine; `CaseResult.trace` and `.lent`,
-saved in the ledger; `_Run.lent` in the automated phase; `observations` / `write_observed` / `load_observations`; the
-`pass (observed <date>)` suffix, `LENT` in `Record.read` and the footnote; `--reobserve`; `coverage.observed_hints`
-and `Progress.traces`; a Baseline `logger_level` kind that `DebugLevels.raise_wire` holds for every run with an admin
-token (`begin_logging`). Engine, coverage and observed tests for the lend pass.
+**Done** (branch `wt/observed-facts`, worktree `~/projects/ha/ha-rig-wt/observed-facts`, draft PR #48; deviceside
+jasonmx/deviceside#329 draft, `wt/wire-trace`, worktree `~/projects/ha/deviceside-wt/wire-trace`):
 
-Decisions taken while building, beyond the Design above:
-
-- **Only an admin user may subscribe to `deviceside_wire`** (HA refuses custom events to others), so the tap sits on
-  the admin connection; no `HA_ADMIN_TOKEN`, no trace, no lend (`begin_logging` says so). The rig's own `set` in steps
-  first pings the admin socket (`drain_wire`) so the wire events of earlier calls land in the tap before it.
-- **Slots:** the case's own role is `target`, another role its name, a group's members `<slot>.member<n>`. With
-  `target`, and the case's role named `target` in the starting-state hash, a pass on one role lends to another.
-- **Rows:** one per device behind the case's entities (maker = registry manufacturer, model = `model_id` or model).
-  A fail row only for a person's `n` (`NOT_SEEN`); a failure in the steps writes none. A lent case adds none.
-- `_observed.md` is written in `report()` before the commit check (observations stand whatever the code), staged with
-  no ledger entry. Known gap: rows from a resumed session's saved cases are re-dated to the finishing session.
+- Steps 1, 3-6 coded (`18b331a`); full suite green (1044) after `714f4bf` (FakeHA `logger.set_level`, the wire hold in
+  the signal test, README `--help` regenerated). `8a71198`: the run report's `### Calls` section per traced case
+  (`engine.calls`, `observed.render_call`), and `docs/rig.md` for observed lends (Observed tests, Coverage, Run reports,
+  Test records).
+- Step 2's spike: two runs, results and the normalization decision above (Spike results; Design, Call sequences).
+- #329: Jason approved its observed-pass sentence in `CLAUDE.md` as written, and had "passed on one light (PR #204)"
+  generalized to "one device" (`fca797f`, pushed).
 
 **Next:**
 
-1. Fix the full suite: `tests/test_rig.py::test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal[2]` fails
-   and errors because the baseline now holds `logger_level:custom_components.deviceside.wire` (FakeHA's `call_service`
-   has no `logger.set_level`, so `raise_wire` prints `stays as it is: 'entity_id'` but still records the hold). Teach
-   FakeHA `logger.set_level`, then decide whether the test's expected baseline should include it. Run the rest of the
-   suite (`-x` stopped there).
-2. Spike (step 2) is not done. Run 1 (`--profile lab --action stop --action set_attributes --action raise_hue
-   --unattended --debug-logs --fresh`, from the deviceside worktree) was captured only from part way through: the
-   first listener used the non-admin token. Script `listen.py` and the partial capture `wire.jsonl` are in
-   `/private/tmp/claude-501/-Users-jason-projects-ha-ha-rig-wt-observed-facts/83ab9897-4f19-4856-9b88-150fb7cedc94/scratchpad/spike/`
-   (household entity IDs: never into the repo); 137 events. Run 1 exited 1 on case failures unrelated to the spike
-   (Hue `sets_after_a_soft_off[group]`, Z2M `hue_stop_raise[light_color]`; report
-   `$TMPDIR/deviceside-rig/rig-run-2026-11-10-123905.md`), lights put back, records only staged. Already seen: Hue's raise sends `transition_time: 8972` (ms, from the
-   brightness at the call), a likely jitter that `observed.normalize` must reduce without dropping it. Easier now: let
-   the rig's own trace do the spike: print each case's calls into the run report (step 4's "full calls in the run
-   report", not built yet), run twice and diff. Then fill `normalize` and write the results here.
-3. Steps 6 (docs: `docs/rig.md` Observed tests, Coverage, Test records; README `--help` block via
-   `COLUMNS=100 scripts/rig.py --help`) and 7 as planned.
+1. `observed.normalize`: every number to its sign, recursively (bool is not a number here: `isinstance(x, bool)`
+   first). `sequence`'s legend must keep the call as sent, not normalized (today it stores `normalize(call)`), and the
+   run report and `## Calls` show the exact call; two exact calls with one hash keep the latest. Tests in
+   `tests/test_observed.py`: 68.27 and 69.14 hash alike; 0 vs 6875 don't; -13 vs 13 don't; strings and keys still
+   split; the legend keeps exact values.
+2. Rerun `scripts/diffcalls.py`-style check: the scratch script is
+   `/private/tmp/claude-501/-Users-jason-projects-ha-ha-rig-wt-observed-facts/3c201fca-9b14-492d-a685-bc87e42ba259/scratchpad/diffcalls.py`
+   (it diffs the reports' rendered calls, so after step 1 compare hashes instead, or re-normalize the rendered params).
+   Note shared prefixes among the observed tests' twins in Spike results.
+3. `docs/rig.md`, Observed tests: the sign rule and the ZCL `move_mode` blind spot.
+4. Step 7: live check (Verification, Live 1-3) through `scripts/rig.py` behind its gate; `audit-gate brief pr` and the
+   audit; both PRs ready; #329 merges first, then `gh run rerun` #48's Tests runs before merging.
 
-**Open:** #329's CLAUDE.md sentence awaits Jason's review. No audit has run on either PR.
+**Open:** nothing for Jason. Known gap from before: rows from a resumed session's saved cases are re-dated to the
+finishing session.
