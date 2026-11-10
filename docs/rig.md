@@ -328,7 +328,7 @@ started from a state, respond to a sequence of calls, and to any sequence that s
 know which calls are still to come. Every attended answer adds a row per device to the integration's
 `docs/test-records/<integration>/_observed.md`: maker, model, firmware, starting state, the calls the observed case
 sent, the case it was seen in, the date and `pass` or `fail` (a `n`; a step that broke adds nothing). A row with the
-same device, state and calls is replaced. Its Calls section maps each call's hash to the call.
+same device, state and calls is replaced unless it is newer; on one date a fail wins. Its Calls section maps each call's hash to the call.
 
 - **A call** is what DeviceSide's wire trace (the `deviceside_wire` event, on while its
   `custom_components.deviceside.wire` logger is at DEBUG) says a transport sent: `(transport, command, params)`, with

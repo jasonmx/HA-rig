@@ -185,26 +185,9 @@ staging); unnamed devices don't lend; blocks key on (maker, model). Audit 2 (rep
 `~/.local/state/audit-gate/jasonmx-HA-rig/wt/observed-facts/reports/2-pr-be2700b2f6e4.md`) is NOT-CLEAN, gate in
 HANDOFF. Jason has decided: fix the High and both Mediums in this PR, then merge.
 
-**Next:**
+**Done since:** steps 1-4 of the old Next (rows written per case as it ends; tests; Lows; audit 3 CLEAN, report 3).
+Audit 3's Medium (a fail seen mid-run can't block a lend that run already made) and its Low about `write_observed`
+and `observations` being test-only are tracked in #52.
 
-1. **High (H1):** `report()` (scripts/rig.py ~2264) writes `_observed.md` from the joined ledger result, re-dating
-   earlier sessions' rows to today, and `ObservedFile.add` replaces by key, so an old pass can overwrite a newer fail.
-   Write each row once, when its case finishes, dated then: wrap `on_result` (the report has the snippet) and drop the
-   `write_observed` call from `report()`. Make `ObservedFile.add` keep the newer row of a key, a fail winning a
-   same-date tie. Also closes M1 (an interrupted run wrote nothing; docs/rig.md says "however the run ends").
-2. **M2:** a rig.py-level test with `TEST_RECORDS_DIR` monkeypatched: `_observed.md` lands in the checkout on a failed
-   run and with `commit=None`; a second report leaves a row's date alone; an old pass doesn't replace a newer fail;
-   a same-day pass and fail on one key keep the fail.
-3. Lows: remove `write_observed`'s unused `into` (and its staging docstring); update this plan (it still says staged
-   and promoted; drop `ha_rig/staging.py` from Touches); make `ObservedFile.write` atomic (temp file then
-   `os.replace`, as `journal.write_whole`). Fold into this PR since they touch the same lines; anything left goes
-   in #52.
-4. `.venv/bin/pytest`, `pre-commit run --all-files`, README `--help` if options changed. Commit with an
-   `Audit-fix:` trailer, push, then `audit-gate brief pr`, spawn its Agent (opus: the diff changes what a record
-   proves), `audit-gate record`, `audit-gate status`.
-5. On CLEAN: `gh pr ready 48` and ready #329 (`gh pr ready 329 -R jasonmx/deviceside`). Jason asked for the merge:
-   #329 merges first, then `gh run rerun` #48's Tests runs, then merge #48 (`pr-merge`; PRs into the default branch
-   are Jason's, and this is his explicit instruction to merge). If a third audit is NOT-CLEAN, stop and report to Jason.
-6. After #48 merges, #49 (live check) stays draft waiting on Jason at the rig.
-
-**Open:** nothing for Jason. Known gap: rows from a resumed session's saved cases were re-dated; step 1 removes it.
+**Next:** `gh pr ready 48` and `gh pr ready 329 -R jasonmx/deviceside`; merge #329, `gh run rerun` #48's Tests
+runs, then `pr-merge` #48 (Jason's explicit instruction). Then #49 stays draft waiting on Jason at the rig.
