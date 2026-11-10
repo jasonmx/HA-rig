@@ -30,7 +30,7 @@ from ha_rig.engine import (
     rig_facts,
     run,
     table,
-    write_observed,
+    write_observed_case,
     write_records,
     write_report,
 )
@@ -2794,7 +2794,8 @@ async def traced_run(
 async def test_an_observed_pass_lends_to_a_later_unattended_run_that_sends_the_same_calls(tmp_path):
     _, first = await traced_run(tmp_path, answers("", "y")[1])
     records = tmp_path / "records"
-    assert write_observed(first, REGISTRY, records, "2026-11-01") == [records / "shelly" / OBSERVED_FILE]
+    for case in first.suites[0].cases:
+        write_observed_case(first.suites[0].suite, case, REGISTRY, records, "2026-11-01")
     rows = load_observations(records, ["shelly"])["shelly"]
     assert [(row.device, row.observed_in, row.result) for row in rows] == [(ACME, AUTOMATED, "pass")]
 
@@ -2808,7 +2809,8 @@ async def test_an_observed_pass_lends_to_a_later_unattended_run_that_sends_the_s
     assert f"[`{OBSERVED_FILE}`]({OBSERVED_FILE})" in record
     (path := tmp_path / "turn_on_for.md").write_text(record)
     assert WATCHED in Record.read(path).passed
-    assert write_observed(second, REGISTRY, records, "2026-11-10") == []  # a lent pass observed nothing
+    lent = next(case for case in second.suites[0].cases if case.id == WATCHED)
+    assert write_observed_case(second.suites[0].suite, lent, REGISTRY, records, "2026-11-10") is None  # nothing seen
 
 
 @pytest.mark.parametrize(
@@ -2830,11 +2832,11 @@ async def test_an_observed_case_is_not_lent_unless_a_pass_covers_its_twins_calls
 
 async def test_what_a_person_saw_fail_is_a_fail_row_and_a_failed_step_is_none(tmp_path):
     _, saw_else = await traced_run(tmp_path, answers("", "n")[1])
-    [row] = engine.observations(saw_else, "2026-11-01")["shelly"][0]
-    assert (row.device, row.result) == (ACME, "fail")
     watched = next(case for case in saw_else.suites[0].cases if case.id == WATCHED)
+    [row], _ = engine.observed_by(watched, "2026-11-01")
+    assert (row.device, row.result) == (ACME, "fail")
     watched.detail = "step 1 (call): HAError: nope"  # the steps broke: nobody saw the calls do anything
-    assert engine.observations(saw_else, "2026-11-01") == {}
+    assert engine.observed_by(watched, "2026-11-01") is None
 
 
 async def test_a_fail_row_stops_a_lend_of_the_pass_it_follows(tmp_path):
@@ -2842,9 +2844,53 @@ async def test_a_fail_row_stops_a_lend_of_the_pass_it_follows(tmp_path):
     [trace] = [case.trace for case in first.suites[0].cases if case.id == WATCHED]
     passed = trace.rows(AUTOMATED, "2026-11-01", True)
     _, saw_else = await traced_run(tmp_path, answers("", "n")[1])
-    [failed] = engine.observations(saw_else, "2026-11-05")["shelly"][0]
+    [failed], _ = engine.observed_by(
+        next(case for case in saw_else.suites[0].cases if case.id == WATCHED), "2026-11-05"
+    )
     _, second = await traced_run(tmp_path, rows=[*passed, failed])
     assert outcomes(second)[WATCHED] == (Outcome.NOT_OBSERVED, "")
+
+
+@pytest.mark.parametrize(
+    ("replies", "again"),
+    [
+        (("", "n", "", "", "y"), (Outcome.PASS, "")),  # taken back and watched
+        (("", "n", ""), (Outcome.NOT_OBSERVED, "")),  # taken back, and nobody left to watch it
+    ],
+)
+async def test_a_fail_seen_mid_run_takes_back_a_lend_that_run_made(tmp_path, replies, again):
+    """Resumed with on_then_off's twin saved before traces, its observed case isn't lent and runs; what the person
+    sees fail blocks the pass already lent to `again`, which sends the same calls, so `again` is run after all."""
+    _, first = await traced_run(tmp_path, answers("", "y")[1])
+    [trace] = [case.trace for case in first.suites[0].cases if case.id == WATCHED]
+    rows = trace.rows(AUTOMATED, "2026-11-01", True)
+    text = OBSERVED + OBSERVED.split("tests:\n", 1)[1].replace("name: on_then_off", "name: again")
+    ha = FakeAdmin({"switch.plug": {}}, timer_on)
+    ha.devices[0]["manufacturer"] = "Acme"
+    await ha.subscribe_wire()
+    steps, observations, reported = suite(tmp_path, text), {"shelly": list(rows)}, []
+    result = await run_one(
+        ha,
+        steps,
+        profile(switch_plug="switch.plug"),
+        admin=ha,
+        ask=answers(*replies)[1],
+        observations=observations,
+        done=saved(steps, AUTOMATED),
+        on_result=lambda s, r: reported.append((r.id, r.outcome, r.detail)),
+    )
+    seen = outcomes(result)
+    # Taken back as the fail is reported, before `again` runs: a run cut short there leaves no lent pass saved.
+    assert [(case_id, outcome) for case_id, outcome, _ in reported[:3]] == [
+        ("again[switch_plug]", Outcome.PASS),
+        ("again[switch_plug] observed", Outcome.PASS),
+        (WATCHED, Outcome.FAIL),
+    ]
+    assert reported[3] == ("again[switch_plug] observed", Outcome.NOT_OBSERVED, engine.TAKEN_BACK)
+    assert seen[WATCHED][0] is Outcome.FAIL
+    assert seen["again[switch_plug] observed"] == again
+    assert not next(case for case in result.suites[0].cases if case.id == "again[switch_plug] observed").lent
+    assert [row.result for row in observations["shelly"]] == ["fail"]  # the same key: today's fail replaced the pass
 
 
 async def test_a_trace_keeps_the_calls_per_slot_and_the_rigs_own_ha_calls_in_order(tmp_path):

@@ -33,6 +33,7 @@ from .journal import Journal
 from .observed import FILE as OBSERVED_FILE
 from .observed import Device as Maker
 from .observed import Observation, ObservedFile, Trace, render_call, sequence, short_hash
+from .observed import merge as merge_row
 from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ RESTORE_SETTLE_S = 1.5
 # lights have reached the start state it describes.
 SETUP_SETTLE_S = 2.0
 NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
+TAKEN_BACK = "a fail seen this run blocks its lend"  # a lent case's detail once a fail takes its pass back
 
 # ZCL Color Control's hue attributes, which bulb_hue reads on ZHA.
 _COLOR_CLUSTER, _CURRENT_HUE, _ENHANCED_CURRENT_HUE = 0x0300, 0x0000, 0x4000
@@ -2069,7 +2071,9 @@ async def run(
 
     With `admin` subscribed to DeviceSide's wire trace (HAClient.subscribe_wire), each case's result carries the calls
     its steps sent (CaseResult.trace). An observed case is then lent its pass, not run, when a pass in `observations`
-    (each integration's _observed.md rows) covers its twin's calls, unless `reobserve`.
+    (each integration's _observed.md rows) covers its twin's calls, unless `reobserve`. Each observed case's rows go
+    into `observations` as it ends, so a run passing the same dict to the next sees them, and a lend that a fail seen
+    later in this run blocks is taken back and the case run (_Run.unlend).
     """
     only = unfinished(done, only)
     planned = _plan(suites, profile, registry, ha, admin, keyword, only, out)
@@ -2093,7 +2097,7 @@ async def run(
         on_result=on_result,
         budget=budget,
         wire=admin,
-        observations=observations or {},
+        observations={} if observations is None else observations,
         reobserve=reobserve,
     )
     if busy is not None:
@@ -2103,6 +2107,7 @@ async def run(
     try:
         waiting = await rig_run.all_automated([(suite, client, cases_) for suite, _, client, cases_ in planned])
         await rig_run.observed(waiting)
+        await rig_run.unlend()
     finally:
         # A failure here must not hide the one that ended the run.
         if rig_run.entry_options is not None:
@@ -2232,6 +2237,8 @@ class _Run:
     wire: HAClient | None = None  # the admin connection DeviceSide's wire trace comes on
     observations: dict[str, list[Observation]] = field(default_factory=dict)  # each integration's _observed.md rows
     reobserve: bool = False  # run observed cases even where a pass covers their calls
+    lends: list[tuple[Case, HAClient]] = field(default_factory=list)  # the cases this run lent a pass
+    taken_back: list[tuple[Case, HAClient]] = field(default_factory=list)  # lends a fail since blocks, for unlend
     _makers: dict[str, Maker] | None = None
     _makers_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -2294,11 +2301,29 @@ class _Run:
 
     def report(self, case: Case, result: CaseResult) -> None:
         self.results[id(case.suite), case.id] = result
+        if (seen := observed_by(result, datetime.date.today().isoformat())) is not None:
+            rows = self.observations.setdefault(case.suite.integration, [])
+            for row in seen[0]:
+                merge_row(rows, row)
         if self.on_result is not None:
             self.on_result(case.suite, result)
         # Lanes interleave their lines, so each names its suite.
         prefix = f"{case.suite.integration} / {case.suite.name}  " if self.lanes else "  "
         self.out(f"{prefix}{case.id}: {result.outcome}" + (f" ({result.detail})" if result.detail else ""))
+        if seen is not None and result.outcome is Outcome.FAIL:
+            self.take_back()
+
+    def take_back(self) -> None:
+        """Report not observed each case this run lent a pass that a fail seen since blocks, at once, so its pass is
+        never left saved however the run ends; unlend runs it."""
+        for case, client in self.lends:
+            if self.lent(case, self.results.get((id(case.suite), case.twin or ""))) is None:
+                self.taken_back.append((case, client))
+        gone = {(id(case.suite), case.id) for case, _ in self.taken_back}
+        self.lends = [(case, client) for case, client in self.lends if (id(case.suite), case.id) not in gone]
+        for case, _ in self.taken_back:
+            if self.results[id(case.suite), case.id].lent:
+                self.report(case, _not_run(case, Outcome.NOT_OBSERVED, TAKEN_BACK))
 
     async def all_automated(self, planned: list[tuple[Suite, HAClient, list[Case]]]) -> list[tuple[Case, HAClient]]:
         """Run the planned suites' automated cases, in lanes or one suite after another; return the observed cases
@@ -2345,6 +2370,7 @@ class _Run:
                     continue
                 self.report(case, await self.run_case(case, client, None))
             elif (lent := self.lent(case, twin)) is not None:
+                self.lends.append((case, client))
                 self.report(case, lent)
             elif self.ask is None:
                 self.report(case, _not_run(case, Outcome.NOT_OBSERVED))
@@ -2372,6 +2398,13 @@ class _Run:
             self.report(case, result)
             if result.outcome is Outcome.NOT_OBSERVED:
                 self.ask = None
+
+    async def unlend(self) -> None:
+        """Run the observed cases whose lends take_back took, while someone is there; a run of one can fail and take
+        back another, so it goes round again. One left unrun (unattended, or the budget spent) stays not observed."""
+        while self.taken_back and self.ask is not None:
+            taken, self.taken_back = self.taken_back, []
+            await self.observed(taken)
 
 
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
@@ -2641,27 +2674,6 @@ def observed_by(case: CaseResult, date: str) -> tuple[list[Observation], dict] |
     if not passed and not (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN)):
         return None
     return case.trace.rows(case.twin, date, passed), dict(case.trace.legend)
-
-
-def observations(result: RunResult, date: str) -> dict[str, tuple[list[Observation], dict]]:
-    """What each integration's observed cases saw this run, by integration (see observed_by)."""
-    found: dict[str, tuple[list[Observation], dict]] = {}
-    for suite_result in result.suites:
-        for case in suite_result.cases:
-            if (seen := observed_by(case, date)) is not None:
-                rows, legend = found.setdefault(suite_result.suite.integration, ([], {}))
-                rows += seen[0]
-                legend.update(seen[1])
-    return found
-
-
-def write_observed(result: RunResult, registry: Any, records_dir: Path, date: str) -> list[Path]:
-    """Add what this run observed to each integration's _observed.md in `records_dir`, whether or not any suite
-    writes a record."""
-    return [
-        add_observed(records_dir, integration, registry.integrations[integration].title, rows, legend)
-        for integration, (rows, legend) in observations(result, date).items()
-    ]
 
 
 def add_observed(records_dir: Path, integration: str, title: str, rows: list[Observation], legend: dict) -> Path:

@@ -187,6 +187,16 @@ def lend(rows: Iterable[Observation], state: str, candidate: Sequence, devices: 
     return max(lending, key=lambda row: row.date, default=None)
 
 
+def merge(rows: list[Observation], new: Observation) -> bool:
+    """Put `new` in `rows`, in place, replacing the row with its key (so only its date, observed-in and result change)
+    unless that row is newer; on one date a fail wins. Whether it went in."""
+    old = next((row for row in rows if row.key == new.key), None)
+    if old is not None and (old.date, old.result == FAIL) > (new.date, new.result == FAIL):
+        return False
+    rows[:] = [row for row in rows if row.key != new.key] + [new]
+    return True
+
+
 # --- The file ------------------------------------------------------------------------------------------------
 
 
@@ -257,14 +267,11 @@ class ObservedFile:
         return observed
 
     def add(self, rows: Iterable[Observation], legend: Mapping[str, Call]) -> None:
-        """Add `rows`, each replacing a row with its key (so only its date, observed-in and result change) unless that
-        row is newer; on one date a fail wins. Their calls go to the legend. Nothing is pruned: a pattern can come
-        back."""
+        """Add `rows` (see merge); the calls of those that go in go to the legend. Nothing is pruned: a pattern can
+        come back."""
         for new in rows:
-            old = next((row for row in self.rows if row.key == new.key), None)
-            if old is not None and (old.date, old.result == FAIL) > (new.date, new.result == FAIL):
+            if not merge(self.rows, new):
                 continue
-            self.rows = [row for row in self.rows if row.key != new.key] + [new]
             for _, hashes in new.sequence:
                 for digest in hashes:
                     if digest in legend:
