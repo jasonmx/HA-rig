@@ -31,8 +31,8 @@ A run lends an observed pass when its automated twin's calls are covered by an o
 unattended run never narrows a record. Closes #36.
 Touches: ha_rig/engine.py, ha_rig/client.py, ha_rig/coverage.py, ha_rig/staging.py, ha_rig/observed.py,
 docs/rig.md, README.md, tests/
-Tests-with: jasonmx/deviceside#<wire-trace PR>
-Depends-on: jasonmx/deviceside#<wire-trace PR>
+Tests-with: jasonmx/deviceside#329
+Depends-on: jasonmx/deviceside#329
 
 ## Design
 
@@ -144,3 +144,29 @@ this call-based, optimistic model.
 
 opus: two repos, a rule change in deviceside's `CLAUDE.md`, a new public file format, and a call normalization that a
 wrong call would let slip past tests.
+
+## Handoff
+
+**Done (step 1).** deviceside draft PR jasonmx/deviceside#329, branch `wt/wire-trace`, worktree
+`~/projects/ha/deviceside-wt/wire-trace`; this branch's draft PR comes from `pr-draft`. Decisions taken while building
+the trace, which steps 3 and 4 build on:
+
+- Event `deviceside_wire`, data `{entity_id, transport, command, params}`, fired *before* the send. On while
+  `custom_components.deviceside.wire` is at DEBUG (a child of `custom_components.deviceside`, so `--debug-logs` turns
+  it on too); `core/wire.py`, `wire_enabled()`.
+- Transports and command names: `zcl` `0x<cluster>/0x<cmd>` (params by zigpy name; a groupcast is `{"args": [...]}` on
+  the ZHA group's light entity; Hue's multiColor is `0xfc03/0x00` `{"data": <hex>}`); `clip`
+  `<light|grouped_light>.set_state` (aiohue kwargs, Nones dropped) or `.put` (raw body), the entity found from the
+  resource ID through the registry; `rpc` `<Component>.<Set|DimStop|SetConfig>` (params without `id`); `mqtt` `set`
+  (the payload); `matter` `OnOff.OnWithTimedOff`; `ha` `light.turn_on` (data without `entity_id`, from the ZHA and
+  Z2M `turn_on_for`).
+- `entity_id` is the target's `reported_id` (the switch_as_x light, where one wraps the switch). A Hue room stop that
+  writes per light, and a scene, trace each member light under its own entity, so the rig maps them to member slots.
+- Not traced: reads (Z2M `get` and `read` publishes included), `homeassistant.update_entity` refreshes, and Z2M
+  `ensure_options` (bridge settings, not device calls). If the spike shows a pattern depends on a Z2M option, revisit.
+
+**Next:** step 2, the spike. Deploy `wt/wire-trace` (the rig runs from the deviceside worktree; check
+`pre_authorized` or the sensor first), run `stop`, `set_attributes` and `raise_hue` `--unattended` twice with the trace
+on, compare the sequences, and write the results here. Then steps 3 to 7.
+
+**Open:** #329's CLAUDE.md sentence awaits Jason's review. No audit has run on either PR.
