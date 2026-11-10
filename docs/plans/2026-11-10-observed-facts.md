@@ -129,7 +129,9 @@ outside the spike: a Z2M `get_attributes` timeout warning, and Hue `sets_after_a
 - **Known blind spot, accepted:** ZHA's EnhancedMoveHue (`integrations/zha/fade.py`, `hue_move`) carries direction as
   `move_mode` 1 (up) vs 3 (down), which both normalize to `+`. It matters only if an observed `lower_hue` test gets
   `raise_hue`'s setup on ZHA; none exists. One line for it in `docs/rig.md`, Observed tests.
-- Not done: which observed tests share prefixes today. Compute it from the two reports once `normalize` is in.
+- `normalize` (sign rule) is in, with tests; docs/rig.md carries the rule and the blind spot. Shared prefixes: none. Run A's 65
+  traced cases, hashed with `normalize`, have 0 pairs where one begins another (same state and slots), so the live
+  check's lend (Verification, Live 2) needs a prefix built for it, not one found in today's tests.
 
 ## Steps
 
@@ -183,20 +185,15 @@ jasonmx/deviceside#329 draft, `wt/wire-trace`, worktree `~/projects/ha/devicesid
 - #329: Jason approved its observed-pass sentence in `CLAUDE.md` as written, and had "passed on one light (PR #204)"
   generalized to "one device" (`fca797f`, pushed).
 
+**Also done:** `observed.normalize` (numbers to their sign, bool exact), legend keeps the exact call, tests, `docs/rig.md`
+(sign rule, ZHA `move_mode` blind spot), shared-prefix result in Spike results (none).
+
 **Next:**
 
-1. `observed.normalize`: every number to its sign, recursively (bool is not a number here: `isinstance(x, bool)`
-   first). `sequence`'s legend must keep the call as sent, not normalized (today it stores `normalize(call)`), and the
-   run report and `## Calls` show the exact call; two exact calls with one hash keep the latest. Tests in
-   `tests/test_observed.py`: 68.27 and 69.14 hash alike; 0 vs 6875 don't; -13 vs 13 don't; strings and keys still
-   split; the legend keeps exact values.
-2. Rerun `scripts/diffcalls.py`-style check: the scratch script is
-   `/private/tmp/claude-501/-Users-jason-projects-ha-ha-rig-wt-observed-facts/3c201fca-9b14-492d-a685-bc87e42ba259/scratchpad/diffcalls.py`
-   (it diffs the reports' rendered calls, so after step 1 compare hashes instead, or re-normalize the rendered params).
-   Note shared prefixes among the observed tests' twins in Spike results.
-3. `docs/rig.md`, Observed tests: the sign rule and the ZCL `move_mode` blind spot.
-4. Step 7: live check (Verification, Live 1-3) through `scripts/rig.py` behind its gate; `audit-gate brief pr` and the
-   audit; both PRs ready; #329 merges first, then `gh run rerun` #48's Tests runs before merging.
+1. Step 7, live check (Verification, Live 1-3) through `scripts/rig.py` behind its gate. It needs Jason at the rig
+   (Live 1 is attended) and a prefix pair built for Live 2, as today's tests have none.
+2. `audit-gate brief pr` and the audit; both PRs ready; #329 merges first, then `gh run rerun` #48's Tests runs
+   before merging.
 
 **Open:** nothing for Jason. Known gap from before: rows from a resumed session's saved cases are re-dated to the
 finishing session.

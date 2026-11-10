@@ -7,6 +7,7 @@ from ha_rig.observed import (
     begins,
     call_hash,
     lend,
+    normalize,
     sequence,
 )
 
@@ -101,3 +102,22 @@ def test_the_legend_lists_only_calls_some_row_uses(tmp_path):
     observed.add([row(SIGNIFY, seq(RAISE))], dict([sequence([("x", RAISE)])[1].popitem(), (call_hash(STOP), STOP)]))
     assert call_hash(STOP) not in observed.render()
     assert call_hash(RAISE) in observed.render()
+
+
+def hue(brightness, **extra):
+    return ("hue", "put", {"dimming": {"brightness": brightness}, **extra})
+
+
+def test_numbers_hash_by_their_sign_and_nothing_else_jitters_into_the_hash():
+    assert call_hash(hue(68.27)) == call_hash(hue(69.14))  # timing jitter
+    assert call_hash(hue(0)) != call_hash(hue(6875))  # zero is its own sign
+    assert call_hash(hue(-13)) != call_hash(hue(13))
+    assert call_hash(hue(1, on=True)) != call_hash(hue(1, on=False))  # a bool is not a number
+    assert call_hash(hue(1, mode="up")) != call_hash(hue(1, mode="down"))  # strings stay exact
+    assert call_hash(hue(1)) != call_hash(("hue", "put", {"dim": {"brightness": 1}}))  # keys stay exact
+    assert normalize(("z", "c", {"a": [1, -2, 0, True, "x"]})) == ("z", "c", {"a": ["+", "-", "0", True, "x"]})
+
+
+def test_the_legend_keeps_the_exact_call_and_the_latest_of_one_hash():
+    _, legend = sequence([("a", hue(68.27)), ("a", STOP), ("a", hue(69.14))])
+    assert legend[call_hash(hue(68.27))] == hue(69.14)

@@ -35,11 +35,24 @@ def short_hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()[:6]
 
 
+def _sign(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return "0" if value == 0 else "+" if value > 0 else "-"
+    if isinstance(value, Mapping):
+        return {key: _sign(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_sign(item) for item in value]
+    return value
+
+
 def normalize(call: Call) -> Call:
-    """The call with the fields that jitter between runs of the same pattern reduced; never one that decides the
-    pattern, such as a transition time."""
+    """The call as hashed: every number reduced to its sign (`+`, `-`, `0`), since the values a light is stopped at
+    jitter between runs (timing), while whether a field is set, zero or negative does not. Keys, strings and booleans
+    stay exact."""
     transport, command, params = call
-    return transport, command, params
+    return transport, command, _sign(params)
 
 
 def render_call(call: Call) -> str:
@@ -53,12 +66,13 @@ def call_hash(call: Call) -> str:
 
 
 def sequence(calls: Iterable[tuple[str, Call]]) -> tuple[Sequence, dict[str, Call]]:
-    """The sequence of `(slot, call)` pairs in the order sent, and the legend from each hash to its normalized call."""
+    """The sequence of `(slot, call)` pairs in the order sent, and the legend from each hash to the
+    call as last sent (exact, not normalized)."""
     by_slot: dict[str, list[str]] = {}
     legend: dict[str, Call] = {}
     for slot, call in calls:
         digest = call_hash(call)
-        legend[digest] = normalize(call)
+        legend[digest] = call
         hashes = by_slot.setdefault(slot, [])
         if not hashes or hashes[-1] != digest:
             hashes.append(digest)

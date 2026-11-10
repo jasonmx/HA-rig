@@ -336,6 +336,12 @@ same device, state and calls is replaced. Its Calls section maps each call's has
   written, with entities replaced by their slot. **A sequence** is, per slot (`target` for the case's role, another
   role by name, `<slot>.member<n>` for a group's members), the calls in order, repeats collapsed; timing and
   interleaving between slots don't count.
+- **Numbers count by sign.** A call is hashed with every number reduced to `+`, `-` or `0`, because values computed
+  from where a light was when stopped (a pinned brightness, the remaining transition) differ run to run, while the
+  shape of the call does not. Keys, strings and booleans stay exact, so `0` against a positive is a different call; the
+  Calls section and run reports keep the exact values of the latest call. One blind spot is accepted: ZHA's
+  EnhancedMoveHue carries direction as `move_mode` 1 (up) or 3 (down), which both read `+`, so an observed `lower_hue`
+  test that shares `raise_hue`'s setup on ZHA would be lent its pass. None does.
 - **Lent.** After the automated run of an observed test passes, its observed case is lent a pass, not run or asked,
   when a `pass` row of the same starting state has calls the automated run's begin (or equal), every device in the
   case has that row's maker, and no newer `fail` row on one of the case's models has calls the run's begin with. It

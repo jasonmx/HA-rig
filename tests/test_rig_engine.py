@@ -2814,7 +2814,7 @@ async def test_an_observed_pass_lends_to_a_later_unattended_run_that_sends_the_s
     "change",
     [
         {"maker": "Other"},  # another maker's devices
-        {"text": OBSERVED.replace("duration: 0.6", "duration: 0.7")},  # other calls
+        {"text": OBSERVED.replace("duration: 0.6", "duration: 0")},  # other calls (0.7 would hash alike: signs only)
         {"subscribe": False},  # no trace
         {"reobserve": True},
     ],
