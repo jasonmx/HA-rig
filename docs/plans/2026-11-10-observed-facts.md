@@ -28,7 +28,8 @@ deviceside record has an observed pass today, so nothing needs migrating.
 
 Intent: Observed results are kept per integration in `_observed.md`, keyed by maker, starting state and call sequence.
 A run lends an observed pass when its automated twin's calls are covered by an observed pass, prefixes included, so an
-unattended run never narrows a record. Closes #36.
+unattended run never narrows a record. Refs #36; the live check is the follow-on
+`2026-11-10-observed-facts-live-check.md`, which closes it.
 Touches: ha_rig/engine.py, ha_rig/client.py, ha_rig/coverage.py, ha_rig/staging.py, ha_rig/observed.py,
 docs/rig.md, README.md, tests/
 Tests-with: jasonmx/deviceside#329
@@ -146,8 +147,9 @@ outside the spike: a Z2M `get_attributes` timeout warning, and Hue `sets_after_a
 4. Capture in `client.py` and the engine: sequences on `CaseResult`, full calls in the run report.
 5. The lend in the observed phase; writing `_observed.md` through staging; the suite record's suffix and footnote.
 6. `--reobserve`, the README `--help` block, `--coverage` wording, docs.
-7. Live check (below), `/audit-code`, then mark both PRs ready. The deviceside PR merges first; then `gh run rerun`
-   the rig PR's Tests runs before merging.
+7. `/audit-code`, then mark both PRs ready. The deviceside PR merges first; then `gh run rerun` the rig PR's Tests
+   runs before merging. The live check (Verification, Live) moved to the follow-on plan
+   `2026-11-10-observed-facts-live-check.md`, so it can wait for Jason at the rig.
 
 ## Verification
 
@@ -162,7 +164,7 @@ outside the spike: a Z2M `get_attributes` timeout warning, and Hue `sets_after_a
   - An unattended run with a lend writes `pass (observed …)`, not `not observed`; `--reobserve` runs them.
 - deviceside: the `check_release.py` test that `_observed.md` isn't a record.
 - `.venv/bin/pytest`, `pre-commit run --all-files`, `tests/test_rig.py` (the `--help` block).
-- Live, through `scripts/rig.py` behind its gate:
+- Live (the follow-on plan), through `scripts/rig.py` behind its gate:
   1. Attended, on the suite with the longer sequence: rows are written to `_observed.md`.
   2. `--unattended` on a suite whose observed test is a prefix of it: lent, `pass (observed …)`.
   3. Change the adapter's call on a scratch branch, then `--unattended`: `not observed`, no lend.
