@@ -94,9 +94,12 @@ tests:
       - call: {duration: 6, brightness: 50, transition: 2}
       - expect_response: {status: expected, integration: self}
       - expect_state: {state: on, brightness: {min: 120, max: 136}, within: tol + 2}
+      # The on check can pass at once (Z2M shows the target brightness before the fade ends), so the still-on
+      # check comes 2 s early and the off window takes those 2 s back: it ends duration + tol after the on check,
+      # as in every case above, and so still covers Z2M's state read at on_time + 1 s.
       - wait: duration - tol - 2
       - expect_state: {state: on}
-      - expect_state: {state: off, within: 2 * tol}
+      - expect_state: {state: off, within: 2 * tol + 2}
 
   # Shelly's RGBCCT Set carries mode rgb with the color, so color_mode rgb shows the bulb left color temperature.
   # Watched, as no automated check sees whether it lit warm white first.
