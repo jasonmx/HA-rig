@@ -347,7 +347,9 @@ same device, state and calls is replaced unless it is newer; on one date a fail 
   case has that row's maker, and no newer `fail` row on one of the case's models has calls the run's begin with. It
   holds across tests, suites, roles, models and firmware of that maker, and across HA and DeviceSide versions: a
   regression an upgrade brings is missed until someone reports it and an attended run records the failure. Its record
-  row reads `pass (observed <date>)`, with a footnote to `_observed.md`.
+  row reads `pass (observed <date>)`, with a footnote to `_observed.md`. A `fail` seen later in the same run that
+  blocks a lend takes it back at once (`not observed: a fail seen this run blocks its lend`), and the case is then
+  run if someone is there.
 - **Not lent**, and run (or `not observed` unattended), when the automated run sent calls no pass covers, or sent no
   trace: the trace needs `HA_ADMIN_TOKEN` (HA lets only an admin subscribe to the event), and the run says so.
 - **`--reobserve`** runs every observed case regardless, as a spot check after a major firmware upgrade.

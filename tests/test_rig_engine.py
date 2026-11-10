@@ -2867,7 +2867,7 @@ async def test_a_fail_seen_mid_run_takes_back_a_lend_that_run_made(tmp_path, rep
     ha = FakeAdmin({"switch.plug": {}}, timer_on)
     ha.devices[0]["manufacturer"] = "Acme"
     await ha.subscribe_wire()
-    steps, observations = suite(tmp_path, text), {"shelly": list(rows)}
+    steps, observations, reported = suite(tmp_path, text), {"shelly": list(rows)}, []
     result = await run_one(
         ha,
         steps,
@@ -2876,8 +2876,16 @@ async def test_a_fail_seen_mid_run_takes_back_a_lend_that_run_made(tmp_path, rep
         ask=answers(*replies)[1],
         observations=observations,
         done=saved(steps, AUTOMATED),
+        on_result=lambda s, r: reported.append((r.id, r.outcome, r.detail)),
     )
     seen = outcomes(result)
+    # Taken back as the fail is reported, before `again` runs: a run cut short there leaves no lent pass saved.
+    assert [(case_id, outcome) for case_id, outcome, _ in reported[:3]] == [
+        ("again[switch_plug]", Outcome.PASS),
+        ("again[switch_plug] observed", Outcome.PASS),
+        (WATCHED, Outcome.FAIL),
+    ]
+    assert reported[3] == ("again[switch_plug] observed", Outcome.NOT_OBSERVED, engine.TAKEN_BACK)
     assert seen[WATCHED][0] is Outcome.FAIL
     assert seen["again[switch_plug] observed"] == again
     assert not next(case for case in result.suites[0].cases if case.id == "again[switch_plug] observed").lent

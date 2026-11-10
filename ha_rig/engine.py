@@ -63,6 +63,7 @@ RESTORE_SETTLE_S = 1.5
 # lights have reached the start state it describes.
 SETUP_SETTLE_S = 2.0
 NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
+TAKEN_BACK = "a fail seen this run blocks its lend"  # a lent case's detail once a fail takes its pass back
 
 # ZCL Color Control's hue attributes, which bulb_hue reads on ZHA.
 _COLOR_CLUSTER, _CURRENT_HUE, _ENHANCED_CURRENT_HUE = 0x0300, 0x0000, 0x4000
@@ -2234,7 +2235,8 @@ class _Run:
     wire: HAClient | None = None  # the admin connection DeviceSide's wire trace comes on
     observations: dict[str, list[Observation]] = field(default_factory=dict)  # each integration's _observed.md rows
     reobserve: bool = False  # run observed cases even where a pass covers their calls
-    lends: list[tuple[Case, HAClient]] = field(default_factory=list)  # the cases this run lent a pass, for unlend
+    lends: list[tuple[Case, HAClient]] = field(default_factory=list)  # the cases this run lent a pass
+    taken_back: list[tuple[Case, HAClient]] = field(default_factory=list)  # lends a fail since blocks, for unlend
     _makers: dict[str, Maker] | None = None
     _makers_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -2306,6 +2308,20 @@ class _Run:
         # Lanes interleave their lines, so each names its suite.
         prefix = f"{case.suite.integration} / {case.suite.name}  " if self.lanes else "  "
         self.out(f"{prefix}{case.id}: {result.outcome}" + (f" ({result.detail})" if result.detail else ""))
+        if seen is not None and result.outcome is Outcome.FAIL:
+            self.take_back()
+
+    def take_back(self) -> None:
+        """Report not observed each case this run lent a pass that a fail seen since blocks, at once, so its pass is
+        never left saved however the run ends; unlend runs it."""
+        for case, client in self.lends:
+            if self.lent(case, self.results.get((id(case.suite), case.twin or ""))) is None:
+                self.taken_back.append((case, client))
+        gone = {(id(case.suite), case.id) for case, _ in self.taken_back}
+        self.lends = [(case, client) for case, client in self.lends if (id(case.suite), case.id) not in gone]
+        for case, _ in self.taken_back:
+            if self.results[id(case.suite), case.id].lent:
+                self.report(case, _not_run(case, Outcome.NOT_OBSERVED, TAKEN_BACK))
 
     async def all_automated(self, planned: list[tuple[Suite, HAClient, list[Case]]]) -> list[tuple[Case, HAClient]]:
         """Run the planned suites' automated cases, in lanes or one suite after another; return the observed cases
@@ -2382,20 +2398,11 @@ class _Run:
                 self.ask = None
 
     async def unlend(self) -> None:
-        """Run each case this run lent a pass whose lend a fail seen since blocks, as the observed cases run, until
-        none is left; one left unrun (unattended, or the budget spent) is not observed. A run of one can fail and
-        block another, so it goes round again."""
-        while revoked := [
-            (case, client)
-            for case, client in self.lends
-            if self.lent(case, self.results.get((id(case.suite), case.twin or ""))) is None
-        ]:
-            gone = {(id(case.suite), case.id) for case, _ in revoked}
-            self.lends = [(case, client) for case, client in self.lends if (id(case.suite), case.id) not in gone]
-            await self.observed(revoked)
-            for case, _ in revoked:
-                if self.results[id(case.suite), case.id].lent:
-                    self.report(case, _not_run(case, Outcome.NOT_OBSERVED, "a fail seen this run blocks its lend"))
+        """Run the observed cases whose lends take_back took, while someone is there; a run of one can fail and take
+        back another, so it goes round again. One left unrun (unattended, or the budget spent) stays not observed."""
+        while self.taken_back and self.ask is not None:
+            taken, self.taken_back = self.taken_back, []
+            await self.observed(taken)
 
 
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
