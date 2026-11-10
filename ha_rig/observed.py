@@ -5,9 +5,11 @@ sequence of calls, and to any sequence it begins with (a device can't know which
 stands, whichever test sends the pattern, across firmware, HA and code; an observed failure on a model blocks lends to
 that model for sequences that begin with the failed one, until a newer pass on that model covers them.
 
-A call is `(transport, command, params)` as deviceside's wire trace fires it (`deviceside_wire`), normalized and
-hashed to six hex characters. A sequence is, per slot (a role or member slot, never an entity ID), the ordered call
-hashes with consecutive repeats collapsed; interleaving between slots and timing are ignored.
+A call is `(transport, command, params, options)` as deviceside's wire trace fires it (`deviceside_wire`), normalized
+and hashed to six hex characters; `options` (a transport setting that changes the encoding) is hashed only when
+present. A call with an unknown option (`null`) is never lent a pass and never recorded as one. A sequence is, per
+slot (a role or member slot, never an entity ID), the ordered call hashes with consecutive repeats collapsed;
+interleaving between slots and timing are ignored.
 
 Pure: no HA, no files but the one `ObservedFile` reads and renders.
 """
@@ -24,12 +26,18 @@ from typing import Any
 FILE = "_observed.md"  # check_release.py --records reads only <action>(-<option>).md, so it skips this
 PASS, FAIL = "pass", "fail"
 
-type Call = tuple[str, str, Any]  # (transport, command, params)
+type Call = tuple[str, str, Any, dict]  # (transport, command, params, options)
 type Sequence = tuple[tuple[str, tuple[str, ...]], ...]  # ((slot, (hash, ...)), ...), sorted by slot
 
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _call(items: Iterable[Any]) -> Call:
+    """A call from its saved list; an earlier ledger's has no options."""
+    transport, command, params, *options = items
+    return transport, command, params, options[0] if options else {}
 
 
 def short_hash(value: Any) -> str:
@@ -51,19 +59,20 @@ def _sign(value: Any) -> Any:
 def normalize(call: Call) -> Call:
     """The call as hashed: every number reduced to its sign (`+`, `-`, `0`), since the values a light is stopped at
     jitter between runs (timing), while whether a field is set, zero or negative does not. Keys, strings and booleans
-    stay exact."""
-    transport, command, params = call
-    return transport, command, _sign(params)
+    stay exact, and so do `options`."""
+    transport, command, params, options = call
+    return transport, command, _sign(params), options
 
 
 def render_call(call: Call) -> str:
     """One call on a line: its transport, command and canonical params."""
-    transport, command, params = call
-    return f"{transport} {command} {_canonical(params)}"
+    transport, command, params, options = call
+    return f"{transport} {command} {_canonical(params)}" + (f" {_canonical(options)}" if options else "")
 
 
 def call_hash(call: Call) -> str:
-    return short_hash(list(normalize(call)))
+    *head, options = normalize(call)
+    return short_hash([*head, options] if options else head)
 
 
 def sequence(calls: Iterable[tuple[str, Call]]) -> tuple[Sequence, dict[str, Call]]:
@@ -103,11 +112,18 @@ class Trace:
     sequence: Sequence
     legend: dict[str, Call] = field(compare=False, hash=False)
     devices: tuple[Device, ...]
+    unknown: bool = False  # a call's option is unknown (`null`): it can't prove, or be proved by, a pass
 
     def rows(self, observed_in: str, date: str, passed: bool) -> list[Observation]:
-        """One row per device: what a person saw this case's calls do."""
+        """One row per device: what a person saw this case's calls do. None when an option is unknown."""
+        if self.unknown:
+            return []
         result = PASS if passed else FAIL
         return [Observation(device, self.state, self.sequence, observed_in, date, result) for device in self.devices]
+
+    def lent_by(self, rows: Iterable[Observation]) -> Observation | None:
+        """The pass row that lends this trace's calls (`lend`), or None, always when an option is unknown."""
+        return None if self.unknown else lend(rows, self.state, self.sequence, self.devices)
 
     def to_json(self) -> dict:
         return {
@@ -115,6 +131,7 @@ class Trace:
             "sequence": [[slot, list(hashes)] for slot, hashes in self.sequence],
             "legend": {digest: list(call) for digest, call in self.legend.items()},
             "devices": [[device.maker, device.model, device.firmware] for device in self.devices],
+            "unknown": self.unknown,
         }
 
     @classmethod
@@ -122,8 +139,9 @@ class Trace:
         return cls(
             data["state"],
             tuple((slot, tuple(hashes)) for slot, hashes in data["sequence"]),
-            {digest: tuple(call) for digest, call in data["legend"].items()},
+            {digest: _call(call) for digest, call in data["legend"].items()},
             tuple(Device(*device) for device in data["devices"]),
+            data.get("unknown", False),
         )
 
 
@@ -183,7 +201,8 @@ def merge(rows: list[Observation], new: Observation) -> bool:
 
 
 HEADER = "| Maker | Model | Firmware | Starting state | Sequence | Observed in | Date | Result |"
-LEGEND_HEADER = "| Call | Transport | Command | Params |"
+LEGEND_HEADER = "| Call | Transport | Command | Params | Options |"
+OLD_LEGEND_HEADER = "| Call | Transport | Command | Params |"  # before options: read, never written
 ROW = re.compile(r"^\|(.*)\|$")
 
 
@@ -229,7 +248,7 @@ class ObservedFile:
         for line in path.read_text().splitlines():
             if line.startswith("## "):
                 section = line[3:].strip()
-            elif not ROW.match(line) or line.startswith("|---") or line in (HEADER, LEGEND_HEADER):
+            elif not ROW.match(line) or line.startswith("|---") or line in (HEADER, LEGEND_HEADER, OLD_LEGEND_HEADER):
                 continue
             elif section == "Observed":
                 maker, model, firmware, state, seq, observed_in, date, result = _cells(line)
@@ -238,8 +257,13 @@ class ObservedFile:
                     Observation(device, _code(state), parse_sequence(seq), _code(observed_in), date, result)
                 )
             elif section == "Calls":
-                digest, transport, command, params = _cells(line)
-                observed.legend[_code(digest)] = (transport, _code(command), json.loads(_code(params)))
+                digest, transport, command, params, *options = _cells(line)
+                observed.legend[_code(digest)] = (
+                    transport,
+                    _code(command),
+                    json.loads(_code(params)),
+                    json.loads(_code(options[0]) or "{}") if options else {},
+                )
         return observed
 
     def add(self, rows: Iterable[Observation], legend: Mapping[str, Call]) -> None:
@@ -282,11 +306,12 @@ class ObservedFile:
                 row.result,
             ]
             lines.append("| " + " | ".join(map(_cell, cells)) + " |")
-        lines += ["", "## Calls", "", LEGEND_HEADER, "|---|---|---|---|"]
+        lines += ["", "## Calls", "", LEGEND_HEADER, "|---|---|---|---|---|"]
         used = {digest for row in self.rows for _, hashes in row.sequence for digest in hashes}
         for digest in sorted(used & self.legend.keys()):
-            transport, command, params = self.legend[digest]
+            transport, command, params, options = self.legend[digest]
             cells = [f"`{digest}`", transport, f"`{command}`", f"`{_canonical(params)}`"]
+            cells.append(f"`{_canonical(options)}`" if options else "")
             lines.append("| " + " | ".join(map(_cell, cells)) + " |")
         return "\n".join(lines) + "\n"
 

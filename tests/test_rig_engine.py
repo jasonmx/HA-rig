@@ -2774,12 +2774,13 @@ ACME = Maker("Acme", "S3", "2.0")
 
 
 async def traced_run(
-    tmp_path, ask=None, rows=(), *, text=OBSERVED, maker="Acme", subscribe=True, reobserve=False
+    tmp_path, ask=None, rows=(), *, text=OBSERVED, maker="Acme", subscribe=True, reobserve=False, wire_for=None
 ) -> tuple[FakeAdmin, RunResult]:
     """OBSERVED on a plug made by `maker`, with DeviceSide's wire trace on unless not `subscribe`, and `rows` as the
     integration's _observed.md."""
     ha = FakeAdmin({"switch.plug": {}}, timer_on)
     ha.devices[0]["manufacturer"] = maker
+    ha.wire_for = wire_for
     if subscribe:
         await ha.subscribe_wire()
     inv = profile(switch_plug="switch.plug")
@@ -2902,6 +2903,22 @@ async def test_a_trace_keeps_the_calls_per_slot_and_the_rigs_own_ha_calls_in_ord
     assert [slot for slot, _ in trace.sequence] == ["target"]
 
 
+@pytest.mark.parametrize("native", [True, None])
+async def test_a_trace_carries_a_wire_events_options_and_a_null_one_is_never_lent_or_recorded(tmp_path, native):
+    options = {"hue_native_control": native}
+    wire = lambda action, data: [("z2m", "set", {"state": "ON"}, options)]  # noqa: E731
+    _, first = await traced_run(tmp_path, answers("", "y")[1], wire_for=wire)
+    [trace] = [case.trace for case in first.suites[0].cases if case.id == AUTOMATED]
+    assert [call[3] for call in trace.legend.values()] == [options]
+    assert trace.unknown is (native is None)
+    rows = trace.rows(AUTOMATED, "2026-11-01", True)
+    assert bool(rows) is (native is not None)
+    _, second = await traced_run(tmp_path, rows=rows or [], wire_for=wire)
+    lent = outcomes(second)[WATCHED] == (Outcome.PASS, "its calls passed when observed on 2026-11-01")
+    assert lent is (native is not None)
+    assert ("never lent or recorded" in write_report(second, tmp_path, "run").read_text()) is (native is None)
+
+
 async def test_a_report_lists_each_traced_cases_calls_by_slot(tmp_path):
     _, result = await traced_run(tmp_path)
     text = write_report(result, tmp_path, "rig run").read_text()
@@ -2912,7 +2929,7 @@ async def test_a_report_lists_each_traced_cases_calls_by_slot(tmp_path):
 
 
 def test_a_traced_and_lent_result_survives_the_ledger():
-    seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": {"seconds": 0.6}}))])
+    seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": {"seconds": 0.6}}, {}))])
     case = CaseResult(WATCHED, "switch_plug", "switch", Outcome.PASS, twin=AUTOMATED, lent="2026-11-01")
     case.trace = Trace("abc123", seq, legend, (ACME,))
     again = progress_result(json.loads(json.dumps(progress_saved(case))))

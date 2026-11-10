@@ -32,7 +32,7 @@ from .client import HAClient, HAError, device_ieee
 from .journal import Journal
 from .observed import FILE as OBSERVED_FILE
 from .observed import Device as Maker
-from .observed import Observation, ObservedFile, Trace, lend, render_call, sequence, short_hash
+from .observed import Observation, ObservedFile, Trace, render_call, sequence, short_hash
 from .observed import merge as merge_row
 from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
@@ -1534,11 +1534,13 @@ class _CaseRun:
 
     async def trace(self, slots: dict[str, str], traced: list[dict]) -> Trace:
         seq, legend = sequence(
-            (slots[call["entity_id"]], (call["transport"], call["command"], call["params"])) for call in traced
+            (slots[call["entity_id"]], (call["transport"], call["command"], call["params"], call.get("options") or {}))
+            for call in traced
         )
         makers = await self.makers() if self.makers is not None else {}
         devices = tuple(dict.fromkeys(makers[e] for e in slots if e in makers))
-        return Trace(starting_state(self.case), seq, legend, devices)
+        unknown = any(None in options.values() for *_, options in legend.values())
+        return Trace(starting_state(self.case), seq, legend, devices, unknown)
 
     async def enable_entry(self) -> str | None:
         """Enable the entry a step left disabled; why it couldn't be, or None. The journal keeps it until it is."""
@@ -2253,7 +2255,7 @@ class _Run:
         if self.reobserve or twin is None or twin.outcome is not Outcome.PASS or twin.trace is None:
             return None
         trace = twin.trace
-        row = lend(self.observations.get(case.suite.integration, ()), trace.state, trace.sequence, trace.devices)
+        row = trace.lent_by(self.observations.get(case.suite.integration, ()))
         if row is None:
             return None
         result = _not_run(case, Outcome.PASS, f"its calls passed when observed on {row.date}")
@@ -2603,7 +2605,8 @@ def calls(suite_result: SuiteResult) -> list[str]:
         if (trace := case.trace) is None:
             continue
         lent = f", lent from {case.lent}" if case.lent else ""
-        lines.append(f"- `{case.id}`: state `{trace.state}`{lent}")
+        unknown = ", never lent or recorded: an option is unknown (null)" if trace.unknown else ""
+        lines.append(f"- `{case.id}`: state `{trace.state}`{lent}{unknown}")
         for slot, hashes in trace.sequence:
             lines.append(f"  - {slot}")
             lines += [f"    - `{digest}` `{render_call(trace.legend[digest])}`" for digest in hashes]

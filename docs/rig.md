@@ -331,11 +331,14 @@ sent, the case it was seen in, the date and `pass` or `fail` (a `n`; a step that
 same device, state and calls is replaced unless it is newer; on one date a fail wins. Its Calls section maps each call's hash to the call.
 
 - **A call** is what DeviceSide's wire trace (the `deviceside_wire` event, on while its
-  `custom_components.deviceside.wire` logger is at DEBUG) says a transport sent: `(transport, command, params)`, with
+  `custom_components.deviceside.wire` logger is at DEBUG) says a transport sent: `(transport, command, params, options)`, with
   no device addressing, plus the rig's own HA service calls in steps. The starting state is the case's `setup` as
   written, with entities replaced by their slot. **A sequence** is, per slot (`target` for the case's role, another
   role by name, `<slot>.member<n>` for a group's members), the calls in order, repeats collapsed; timing and
   interleaving between slots don't count.
+  `options` is a transport setting that changes how the call is encoded (Z2M's `hue_native_control`); it is hashed only
+  when present, so calls without it hash as before, and `true` and `false` are different calls. A `null` option is
+  unknown: the case is never lent a pass and records none, and the run report's Calls section says so.
 - **Numbers count by sign.** A call is hashed with every number reduced to `+`, `-` or `0`, because values computed
   from where a light was when stopped (a pinned brightness, the remaining transition) differ run to run, while the
   shape of the call does not. Keys, strings and booleans stay exact, so `0` against a positive is a different call; the
