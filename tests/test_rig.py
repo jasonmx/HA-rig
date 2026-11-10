@@ -1877,7 +1877,9 @@ def observing_run(tmp_path, monkeypatch):
 
 
 def watched(passed: bool) -> engine.CaseResult:
-    trace = observed.Trace("s0", (("slot", ("h1",)),), {"h1": ("t", "c", {})}, (observed.Device("Acme", "S3", "2.0"),))
+    trace = observed.Trace(
+        "s0", (("slot", ("h1",)),), {"h1": ("t", "c", {}, {})}, (observed.Device("Acme", "S3", "2.0"),)
+    )
     return engine.CaseResult(
         "t[light_ct] observed",
         "light_ct",
