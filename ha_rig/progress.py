@@ -35,6 +35,7 @@ from pathlib import Path
 
 from .engine import CaseResult, Device, Outcome, Suite, SuiteResult
 from .journal import write_whole
+from .observed import Trace
 
 DIRECTORY = "deviceside-rig-progress"
 PRUNE_DAYS = 30
@@ -260,6 +261,18 @@ class Progress:
         entry = self.entry(suite)
         return {case["id"]: _result(case) for case in entry["cases"]} if entry else {}
 
+    def traces(self, suite: Suite) -> dict[str, Trace]:
+        """The latest trace saved for each of the suite's cases, at any fingerprint: what its calls were when it last
+        ran, for --coverage to say whether an observed pass would cover them."""
+        found: dict[str, tuple[str, Trace]] = {}
+        for (integration, name, _), entry in self.entries.items():
+            if (integration, name) != (suite.integration, suite.name):
+                continue
+            for case in entry["cases"]:
+                if case.get("trace") and (case["id"] not in found or found[case["id"]][0] < entry["touched"]):
+                    found[case["id"]] = (entry["touched"], Trace.from_json(case["trace"]))
+        return {case_id: trace for case_id, (_, trace) in found.items()}
+
     def done(self) -> Done:
         """The tracked suites' saved results."""
         return {
@@ -339,6 +352,7 @@ class Progress:
 
 def _saved(result: CaseResult) -> dict:
     case = asdict(result) | {"outcome": str(result.outcome), "entity_ids": list(result.entity_ids)}
+    case["trace"] = result.trace.to_json() if result.trace else None
     case.pop("unreachable")
     return case
 
@@ -353,4 +367,6 @@ def _result(case: dict) -> CaseResult:
         tuple(case["entity_ids"]),
         case["twin"],
         absent=case.get("absent", False),
+        trace=Trace.from_json(case["trace"]) if case.get("trace") else None,
+        lent=case.get("lent"),
     )

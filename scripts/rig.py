@@ -156,11 +156,13 @@ from ha_rig.engine import (  # noqa: E402
     cases,
     check_options,
     in_head,
+    load_observations,
     load_step_files,
     merge,
     report_path,
     run,
     unfinished,
+    write_observed,
     write_records,
     write_report,
 )
@@ -720,7 +722,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--action", action="append", help="limit to an action's step files (repeatable)")
     parser.add_argument("-k", dest="keyword", help="run only test cases whose id contains this text")
-    parser.add_argument("--unattended", action="store_true", help="skip observed tests, reporting them not observed")
+    parser.add_argument(
+        "--unattended",
+        action="store_true",
+        help="ask no one: an observed test whose calls no observed pass covers is reported not observed",
+    )
+    parser.add_argument(
+        "--reobserve",
+        action="store_true",
+        help="run observed tests even where an observed pass covers their calls, as after a major firmware upgrade",
+    )
     parser.add_argument(
         "--serial",
         action="store_true",
@@ -1270,6 +1281,7 @@ def run_approved(
             lanes=lanes,
             claim=held.claim,
             debug_logs=args.debug_logs,
+            reobserve=args.reobserve,
             progress=setup.progress,
             selected=setup.selected,
             budget=budget,
@@ -1375,14 +1387,22 @@ def coverage_only(args: argparse.Namespace, directory: Path) -> int:
         else:
             progress.check_ha(version)
     plan = coverage.of(suites, profile, registry, REPO, commit, progress, unattended=args.unattended)
-    for line in coverage_lines(plan, profile, args.keyword):
+    observations = load_observations(TEST_RECORDS_DIR, {suite.integration for suite in suites})
+    hints = coverage.observed_hints(plan, progress, observations)
+    for line in coverage_lines(plan, profile, args.keyword, hints):
         print(line)
     return 0 if all(suite_coverage.covered for suite_coverage in plan) else 1
 
 
-def coverage_lines(plan: list[SuiteCoverage], profile: Profile, keyword: str | None = None) -> list[str]:
-    """One line per suite, its missing cases (those `keyword` keeps) under a partial one, then the total and the devices
-    every missing case needs, their supplies included."""
+def coverage_lines(
+    plan: list[SuiteCoverage],
+    profile: Profile,
+    keyword: str | None = None,
+    hints: dict[tuple[str, str, str], str] | None = None,
+) -> list[str]:
+    """One line per suite, its missing cases (those `keyword` keeps) under a partial one, and any with a hint
+    (coverage.observed_hints), then the total and the devices every missing case needs, their supplies included."""
+    hints = hints or {}
     lines, needed = [], {}
     power = profile.power()
     for suite_coverage in plan:
@@ -1395,8 +1415,9 @@ def coverage_lines(plan: list[SuiteCoverage], profile: Profile, keyword: str | N
             devices = [] if case.skip else list(dict.fromkeys([*case.entities.values(), *case.members]))
             devices += [power[e] for e in devices if e in power and power[e] not in devices]
             needed.update(dict.fromkeys(devices))
-            if suite_coverage.saved:
-                lines.append(f"      {case.id}: {', '.join(devices) or case.skip}")
+            hint = hints.get((suite.integration, suite.name, case.id))
+            if suite_coverage.saved or hint:
+                lines.append(f"      {case.id}: {', '.join(devices) or case.skip}" + (f" ({hint})" if hint else ""))
     covered = sum(suite_coverage.covered for suite_coverage in plan)
     left = sum(len(suite_coverage.missing) for suite_coverage in plan if not suite_coverage.covered)
     lines.append(f"{covered} of {len(plan)} suites covered; {left} cases missing.")
@@ -1845,6 +1866,7 @@ async def run_rig(
     selected: list[Suite] | None = None,
     budget: Budget | None = None,
     pending: set[tuple[str, str]] | None = None,
+    reobserve: bool = False,
 ) -> int:
     """Run the step files, in lanes first when `lanes` (run_phases), then phase by phase, moving the roaming bulbs
     before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then stage a
@@ -1888,13 +1910,14 @@ async def run_rig(
     stamp = started.strftime("%Y-%m-%d %H:%M:%S")
     expected = dict.fromkeys(pattern for suite in suites for pattern in suite.file.expected_log)
     logs = RunLogs(logs_dir or REPORT_DIR, f"rig run {stamp}", started, keep=debug_logs, expected=expected)
-    levels = DebugLevels(Baseline.of(admin or ha, journal, "debug")) if debug_logs else None
+    # The wire trace needs the admin connection, which alone may subscribe to it, and lends observed passes.
+    levels = DebugLevels(Baseline.of(admin or ha, journal, "debug")) if debug_logs or admin else None
     staging = staging_for(stamp, profile, progress)
     code = 1  # only a run that returns 0 is clean; any other end keeps the logs and promotes no record
     unrun = 0  # the cases the run planned with no result, once it ends 0
     try:
         try:
-            await begin_logging(logs, levels, admin, suites, roaming)
+            await begin_logging(logs, levels, admin, suites, roaming, debug_logs)
             result = await run_phases(
                 ha,
                 admin,
@@ -1913,6 +1936,7 @@ async def run_rig(
                 reloads=claim is None or claim.ha == "exclusive",  # holding HA shared, it may not reload the entry
                 progress=progress,
                 budget=budget,
+                reobserve=reobserve,
             )
             result, touched = joined(result, progress, selected)
             if suites:
@@ -2065,14 +2089,26 @@ def end_code(
 
 
 async def begin_logging(
-    logs: RunLogs, levels: DebugLevels | None, admin: HAClient | None, suites: list[Suite], roaming: bool
+    logs: RunLogs,
+    levels: DebugLevels | None,
+    admin: HAClient | None,
+    suites: list[Suite],
+    roaming: bool,
+    debug_logs: bool = False,
 ) -> None:
     """Start Z2M's capture, when the run touches Z2M, then raise the debug levels, when asked: the raise's own lines
-    are captured."""
+    are captured. With the admin connection, turn DeviceSide's wire trace on and subscribe to it, for every run: it
+    lends observed passes (engine.run). Without, observed cases run as before, and a run unattended reports them not
+    observed."""
     z2m = touches_z2m(suites, roaming)
     if z2m:
         await logs.start_z2m(admin)
-    if levels is not None:
+    if admin is not None and levels is not None:
+        await admin.subscribe_wire()
+        await levels.raise_wire()
+    elif any(test.observe for suite in suites for test in suite.file.tests):
+        print("No HA_ADMIN_TOKEN, so no wire trace: no observed case is lent a pass its calls earned before.")
+    if debug_logs and levels is not None:
         await levels.raise_levels(ha_domains({suite.integration for suite in suites}, roaming), z2m)
 
 
@@ -2102,6 +2138,7 @@ async def run_phases(
     reloads: bool = True,
     progress: Progress | None = None,
     budget: Budget | None = None,
+    reobserve: bool = False,
 ) -> RunResult:
     """Each phase: move the bulbs there and make its groups, wait for its targets, then run its cases, automated then
     observed. `pause` pauses the automations, once, after the first phase's targets are all there. A run with no suites
@@ -2127,6 +2164,8 @@ async def run_phases(
         "busy": {},
         "reloads": reloads,
         "budget": budget,
+        "observations": load_observations(TEST_RECORDS_DIR, {suite.integration for suite in suites}),
+        "reobserve": reobserve,
         **saving(progress),
     }
     only = tail(profile) if lanes else None
@@ -2217,15 +2256,18 @@ async def report(
     those an earlier one finished whose records were never promoted (pending)."""
     result = merge(result.suites, profile, registry)
     stamp = stamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.date.today().isoformat()
     for suite_result in result.suites:
         if partial := suite_result.partial:
             print(f"{suite_result.suite.integration} / {suite_result.suite.name}: {partial}")
     print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
+    # What a person saw stands whatever the code (ha_rig/observed.py), so it is kept even with no commit.
+    for path in write_observed(result, registry, TEST_RECORDS_DIR, today, into=staging.directory):
+        staging.add(path, None)
     if commit is None:
         print("No test records: no commit names the tree HA ran (--no-deploy, or origin moved before the deploy).")
         return
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
-    today = datetime.date.today().isoformat()
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     written, kept = await write_records(

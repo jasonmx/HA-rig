@@ -9,8 +9,10 @@ from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import coverage
 from ha_rig.engine import CaseResult, Device, Outcome, Suite, load_step_file, load_step_files
+from ha_rig.observed import Device as ObservedDevice
+from ha_rig.observed import Observation, Trace, sequence
 from ha_rig.profile import Profile
-from ha_rig.progress import Progress
+from ha_rig.progress import Progress, _saved
 from ha_rig.target import deviceside_repo
 
 FILES = {st.action: st for st in load_step_files() if not st.options and st.name is None}
@@ -214,3 +216,25 @@ def test_a_broader_record_covers_the_narrower_profile_and_a_stale_one_warns_it_w
 
     full = suite_coverage(repo, changed, plan())
     assert full.narrows == [] and "won't write" not in str(full)
+
+
+def test_a_missing_observed_case_hints_its_lend_when_its_twins_last_calls_are_covered(tmp_path):
+    seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": 1}))])
+    acme, newer = ObservedDevice("Acme", "S3", "2.0"), ObservedDevice("Acme", "S3", "3.0")
+    twin, watched = "t[switch_plug]", "t[switch_plug] observed"
+    planned = [
+        SimpleNamespace(id=watched, observed=True, twin=twin),
+        SimpleNamespace(id="u", observed=False, twin=None),
+    ]
+    covered = SimpleNamespace(suite=SUITE, missing=planned)
+    traced = CaseResult(twin, "switch_plug", "switch", Outcome.PASS, trace=Trace("s0", seq, legend, (acme,)))
+    entry = {"integration": "shelly", "suite": SUITE.name, "fingerprint": "old", "touched": "2026-11-01T00:00:00"}
+    progress = Progress(tmp_path / "ledger.json", {("shelly", SUITE.name, "old"): entry | {"cases": [_saved(traced)]}})
+    row = Observation(newer, "s0", seq, twin, "2026-11-02", "pass")
+
+    hints = coverage.observed_hints([covered], progress, {"shelly": [row]})
+
+    assert hints == {
+        ("shelly", SUITE.name, watched): "observed 2026-11-02, if the calls are unchanged; seen on S3, firmware 3.0"
+    }
+    assert coverage.observed_hints([covered], progress, {"shelly": []}) == {}

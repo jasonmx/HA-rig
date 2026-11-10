@@ -18,7 +18,7 @@ import operator
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -30,6 +30,9 @@ from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
 from .client import HAClient, HAError, device_ieee
 from .journal import Journal
+from .observed import FILE as OBSERVED_FILE
+from .observed import Device as Maker
+from .observed import Observation, ObservedFile, Trace, lend, sequence, short_hash
 from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +61,7 @@ RESTORE_SETTLE_S = 1.5
 # A light reports off as its fade starts: an observed case waits this long after setup, so the brief comes once the
 # lights have reached the start state it describes.
 SETUP_SETTLE_S = 2.0
+NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
 
 # ZCL Color Control's hue attributes, which bulb_hue reads on ZHA.
 _COLOR_CLUSTER, _CURRENT_HUE, _ENHANCED_CURRENT_HUE = 0x0300, 0x0000, 0x4000
@@ -919,6 +923,8 @@ class CaseResult:
     twin: str | None = None  # Case.twin
     unreachable: bool = False  # Case.unreachable
     absent: bool = False  # Case.absent
+    trace: Trace | None = None  # what the case sent, when DeviceSide's wire trace was on
+    lent: str | None = None  # an observed case not run: the date of the _observed.md pass that covers its twin's calls
 
 
 @dataclass(slots=True)
@@ -1338,6 +1344,24 @@ def _timed(readings: list[float], offsets: list[float], call_times: tuple[float,
     return f"[{timed}] after the call, which took {returned_at - sent_at:.2f} s"
 
 
+def _plain(value: Any, role: str) -> Any:
+    """A step's args as data: an expression as written, and the case's own role, wherever it is named, as `target`."""
+    if isinstance(value, Expr):
+        return ast.unparse(value.node)
+    if isinstance(value, dict):
+        return {key: _plain(item, role) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(item, role) for item in value]
+    return "target" if value == role else value
+
+
+def starting_state(case: Case) -> str:
+    """The hash of the case's setup as written for its integration, its own role as `target`: two cases whose setups
+    read the same start their calls from the same state, whichever test or role they are."""
+    steps = [step for step in case.test.setup if step.only is None or case.suite.integration in step.only]
+    return short_hash([[step.kind, _plain(step.args, case.role)] for step in steps])
+
+
 class _CaseRun:
     """The steps of one case, against one HA connection, with what earlier steps left behind.
 
@@ -1361,8 +1385,12 @@ class _CaseRun:
         journal: Journal | None = None,
         journal_key: str = SERIAL,
         entry: EntryOptions | None = None,
+        wire: HAClient | None = None,
+        makers: Callable[[], Awaitable[dict[str, Maker]]] | None = None,
     ):
         self.bridge = bridge
+        self.wire, self.makers = wire, makers  # the admin connection the wire trace comes on, and its devices
+        self.traced: list[dict] | None = None  # the open wire tap's calls, while the case's steps run
         self.entry = entry  # for entry steps; None without an admin connection
         self.case, self.ha, self.registry, self.ask, self.out, self.position = case, ha, registry, ask, out, position
         self.integration = case.suite.integration
@@ -1436,6 +1464,8 @@ class _CaseRun:
         result = CaseResult(
             case.id, case.role, domain, Outcome.PASS, entity_ids=tuple(case.entities.values()), twin=case.twin
         )
+        slots: dict[str, str] = {}
+        traced: list[dict] = []
         try:
             if case.observed:
                 self.out("")
@@ -1443,10 +1473,12 @@ class _CaseRun:
             await self.await_settled()
             await self.check_power()
             await self.steps(case.test.setup)
-            if case.observed:
-                await self.observed()
-            else:
-                await self.steps(case.test.steps)
+            slots = await self.slots()
+            async with self.tap(slots) as traced:
+                if case.observed:
+                    await self.observed()
+                else:
+                    await self.steps(case.test.steps)
             try:
                 await self.snapshot.await_reload()  # so the next case never lands mid-reload
             except Exception as err:  # noqa: BLE001 - a watcher's error fails the case, not the run
@@ -1462,7 +1494,49 @@ class _CaseRun:
             await self.snapshot.restore()
             if self.baseline is not None:
                 await self.baseline.release()
+        if traced and result.outcome in (Outcome.PASS, Outcome.FAIL):
+            try:
+                result.trace = await self.trace(slots, traced)
+            except Exception as err:  # noqa: BLE001 - a lookup that fails costs the trace, not the case
+                _LOGGER.warning("Could not read the devices behind %s, so it has no trace: %s", case.id, err)
         return result
+
+    async def slots(self) -> dict[str, str]:
+        """The slot of each entity the case's calls may reach: `target` for its role, the role's name for another,
+        and `<slot>.member<n>` for a group's members, which DeviceSide traces apart when it writes them one by one."""
+        slots = {}
+        for role, entity_id in self.case.entities.items():
+            slots[entity_id] = "target" if role == self.case.role else role
+        for entity_id, slot in list(slots.items()):
+            if self.is_group(entity_id):
+                for number, member in enumerate(await self.members(entity_id), 1):
+                    slots.setdefault(member, f"{slot}.member{number}")
+        return slots
+
+    @contextlib.asynccontextmanager
+    async def tap(self, slots: dict[str, str]) -> AsyncIterator[list[dict]]:
+        """The calls the steps send to the case's entities: DeviceSide's, from its wire trace, and the rig's own HA
+        calls (`_set`), in order. Empty without the admin connection the trace comes on."""
+        if self.wire is None:
+            yield []
+            return
+        with self.wire.wire_tap(slots) as traced:
+            self.traced = traced
+            try:
+                yield traced
+            finally:
+                # A failed drain loses only the calls still in flight, which a person may not have seen anyway.
+                with contextlib.suppress(Exception):
+                    await self.wire.drain_wire()
+                self.traced = None
+
+    async def trace(self, slots: dict[str, str], traced: list[dict]) -> Trace:
+        seq, legend = sequence(
+            (slots[call["entity_id"]], (call["transport"], call["command"], call["params"])) for call in traced
+        )
+        makers = await self.makers() if self.makers is not None else {}
+        devices = tuple(dict.fromkeys(makers[e] for e in slots if e in makers))
+        return Trace(starting_state(self.case), seq, legend, devices)
 
     async def enable_entry(self) -> str | None:
         """Enable the entry a step left disabled; why it couldn't be, or None. The journal keeps it until it is."""
@@ -1514,7 +1588,7 @@ class _CaseRun:
                 saw = await self.answer("    What did you see? (Enter to skip) ")
             except _NoOneThere:
                 saw = ""
-            raise StepFailure(f"not seen: {observe.ask}" + (f"; saw: {saw}" if saw else ""))
+            raise StepFailure(f"{NOT_SEEN}{observe.ask}" + (f"; saw: {saw}" if saw else ""))
 
     async def lights_by_name(self) -> str:
         """The case's lights by name, a group's members after it: the brief's step files can't name household lights."""
@@ -1563,11 +1637,15 @@ class _CaseRun:
         await self.snapshot.await_reload(entity_id)
         await self.touch(entity_id)
         data = {key: value for key, value in args.items() if key not in ("target", "state")}
-        if domain == "scene":
-            await self.ha.call_service("scene", "turn_on", {"entity_id": entity_id, **data})
-            return
-        service = "turn_on" if args["state"] == "on" else "turn_off"
+        service = "turn_on" if domain == "scene" or args["state"] == "on" else "turn_off"
+        if self.traced is not None:
+            await self.wire.drain_wire()  # so the calls before it are in the tap first
+            self.traced.append(
+                {"entity_id": entity_id, "transport": "ha", "command": f"{domain}.{service}", "params": data}
+            )
         await self.ha.call_service(domain, service, {"entity_id": entity_id, **data})
+        if domain == "scene":
+            return
         want: dict[str, Any] = {"state": args["state"]}
         if "brightness_pct" in data:
             # A light already on reads "on" at once; wait for the brightness, so the bridge state the next call
@@ -1971,6 +2049,8 @@ async def run(
     on_result: Callable[[Suite, CaseResult], None] | None = None,
     on_facts: Callable[[Suite, str | None, list[Device]], None] | None = None,
     budget: Budget | None = None,
+    observations: dict[str, list[Observation]] | None = None,
+    reobserve: bool = False,
 ) -> RunResult:
     """Run every case and print the table; ADMIN_INTEGRATIONS run on `admin`. `ask=None` is --unattended.
 
@@ -1984,6 +2064,10 @@ async def run(
     out, as `only` leaves cases out, and an observed case whose saved twin failed is still skipped. `on_result` gets
     each case's result as it finishes (a cancelled case has none), `on_facts` each part's facts, taken even when a
     signal or the `budget` stops the part. Once the budget is spent no case starts; the rest get no result.
+
+    With `admin` subscribed to DeviceSide's wire trace (HAClient.subscribe_wire), each case's result carries the calls
+    its steps sent (CaseResult.trace). An observed case is then lent its pass, not run, when a pass in `observations`
+    (each integration's _observed.md rows) covers its twin's calls, unless `reobserve`.
     """
     only = unfinished(done, only)
     planned = _plan(suites, profile, registry, ha, admin, keyword, only, out)
@@ -2006,6 +2090,9 @@ async def run(
         lanes=lanes,
         on_result=on_result,
         budget=budget,
+        wire=admin,
+        observations=observations or {},
+        reobserve=reobserve,
     )
     if busy is not None:
         rig_run.busy = busy
@@ -2140,6 +2227,31 @@ class _Run:
     lanes: bool = False  # whether automated cases run in lanes: their lines then name their suite
     on_result: Callable[[Suite, CaseResult], None] | None = None
     budget: Budget | None = None
+    wire: HAClient | None = None  # the admin connection DeviceSide's wire trace comes on
+    observations: dict[str, list[Observation]] = field(default_factory=dict)  # each integration's _observed.md rows
+    reobserve: bool = False  # run observed cases even where a pass covers their calls
+    _makers: dict[str, Maker] | None = None
+    _makers_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def makers(self) -> dict[str, Maker]:
+        """The device behind each entity, read once a run: a roaming run calls run() once per network."""
+        async with self._makers_lock:
+            if self._makers is None:
+                self._makers = await entity_makers(self.wire)
+            return self._makers
+
+    def lent(self, case: Case, twin: CaseResult | None) -> CaseResult | None:
+        """An observed case's pass, not run, when an _observed.md pass covers the calls its twin just sent; else None.
+        A twin with no trace (no admin connection, or a resumed result saved before traces) lends nothing."""
+        if self.reobserve or twin is None or twin.outcome is not Outcome.PASS or twin.trace is None:
+            return None
+        trace = twin.trace
+        row = lend(self.observations.get(case.suite.integration, ()), trace.state, trace.sequence, trace.devices)
+        if row is None:
+            return None
+        result = _not_run(case, Outcome.PASS, f"its calls passed when observed on {row.date}")
+        result.trace, result.lent = trace, row.date
+        return result
 
     def seed(self, suites: list[Suite], done: dict[tuple[str, str, str], CaseResult]) -> None:
         """An earlier session's results, under this run's suites, for the twin lookup in `automated`."""
@@ -2167,6 +2279,8 @@ class _Run:
             self.journal,
             journal_key,
             self.entry_options,
+            self.wire,
+            self.makers,
         )
 
     async def run_case(
@@ -2228,6 +2342,8 @@ class _Run:
                 if self.budget is not None and self.budget.stops(device_case=True):
                     continue
                 self.report(case, await self.run_case(case, client, None))
+            elif (lent := self.lent(case, twin)) is not None:
+                self.report(case, lent)
             elif self.ask is None:
                 self.report(case, _not_run(case, Outcome.NOT_OBSERVED))
             elif twin is not None and twin.outcome is Outcome.FAIL:
@@ -2299,6 +2415,8 @@ def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
         outcome = str(case.outcome) + (f": {case.detail}" if details and case.detail else "")
         if case.outcome is Outcome.PASS and _firmware_fact(suite_result.suite, case.id):
             outcome += FIRMWARE_FACT
+        if case.outcome is Outcome.PASS and case.lent:
+            outcome = f"{Outcome.PASS} (observed {case.lent})"
         lines.append(f"| `{case.id}` | {target} | {outcome} |")
     return lines
 
@@ -2316,6 +2434,23 @@ class Device:
     def __str__(self) -> str:
         model_id = f" (`{self.model_id}`)" if self.model_id and self.model_id != self.model else ""
         return f"{self.model or 'unknown model'}{model_id}, firmware `{self.firmware or 'unknown'}`"
+
+
+async def entity_makers(ha: HAClient) -> dict[str, Maker]:
+    """The maker, model and firmware of the device behind each entity that has one."""
+    listed, registered = await asyncio.gather(
+        ha.command({"type": "config/entity_registry/list_for_display"}),
+        ha.command({"type": "config/device_registry/list"}),
+    )
+    devices = {device["id"]: device for device in registered}
+    found = {}
+    for entry in listed["entities"]:
+        if (device := devices.get(entry.get("di"))) is not None:
+            model = device.get("model_id") or device.get("model") or "unknown"
+            found[entry["ei"]] = Maker(
+                device.get("manufacturer") or "unknown", model, device.get("sw_version") or "unknown"
+            )
+    return found
 
 
 async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[Device]]:
@@ -2338,6 +2473,7 @@ CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULT
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
 FIRMWARE_FACT = " (firmware fact)"  # after a firmware fact's PASS in a record's Tests table
 CASE_ROW = re.compile(r"^\| `([^`]+)` \|.*\| ([^|]*?) \|$", re.MULTILINE)  # id, then the result column
+LENT = re.compile(r" \(observed \d{4}-\d{2}-\d{2}\)$")  # after a lent observed pass in a record's Tests table
 
 
 @dataclass(frozen=True, slots=True)
@@ -2359,7 +2495,9 @@ class Record:
         text = path.read_text()
         cited, date = CITED_COMMIT.search(text), DATE.search(text)
         _, _, tests = text.partition("## Tests")
-        rows = [(case_id, result.removesuffix(FIRMWARE_FACT)) for case_id, result in CASE_ROW.findall(tests)]
+        rows = [
+            (case_id, LENT.sub("", result.removesuffix(FIRMWARE_FACT))) for case_id, result in CASE_ROW.findall(tests)
+        ]
         return cls(
             path,
             cited and cited[1],
@@ -2404,6 +2542,12 @@ def render_record(
     lines += ["", "## Tests", "", *table(suite_result)]
     if any(case.outcome is Outcome.NOT_OBSERVED for case in suite_result.cases):
         lines += ["", "Tests marked `not observed` had nobody watching."]
+    if any(case.lent for case in suite_result.cases):
+        lines += [
+            "",
+            f"A pass marked `observed` was not watched in this run: the calls its automated case sent here were seen "
+            f"to pass on the same maker's devices on that date ([`{OBSERVED_FILE}`]({OBSERVED_FILE})).",
+        ]
     if any(_firmware_fact(suite, case.id) for case in suite_result.proven):
         lines += [
             "",
@@ -2467,3 +2611,43 @@ async def write_records(
         )
         written.append(path)
     return written, kept
+
+
+def observations(result: RunResult, date: str) -> dict[str, tuple[list[Observation], dict]]:
+    """What each integration's observed cases saw this run, by integration: the rows for _observed.md and their calls.
+    A case a person watched pass, or saw fail, adds a row per device; one lent, not observed, failed for another reason
+    or with no trace adds none."""
+    found: dict[str, tuple[list[Observation], dict]] = {}
+    for suite_result in result.suites:
+        for case in suite_result.cases:
+            if case.trace is None or case.lent or case.twin is None or not case.id.endswith(" observed"):
+                continue
+            seen = case.outcome is Outcome.PASS or (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN))
+            if not seen:
+                continue
+            rows, legend = found.setdefault(suite_result.suite.integration, ([], {}))
+            rows += case.trace.rows(case.twin, date, case.outcome is Outcome.PASS)
+            legend.update(case.trace.legend)
+    return found
+
+
+def write_observed(
+    result: RunResult, registry: Any, records_dir: Path, date: str, into: Path | None = None
+) -> list[Path]:
+    """Add what this run observed to each integration's _observed.md in `records_dir`, written under `into` (a run's
+    staging) laid out as `records_dir`, else into `records_dir`; whether or not any suite writes a record."""
+    written = []
+    for integration, (rows, legend) in observations(result, date).items():
+        observed = ObservedFile.read(
+            records_dir / integration / OBSERVED_FILE, registry.integrations[integration].title
+        )
+        observed.add(rows, legend)
+        path = (into or records_dir) / integration / OBSERVED_FILE
+        observed.write(path)
+        written.append(path)
+    return written
+
+
+def load_observations(records_dir: Path, integrations: Iterable[str]) -> dict[str, list[Observation]]:
+    """Each integration's _observed.md rows in `records_dir`, for run()."""
+    return {key: ObservedFile.read(records_dir / key / OBSERVED_FILE, "").rows for key in integrations}
