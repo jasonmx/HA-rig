@@ -10,6 +10,8 @@ under `deviceside-rig.baseline.lock`, held for one hold or release. The kinds:
 - `z2m_log_level`, with no key: Z2M's log level. Read as debug or trace while no run holds it, it is recorded as info:
   a run left it raised, and debug is never a resting level.
 - `z2m_option`, keyed `<ieee>:<name>`: a Z2M device option, None while unset.
+- `logger_level`, keyed by a logger's name: its level. HA can't read one back, so its original is NOTSET, following
+  its parent, which nothing but the rig changes it from.
 
 A holder is a run's journal name (journal.Journal.name), a `#` and its role (`pause`, `debug`, `join`, `case:<lane>`),
 so each part of a run lets go of its own holds.
@@ -148,6 +150,8 @@ class Baseline:
         if kind == "z2m_option":
             ieee, _, option = key.partition(":")
             return (await self.ha.z2m_device_options(ieee)).get(option)
+        if kind == "logger_level":
+            return "NOTSET"
         if (state := await self.ha.get_state(key)) is None:
             raise BaselineError(f"{key} in the profile's pause list has no state in Home Assistant")
         return "on" if state["state"] == "on" else "off"
@@ -158,6 +162,8 @@ class Baseline:
                 await self.ha.set_log_level(key, original)
         elif kind == "z2m_log_level":
             await self.ha.z2m_set_log_level(original)
+        elif kind == "logger_level":
+            await self.ha.set_logger_level(key, original)
         elif kind == "z2m_option":
             ieee, _, option = key.partition(":")
             if await self.ha.z2m_device(ieee) is not None:  # one Z2M removed has dropped its options

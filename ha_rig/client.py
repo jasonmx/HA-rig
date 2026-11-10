@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import itertools
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from typing import Any
 
 import aiohttp
@@ -12,6 +12,8 @@ import aiohttp
 from .bridge import normalize_ieee
 
 Z2M = "zigbee2mqtt"
+WIRE_EVENT = "deviceside_wire"  # DeviceSide's trace of each call it sends a device
+WIRE_LOGGER = "custom_components.deviceside.wire"  # at DEBUG, DeviceSide fires WIRE_EVENT
 IEEE_INTEGRATIONS = ("zha", Z2M)
 Z2M_TOPIC = "zigbee2mqtt/bridge"
 Z2M_COORDINATOR = "Coordinator"  # the coordinator's friendly name, which permit_join's `device` takes
@@ -102,6 +104,8 @@ class HAClient:
         self._reader: asyncio.Task | None = None
         self._lost: str | None = None  # why the reader ended, once it has: no reply can come after that
         self._state_events: int | None = None  # the state_changed subscription's WebSocket id
+        self._wire_events: int | None = None  # the deviceside_wire subscription's WebSocket id
+        self._taps: list[tuple[frozenset[str], list[dict]]] = []  # open wire_taps
 
     async def connect(self) -> None:
         # The system resolver, not aiohttp's default aiodns: only the system one resolves mDNS (.local) names.
@@ -148,6 +152,8 @@ class HAClient:
     async def _dispatch(self) -> None:
         async for message in self._ws:
             data = message.json()
+            if data["type"] == "pong":  # a ping's reply, which carries no success flag
+                data = {**data, "type": "result", "success": True, "result": None}
             if data["type"] == "result":
                 if (future := self._pending.pop(data["id"], None)) is not None and not future.done():
                     future.set_result(data)
@@ -156,11 +162,42 @@ class HAClient:
             elif (queue := self._mqtt.get(data["id"])) is not None:
                 queue.put_nowait(data["event"]["payload"])
             # Anything else is an MQTT message for a subscription already closed, which HA can still send.
+            elif data["id"] == self._wire_events:
+                self.wire(data["event"]["data"])
             elif data["id"] == self._state_events:
                 event = data["event"]["data"]
                 async with self._changed:
                     self._states[event["entity_id"]] = event["new_state"]
                     self._changed.notify_all()
+
+    async def subscribe_wire(self) -> None:
+        """Receive DeviceSide's wire trace, for `wire_tap`. HA lets only an admin user subscribe to an integration's
+        events, so this is for the admin connection; DeviceSide fires them only while its wire logger is at DEBUG."""
+        if self._wire_events is None:
+            self._wire_events = next(self._ids)
+            await self.command({"type": "subscribe_events", "event_type": WIRE_EVENT}, self._wire_events)
+
+    async def drain_wire(self) -> None:
+        """Wait until every wire event DeviceSide fired before now has reached the taps: HA answers a ping after
+        sending what it queued on this connection before it."""
+        await self.command({"type": "ping"})
+
+    def wire(self, call: dict) -> None:
+        """A `deviceside_wire` event's data: into each open tap on its entity."""
+        for entity_ids, calls in self._taps:
+            if call.get("entity_id") in entity_ids:
+                calls.append(call)
+
+    @contextlib.contextmanager
+    def wire_tap(self, entity_ids: Iterable[str]) -> Iterator[list[dict]]:
+        """The calls DeviceSide sends to `entity_ids` while the block runs, in order, as `deviceside_wire` data
+        (`entity_id`, `transport`, `command`, `params`): empty unless its wire logger is at DEBUG."""
+        tap: tuple[frozenset[str], list[dict]] = (frozenset(entity_ids), [])
+        self._taps.append(tap)
+        try:
+            yield tap[1]
+        finally:
+            self._taps.remove(tap)
 
     async def command(self, payload: dict, msg_id: int | None = None) -> Any:
         """Send a command and wait for its reply. Raises ConnectionError at once if the reader has ended, or ends
@@ -211,6 +248,10 @@ class HAClient:
         await self.command(
             {"type": "logger/integration_log_level", "integration": domain, "level": level, "persistence": "none"}
         )
+
+    async def set_logger_level(self, logger: str, level: str) -> None:
+        """Any logger's level (a name such as DEBUG, or NOTSET to follow its parent) until HA restarts; admin only."""
+        await self.call_service("logger", "set_level", {logger: level})
 
     async def get_state(self, entity_id: str) -> dict | None:
         async with self._session.get(f"{self.url}/api/states/{entity_id}") as response:

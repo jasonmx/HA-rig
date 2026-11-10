@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
-from ha_rig import baseline, engine, target
+from ha_rig import baseline, engine, observed, target
+from ha_rig.client import WIRE_LOGGER
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
@@ -750,8 +751,10 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
         await asyncio.sleep(0.005)
     assert set(journal.sections) == {"profile", "options", "cases"}
     assert json.loads((tmp_path / baseline.NAME).read_text()) == {
-        "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]}
+        "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]},
+        f"logger_level:{WIRE_LOGGER}": {"original": "NOTSET", "holders": [f"{journal.name}#debug"]},
     }
+    assert ha.logger_levels == {WIRE_LOGGER: "DEBUG"}
     assert set(journal.get("cases")) == {"serial"}
 
     os.kill(os.getpid(), signum)
@@ -760,6 +763,7 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
 
     assert "Aborting: putting devices back" in capsys.readouterr().out
     assert put_back(ha)
+    assert ha.logger_levels == {WIRE_LOGGER: "NOTSET"}
     assert not journal.path.exists()
     assert not (tmp_path / baseline.NAME).exists()
 
@@ -1861,3 +1865,61 @@ def test_two_runs_started_the_same_second_stage_apart(tmp_path, profile, monkeyp
     first = rig.staging_for("2026-11-09 10:00:00", profile, None)
     monkeypatch.setattr(rig.os, "getpid", lambda: 1)
     assert rig.staging_for("2026-11-09 10:00:00", profile, None).directory != first.directory
+
+
+def observing_run(tmp_path, monkeypatch):
+    """rig.observing's on_result over a checkout in tmp_path; returns it, the suite and the records directory."""
+    _, suites = resumable(tmp_path)
+    records = tmp_path / "docs" / "test-records"
+    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", records)
+    registry = types.SimpleNamespace(integrations={"shelly": types.SimpleNamespace(title="Shelly")})
+    return rig.observing(registry, None), suites[0], records
+
+
+def watched(passed: bool) -> engine.CaseResult:
+    trace = observed.Trace("s0", (("slot", ("h1",)),), {"h1": ("t", "c", {})}, (observed.Device("Acme", "S3", "2.0"),))
+    return engine.CaseResult(
+        "t[light_ct] observed",
+        "light_ct",
+        "light",
+        engine.Outcome.PASS if passed else engine.Outcome.FAIL,
+        detail="" if passed else engine.NOT_SEEN + "it stayed dark",
+        twin="t[light_ct]",
+        trace=trace,
+    )
+
+
+def observed_rows(records: Path) -> list[tuple[str, str]]:
+    return [(row.date, row.result) for row in observed.ObservedFile.read(records / "shelly" / "_observed.md", "").rows]
+
+
+def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_then(tmp_path, monkeypatch, capsys):
+    on_result, suite, records = observing_run(tmp_path, monkeypatch)
+    today = rig.datetime.date.today().isoformat()
+    on_result(suite, watched(False))  # no report, no commit, a run that dies here: the row is there
+    assert observed_rows(records) == [(today, "fail")]
+    assert "_observed.md" in capsys.readouterr().out
+
+
+def test_a_report_leaves_a_rows_date_alone(tmp_path, monkeypatch):
+    on_result, suite, records = observing_run(tmp_path, monkeypatch)
+    on_result(suite, watched(True))
+    path = records / "shelly" / "_observed.md"
+    path.write_text(path.read_text().replace(rig.datetime.date.today().isoformat(), "2026-01-01"))
+    result = engine.RunResult([engine.SuiteResult(suite, [watched(True)], True)])
+    asyncio.run(rig.report(result, fakes.OPTION_REGISTRY, None, resumable(tmp_path)[0], None))
+    assert observed_rows(records) == [("2026-01-01", "pass")]
+
+
+def test_an_old_pass_does_not_replace_a_newer_fail_and_a_same_day_fail_beats_a_pass(tmp_path, monkeypatch):
+    on_result, suite, records = observing_run(tmp_path, monkeypatch)
+    on_result(suite, watched(False))
+    [row] = observed.ObservedFile.read(records / "shelly" / "_observed.md", "").rows
+    older = observed.ObservedFile("Shelly", [replace(row, date="2026-01-01", result="pass")], {})
+    older.add([replace(row, date="2026-01-01", result="pass")], {})
+    assert [(r.date, r.result) for r in older.rows] == [("2026-01-01", "pass")]
+    older.add([row], {})
+    older.add([replace(row, date="2026-01-01", result="pass")], {})
+    assert [r.result for r in older.rows] == ["fail"]  # the newer fail stays against the old pass
+    on_result(suite, watched(True))  # the same day, a pass after a fail
+    assert [result for _, result in observed_rows(records)] == ["fail"]

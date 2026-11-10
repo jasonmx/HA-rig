@@ -20,9 +20,10 @@ cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 ```text
 usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--coverage] [--no-deploy]
               [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
-              [--unattended] [--serial] [--debug-logs] [--deploy-only] [--for DURATION] [--fresh]
-              [--ignore-unreachables] [--recover] [--promote DIR] [--roam-check] [--wait-free]
-              [--hold INTEGRATION] [--exclusive] [--visual {none,profile}]
+              [--unattended] [--reobserve] [--serial] [--debug-logs] [--deploy-only]
+              [--for DURATION] [--fresh] [--ignore-unreachables] [--recover] [--promote DIR]
+              [--roam-check] [--wait-free] [--hold INTEGRATION] [--exclusive]
+              [--visual {none,profile}]
 
 Run the rig tests against the live HA, behind an authorization gate.
 
@@ -41,7 +42,10 @@ options:
                         limit to an integration key (repeatable); with --wait-free, wait for it
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
-  --unattended          skip observed tests, reporting them not observed
+  --unattended          ask no one: an observed test whose calls no observed pass covers is
+                        reported not observed
+  --reobserve           run observed tests even where an observed pass covers their calls, as
+                        after a major firmware upgrade
   --serial              run every case one at a time, with no lanes: to tell a case that fails in
                         a lane from one that fails
   --debug-logs          run HA's DeviceSide and the run's integrations, and Z2M, at debug, and

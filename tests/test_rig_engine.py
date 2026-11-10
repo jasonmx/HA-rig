@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import json
 import re
 import threading
 import time
@@ -18,21 +19,29 @@ from ha_rig.client import HAError
 from ha_rig.engine import (
     CaseResult,
     Outcome,
+    Record,
     RunResult,
     Suite,
     SuiteResult,
     cases,
+    load_observations,
     load_step_file,
     render_record,
     rig_facts,
     run,
     table,
+    write_observed,
     write_records,
     write_report,
 )
 from ha_rig.journal import Journal
+from ha_rig.observed import FILE as OBSERVED_FILE
+from ha_rig.observed import Device as Maker
+from ha_rig.observed import Trace, sequence
 from ha_rig.profile import Profile, RigEntity
 from ha_rig.progress import Progress
+from ha_rig.progress import _result as progress_result
+from ha_rig.progress import _saved as progress_saved
 from tests.rig_fakes import (
     OPTION_REGISTRY,
     PENDING,
@@ -2757,3 +2766,109 @@ def test_a_record_marks_its_firmware_facts(tmp_path):
     assert engine.Record.read(path).passed == {"plain[switch_plug]", "wins[switch_plug]"}  # a fact's pass still counts
     plain = render_record(SuiteResult(facts, cases[:1], True), "Shelly", "2026.10.1", devices, "d", "t", "lab")
     assert "firmware fact" not in plain
+
+
+# --- Observed passes lent by their calls (ha_rig/observed.py) ------------------------------------------------------
+
+ACME = Maker("Acme", "S3", "2.0")
+
+
+async def traced_run(
+    tmp_path, ask=None, rows=(), *, text=OBSERVED, maker="Acme", subscribe=True, reobserve=False
+) -> tuple[FakeAdmin, RunResult]:
+    """OBSERVED on a plug made by `maker`, with DeviceSide's wire trace on unless not `subscribe`, and `rows` as the
+    integration's _observed.md."""
+    ha = FakeAdmin({"switch.plug": {}}, timer_on)
+    ha.devices[0]["manufacturer"] = maker
+    if subscribe:
+        await ha.subscribe_wire()
+    inv = profile(switch_plug="switch.plug")
+    observations = {"shelly": list(rows)}
+    result = await run_one(
+        ha, suite(tmp_path, text), inv, admin=ha, ask=ask, observations=observations, reobserve=reobserve
+    )
+    return ha, result
+
+
+async def test_an_observed_pass_lends_to_a_later_unattended_run_that_sends_the_same_calls(tmp_path):
+    _, first = await traced_run(tmp_path, answers("", "y")[1])
+    records = tmp_path / "records"
+    assert write_observed(first, REGISTRY, records, "2026-11-01") == [records / "shelly" / OBSERVED_FILE]
+    rows = load_observations(records, ["shelly"])["shelly"]
+    assert [(row.device, row.observed_in, row.result) for row in rows] == [(ACME, AUTOMATED, "pass")]
+
+    ha, second = await traced_run(tmp_path, rows=rows)
+
+    assert outcomes(second)[WATCHED] == (Outcome.PASS, "its calls passed when observed on 2026-11-01")
+    assert len([call for call in ha.calls if call[0] == "deviceside"]) == 1  # the twin's; the observed case never ran
+    assert [case.id for case in second.suites[0].proven] == [AUTOMATED, WATCHED]
+    record = render_record(second.suites[0], "Shelly", "2026.10.1", [], "2026-11-10", "test", "lab")
+    assert f"| `{WATCHED}` | `switch` (switch_plug) | pass (observed 2026-11-01) |" in record
+    assert f"[`{OBSERVED_FILE}`]({OBSERVED_FILE})" in record
+    (path := tmp_path / "turn_on_for.md").write_text(record)
+    assert WATCHED in Record.read(path).passed
+    assert write_observed(second, REGISTRY, records, "2026-11-10") == []  # a lent pass observed nothing
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"maker": "Other"},  # another maker's devices
+        {"text": OBSERVED.replace("duration: 0.6", "duration: 0")},  # other calls (0.7 would hash alike: signs only)
+        {"subscribe": False},  # no trace
+        {"reobserve": True},
+    ],
+)
+async def test_an_observed_case_is_not_lent_unless_a_pass_covers_its_twins_calls(tmp_path, change):
+    _, first = await traced_run(tmp_path, answers("", "y")[1])
+    [trace] = [case.trace for case in first.suites[0].cases if case.id == WATCHED]
+    rows = trace.rows(AUTOMATED, "2026-11-01", True)
+    _, second = await traced_run(tmp_path, rows=rows, **change)
+    assert outcomes(second)[WATCHED] == (Outcome.NOT_OBSERVED, "")
+
+
+async def test_what_a_person_saw_fail_is_a_fail_row_and_a_failed_step_is_none(tmp_path):
+    _, saw_else = await traced_run(tmp_path, answers("", "n")[1])
+    [row] = engine.observations(saw_else, "2026-11-01")["shelly"][0]
+    assert (row.device, row.result) == (ACME, "fail")
+    watched = next(case for case in saw_else.suites[0].cases if case.id == WATCHED)
+    watched.detail = "step 1 (call): HAError: nope"  # the steps broke: nobody saw the calls do anything
+    assert engine.observations(saw_else, "2026-11-01") == {}
+
+
+async def test_a_fail_row_stops_a_lend_of_the_pass_it_follows(tmp_path):
+    _, first = await traced_run(tmp_path, answers("", "y")[1])
+    [trace] = [case.trace for case in first.suites[0].cases if case.id == WATCHED]
+    passed = trace.rows(AUTOMATED, "2026-11-01", True)
+    _, saw_else = await traced_run(tmp_path, answers("", "n")[1])
+    [failed] = engine.observations(saw_else, "2026-11-05")["shelly"][0]
+    _, second = await traced_run(tmp_path, rows=[*passed, failed])
+    assert outcomes(second)[WATCHED] == (Outcome.NOT_OBSERVED, "")
+
+
+async def test_a_trace_keeps_the_calls_per_slot_and_the_rigs_own_ha_calls_in_order(tmp_path):
+    text = OBSERVED.replace("    steps:\n", "    steps:\n      - set: {state: on}\n", 1)
+    ha, result = await traced_run(tmp_path, text=text)
+    trace = next(case.trace for case in result.suites[0].cases if case.id == AUTOMATED)
+    _, legend = trace.sequence[0]
+    assert [trace.legend[digest][:2] for digest in legend] == [("ha", "switch.turn_on"), ("fake", "turn_on_for")]
+    assert trace.devices == (ACME,)
+    assert [slot for slot, _ in trace.sequence] == ["target"]
+
+
+async def test_a_report_lists_each_traced_cases_calls_by_slot(tmp_path):
+    _, result = await traced_run(tmp_path)
+    text = write_report(result, tmp_path, "rig run").read_text()
+    calls = text.split("### Calls\n\n", 1)[1]
+    trace = next(case.trace for case in result.suites[0].cases if case.id == AUTOMATED)
+    [(_, [digest])] = trace.sequence
+    assert f"- `{AUTOMATED}`: state `{trace.state}`\n  - target\n    - `{digest}` `fake turn_on_for " in calls
+
+
+def test_a_traced_and_lent_result_survives_the_ledger():
+    seq, legend = sequence([("target", ("fake", "turn_on_for", {"duration": {"seconds": 0.6}}))])
+    case = CaseResult(WATCHED, "switch_plug", "switch", Outcome.PASS, twin=AUTOMATED, lent="2026-11-01")
+    case.trace = Trace("abc123", seq, legend, (ACME,))
+    again = progress_result(json.loads(json.dumps(progress_saved(case))))
+    assert again == case
+    assert again.trace.legend == case.trace.legend

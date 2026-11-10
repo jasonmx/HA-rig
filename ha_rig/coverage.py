@@ -16,6 +16,10 @@ A **firmware fact** (a test with `firmware_fact: true`) is covered while the led
 firmware, whatever the code (ha_rig/progress.py, Firmware facts): coverage lends that pass to the suite's entry, so
 only the suite's other cases rerun after a code change, and its next record carries the fact. `fresh` reruns them too.
 
+An **observed** case (ha_rig/observed.py) is lent its pass in a run, once its automated twin has sent its calls and
+an `_observed.md` pass covers them. Coverage can't know the calls before the run, so it only hints (`observed_hints`):
+the twin's calls the last time it ran are covered, so the case will be lent if the calls are unchanged.
+
 Pure file and git reading: --coverage and the plan run it before anything changes.
 """
 
@@ -30,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 from .engine import Case, CaseResult, Outcome, Record, Suite, adapters_for, applies, cases, narrows
+from .observed import Observation
+from .observed import lend as lend_observed
 from .profile import Profile
 from .progress import Progress
 
@@ -248,3 +254,26 @@ def of(
         record = Freshness(None, None) if fresh else freshness(repo, suite, commit, files, planned)
         found.append(SuiteCoverage(suite, suite_fingerprint, record, planned, saved, frozenset(lent)))
     return found
+
+
+def observed_hints(
+    plan: Iterable[SuiteCoverage], progress: Progress, observations: dict[str, list[Observation]]
+) -> dict[tuple[str, str, str], str]:
+    """For each missing observed case whose twin's calls, the last time it ran (Progress.traces), an `_observed.md`
+    pass covers: what a run would lend it, by (integration, suite name, case id). It notes a pass seen on a device the
+    case's aren't (another model or firmware of the maker), for information: it lends all the same."""
+    hints = {}
+    for suite_coverage in plan:
+        suite = suite_coverage.suite
+        traces = progress.traces(suite)
+        rows = observations.get(suite.integration, [])
+        for case in suite_coverage.missing:
+            if not case.observed or (trace := traces.get(case.twin or "")) is None:
+                continue
+            if (row := lend_observed(rows, trace.state, trace.sequence, trace.devices)) is None:
+                continue
+            hint = f"observed {row.date}, if the calls are unchanged"
+            if row.device not in trace.devices:
+                hint += f"; seen on {row.device.model}, firmware {row.device.firmware}"
+            hints[suite.integration, suite.name, case.id] = hint
+    return hints

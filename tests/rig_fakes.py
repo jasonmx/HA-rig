@@ -10,6 +10,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
 from ha_rig.client import HAClient, HAError, device_ieee
@@ -93,6 +94,7 @@ class FakeHA(HAClient):
         self.entity_meta: dict[str, dict] = {}  # the registry's platform, unique_id and disabled_by, by entity ID
         self.keeps_group_entities = False  # HA keeps a removed group's entity in its registry
         self.zha_open = False
+        self.logger_levels: dict[str, str] = {}  # logger.set_level's, by logger name
         self.zha_group_names: dict[int, str] = {}
         self.zha_group_members: dict[int, list[dict]] = {}
         self.z2m_open = False
@@ -124,6 +126,11 @@ class FakeHA(HAClient):
         self.z2m_restart_s = 0.01
         self._z2m_responses: list[asyncio.Queue[str]] = []  # live bridge/response/device/remove subscriptions
         self._z2m_device_topics: dict[str, asyncio.Queue[str]] = {}  # live zigbee2mqtt/<name> subscriptions
+        # DeviceSide's wire trace, once subscribed (subscribe_wire): each DeviceSide call is one `fake` call on the
+        # entity, with the call's data, unless `wire_for` gives the (transport, command, params) it sends instead.
+        self._taps: list[tuple[frozenset[str], list[dict]]] = []
+        self._wire_events: int | None = None
+        self.wire_for: Callable[[str, dict], list[tuple[str, str, Any]]] | None = None
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
@@ -333,6 +340,7 @@ class FakeHA(HAClient):
     async def call_service(self, domain: str, service: str, data: dict | None = None, return_response=False):
         self.calls.append((domain, service, dict(data or {})))
         if domain == "deviceside":
+            self._trace(service, data)
             return self.respond(self, service, data)
         if domain == "zha":
             if service == "permit":
@@ -347,6 +355,9 @@ class FakeHA(HAClient):
         if domain == "mqtt":
             self._mqtt_publish(data["topic"], json.loads(data["payload"]))
             return None
+        if (domain, service) == ("logger", "set_level"):
+            self.logger_levels.update(data)
+            return None
         entity_id = data["entity_id"]
         attributes = {key: value for key, value in data.items() if key != "entity_id"}
         state = "on" if service == "turn_on" else "off"
@@ -357,6 +368,17 @@ class FakeHA(HAClient):
         if members:
             self.states[entity_id]["attributes"]["entity_id"] = members
         return None
+
+    async def subscribe_wire(self) -> None:
+        self._wire_events = 1
+
+    def _trace(self, action: str, data: dict) -> None:
+        """DeviceSide's wire trace of a call to `action`, once subscribed."""
+        if self._wire_events is None:
+            return
+        params = {key: value for key, value in data.items() if key != "entity_id"}
+        for transport, command, sent in self.wire_for(action, data) if self.wire_for else [("fake", action, params)]:
+            self.wire({"entity_id": data["entity_id"], "transport": transport, "command": command, "params": sent})
 
     def _mqtt_publish(self, topic: str, payload: dict) -> None:
         """A Z2M bridge request, or a device's `/get`, answered while the device is there."""
@@ -391,6 +413,8 @@ class FakeHA(HAClient):
             self.entity_devices.pop(entity_id)
             self.entity_meta.pop(entity_id, None)
             self.states.pop(entity_id, None)
+            return None
+        if kind == "ping":
             return None
         if kind == "logger/log_info":
             return [{"domain": domain, "level": level} for domain, level in self.ha_levels.items()]
