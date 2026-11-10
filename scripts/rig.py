@@ -145,6 +145,7 @@ from ha_rig.engine import (  # noqa: E402
     ADMIN_INTEGRATIONS,
     Budget,
     Case,
+    CaseResult,
     EntryOptions,
     RunResult,
     Snapshot,
@@ -162,7 +163,7 @@ from ha_rig.engine import (  # noqa: E402
     report_path,
     run,
     unfinished,
-    write_observed,
+    write_observed_case,
     write_records,
     write_report,
 )
@@ -2167,6 +2168,7 @@ async def run_phases(
         "observations": load_observations(TEST_RECORDS_DIR, {suite.integration for suite in suites}),
         "reobserve": reobserve,
         **saving(progress),
+        "on_result": observing(registry, progress),
     }
     only = tail(profile) if lanes else None
     for number, (network, phase_suites) in enumerate(phases(suites, profile, roaming)):
@@ -2218,7 +2220,21 @@ def saving(progress: Progress | None) -> dict:
     """run's arguments that leave out the cases `progress` saved and save each new one."""
     if progress is None:
         return {}
-    return {"done": progress.done(), "on_result": progress.record, "on_facts": progress.facts}
+    return {"done": progress.done(), "on_facts": progress.facts}
+
+
+def observing(registry: AdapterRegistry, progress: Progress | None) -> Callable[[Suite, CaseResult], None]:
+    """run's `on_result`: save the case in `progress`, and write what it observed into the checkout's _observed.md,
+    dated now. What a person saw stands whatever the code (ha_rig/observed.py), so it is written as each case ends,
+    however the run does: with no commit, a failed run, or one cut short."""
+
+    def on_result(suite: Suite, case: CaseResult) -> None:
+        if progress is not None:
+            progress.record(suite, case)
+        if path := write_observed_case(suite, case, registry, TEST_RECORDS_DIR, datetime.date.today().isoformat()):
+            print(f"Wrote {display(path, REPO)}; review the diff before committing it.")
+
+    return on_result
 
 
 async def report_ran(
@@ -2261,11 +2277,6 @@ async def report(
         if partial := suite_result.partial:
             print(f"{suite_result.suite.integration} / {suite_result.suite.name}: {partial}")
     print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
-    # What a person saw stands whatever the code (ha_rig/observed.py), so it goes straight into the checkout, merged
-    # with the rows there, even with no commit or a failed run: a fail row only blocks a lend once it is there, and a
-    # failed observation always fails its run, which would leave it staged.
-    for path in write_observed(result, registry, TEST_RECORDS_DIR, today):
-        print(f"Wrote {display(path, REPO)}; review the diff before committing it.")
     if commit is None:
         print("No test records: no commit names the tree HA ran (--no-deploy, or origin moved before the deploy).")
         return

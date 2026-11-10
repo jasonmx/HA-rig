@@ -2629,39 +2629,55 @@ async def write_records(
     return written, kept
 
 
+def observed_by(case: CaseResult, date: str) -> tuple[list[Observation], dict] | None:
+    """What one observed case saw: its rows for _observed.md and their calls. A case a person watched pass, or saw
+    fail, adds a row per device; one lent, not observed, failed for another reason or with no trace adds none."""
+    if case.trace is None or case.lent or case.twin is None or not case.id.endswith(" observed"):
+        return None
+    passed = case.outcome is Outcome.PASS
+    if not passed and not (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN)):
+        return None
+    return case.trace.rows(case.twin, date, passed), dict(case.trace.legend)
+
+
 def observations(result: RunResult, date: str) -> dict[str, tuple[list[Observation], dict]]:
-    """What each integration's observed cases saw this run, by integration: the rows for _observed.md and their calls.
-    A case a person watched pass, or saw fail, adds a row per device; one lent, not observed, failed for another reason
-    or with no trace adds none."""
+    """What each integration's observed cases saw this run, by integration (see observed_by)."""
     found: dict[str, tuple[list[Observation], dict]] = {}
     for suite_result in result.suites:
         for case in suite_result.cases:
-            if case.trace is None or case.lent or case.twin is None or not case.id.endswith(" observed"):
-                continue
-            seen = case.outcome is Outcome.PASS or (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN))
-            if not seen:
-                continue
-            rows, legend = found.setdefault(suite_result.suite.integration, ([], {}))
-            rows += case.trace.rows(case.twin, date, case.outcome is Outcome.PASS)
-            legend.update(case.trace.legend)
+            if (seen := observed_by(case, date)) is not None:
+                rows, legend = found.setdefault(suite_result.suite.integration, ([], {}))
+                rows += seen[0]
+                legend.update(seen[1])
     return found
 
 
-def write_observed(
-    result: RunResult, registry: Any, records_dir: Path, date: str, into: Path | None = None
-) -> list[Path]:
-    """Add what this run observed to each integration's _observed.md in `records_dir`, written under `into` (a run's
-    staging) laid out as `records_dir`, else into `records_dir`; whether or not any suite writes a record."""
-    written = []
-    for integration, (rows, legend) in observations(result, date).items():
-        observed = ObservedFile.read(
-            records_dir / integration / OBSERVED_FILE, registry.integrations[integration].title
-        )
-        observed.add(rows, legend)
-        path = (into or records_dir) / integration / OBSERVED_FILE
-        observed.write(path)
-        written.append(path)
-    return written
+def write_observed(result: RunResult, registry: Any, records_dir: Path, date: str) -> list[Path]:
+    """Add what this run observed to each integration's _observed.md in `records_dir`, whether or not any suite
+    writes a record."""
+    return [
+        add_observed(records_dir, integration, registry.integrations[integration].title, rows, legend)
+        for integration, (rows, legend) in observations(result, date).items()
+    ]
+
+
+def add_observed(records_dir: Path, integration: str, title: str, rows: list[Observation], legend: dict) -> Path:
+    """Merge `rows` into the integration's _observed.md in `records_dir` and write it."""
+    path = records_dir / integration / OBSERVED_FILE
+    observed = ObservedFile.read(path, title)
+    observed.add(rows, legend)
+    observed.write(path)
+    return path
+
+
+def write_observed_case(suite: Suite, case: CaseResult, registry: Any, records_dir: Path, date: str) -> Path | None:
+    """Write what one finished case observed, dated now: each row is written once, when its case ends, so a later
+    report or an interrupted run can't re-date it or lose it."""
+    if (seen := observed_by(case, date)) is None:
+        return None
+    return add_observed(
+        records_dir, suite.integration, registry.integrations[suite.integration].title, seen[0], seen[1]
+    )
 
 
 def load_observations(records_dir: Path, integrations: Iterable[str]) -> dict[str, list[Observation]]:

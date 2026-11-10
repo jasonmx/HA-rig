@@ -14,6 +14,7 @@ Pure: no HA, no files but the one `ObservedFile` reads and renders.
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -232,9 +233,13 @@ class ObservedFile:
         return observed
 
     def add(self, rows: Iterable[Observation], legend: Mapping[str, Call]) -> None:
-        """Add `rows`, each replacing a row with its key (so only its date, observed-in and result change), and their
-        calls to the legend. Nothing is pruned: a pattern can come back."""
+        """Add `rows`, each replacing a row with its key (so only its date, observed-in and result change) unless that
+        row is newer; on one date a fail wins. Their calls go to the legend. Nothing is pruned: a pattern can come
+        back."""
         for new in rows:
+            old = next((row for row in self.rows if row.key == new.key), None)
+            if old is not None and (old.date, old.result == FAIL) > (new.date, new.result == FAIL):
+                continue
             self.rows = [row for row in self.rows if row.key != new.key] + [new]
             for _, hashes in new.sequence:
                 for digest in hashes:
@@ -280,4 +285,6 @@ class ObservedFile:
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.render())
+        temp = path.with_name(f"{path.name}.tmp")
+        temp.write_text(self.render())
+        os.replace(temp, path)

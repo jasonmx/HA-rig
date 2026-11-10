@@ -21,7 +21,7 @@ record narrows. Jason's rule (2026-11-10) reframes the issue:
 Observations live in deviceside, in one file per integration, `docs/test-records/<integration>/_observed.md`. One
 file per integration is needed because a prefix can match across suites (raise-stop-raise is in the raise suite,
 raise-stop in the stop suite). `check_release.py` only reads `<action>(-<option>).md`, so it skips this file. It is
-staged and promoted with the records (`ha_rig/staging.py`), stays public, and is versioned with the code. No
+written straight into the checkout, as each observed case ends, stays public, and is versioned with the code. No
 deviceside record has an observed pass today, so nothing needs migrating.
 
 ## Coordination
@@ -30,7 +30,7 @@ Intent: Observed results are kept per integration in `_observed.md`, keyed by ma
 A run lends an observed pass when its automated twin's calls are covered by an observed pass, prefixes included, so an
 unattended run never narrows a record. Refs #36; the live check is the follow-on
 `2026-11-10-observed-facts-live-check.md`, which closes it.
-Touches: ha_rig/engine.py, ha_rig/client.py, ha_rig/coverage.py, ha_rig/staging.py, ha_rig/observed.py,
+Touches: ha_rig/engine.py, ha_rig/client.py, ha_rig/coverage.py, ha_rig/observed.py,
 docs/rig.md, README.md, tests/
 Tests-with: jasonmx/deviceside#329
 Depends-on: jasonmx/deviceside#329
@@ -85,8 +85,8 @@ Depends-on: jasonmx/deviceside#329
 - **Writing:** read the integration's file from `records_dir`. Add a row for each case this run actually observed
   (attended pass or fail). A row with the same (maker, model, firmware, starting state, sequence) is replaced, so
   only its date and "observed in" change. `not observed` adds nothing. No pruning: rows are few and a pattern
-  can come back. It is staged and promoted like a record, and is written whenever a run observed something, even if
-  no suite record is written.
+  can come back. A row is written once, when its case ends, dated then, straight into the checkout (never staged);
+  a key keeps its newer row, a fail winning a same-date tie.
 - **Suite record:** a lent observed case shows `pass (observed <date>)` in its Tests table, plus a one-line footnote
   pointing to `_observed.md`. `CASE_ROW` parsing strips the suffix, as it strips `FIRMWARE_FACT`.
 
@@ -145,7 +145,7 @@ outside the spike: a Z2M `get_attributes` timeout warning, and Hue `sets_after_a
    into the plan.
 3. `observed.py`: sequences, covers, blocks, the file's read and write.
 4. Capture in `client.py` and the engine: sequences on `CaseResult`, full calls in the run report.
-5. The lend in the observed phase; writing `_observed.md` through staging; the suite record's suffix and footnote.
+5. The lend in the observed phase; writing `_observed.md` as each case ends; the suite record's suffix and footnote.
 6. `--reobserve`, the README `--help` block, `--coverage` wording, docs.
 7. `/audit-code`, then mark both PRs ready. The deviceside PR merges first; then `gh run rerun` the rig PR's Tests
    runs before merging. The live check (Verification, Live) moved to the follow-on plan
@@ -158,7 +158,7 @@ outside the spike: a Z2M `get_attributes` timeout warning, and Hue `sets_after_a
     slots must match; repeats collapse.
   - Blocks: a fail on M blocks sequences that begin with it on M only; a newer pass on M lifts it; a fail of
     raise-stop-raise doesn't block raise-stop.
-  - `_observed.md` round-trips; same key replaces; rows survive unattended runs and #35 keeps; promoted with records.
+  - `_observed.md` round-trips; same key replaces; rows survive unattended runs and #35 keeps; written as each case ends, an older pass never replaces a newer fail.
   - Lend across tests, suites, roles, models and firmware of one maker; no lend for another maker, a missing trace,
     or an uncovered sequence.
   - An unattended run with a lend writes `pass (observed …)`, not `not observed`; `--reobserve` runs them.
