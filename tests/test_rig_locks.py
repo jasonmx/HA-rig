@@ -481,7 +481,12 @@ def approved(tmp_path, monkeypatch, run, deploying: bool) -> tuple[locks.Held, l
     monkeypatch.setattr(rig, "run_rig", lambda *_args, claim, **_kw: given.append(claim))
     monkeypatch.setattr(rig, "run_tests", lambda _run, aborted=None: 0)
     rig.run_approved(
-        SimpleNamespace(keyword=None, unattended=True, debug_logs=False, budget=None), run, held, None, deploying, True
+        SimpleNamespace(keyword=None, unattended=True, debug_logs=False, budget=None, reobserve=False),
+        run,
+        held,
+        None,
+        deploying,
+        True,
     )
     return held, given
 

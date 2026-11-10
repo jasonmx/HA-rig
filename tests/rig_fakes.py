@@ -94,6 +94,7 @@ class FakeHA(HAClient):
         self.entity_meta: dict[str, dict] = {}  # the registry's platform, unique_id and disabled_by, by entity ID
         self.keeps_group_entities = False  # HA keeps a removed group's entity in its registry
         self.zha_open = False
+        self.logger_levels: dict[str, str] = {}  # logger.set_level's, by logger name
         self.zha_group_names: dict[int, str] = {}
         self.zha_group_members: dict[int, list[dict]] = {}
         self.z2m_open = False
@@ -353,6 +354,9 @@ class FakeHA(HAClient):
             return None
         if domain == "mqtt":
             self._mqtt_publish(data["topic"], json.loads(data["payload"]))
+            return None
+        if (domain, service) == ("logger", "set_level"):
+            self.logger_levels.update(data)
             return None
         entity_id = data["entity_id"]
         attributes = {key: value for key, value in data.items() if key != "entity_id"}

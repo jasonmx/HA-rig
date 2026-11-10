@@ -16,6 +16,7 @@ import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig import baseline, engine, target
+from ha_rig.client import WIRE_LOGGER
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
@@ -750,8 +751,10 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
         await asyncio.sleep(0.005)
     assert set(journal.sections) == {"profile", "options", "cases"}
     assert json.loads((tmp_path / baseline.NAME).read_text()) == {
-        "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]}
+        "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]},
+        f"logger_level:{WIRE_LOGGER}": {"original": "NOTSET", "holders": [f"{journal.name}#debug"]},
     }
+    assert ha.logger_levels == {WIRE_LOGGER: "DEBUG"}
     assert set(journal.get("cases")) == {"serial"}
 
     os.kill(os.getpid(), signum)
@@ -760,6 +763,7 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
 
     assert "Aborting: putting devices back" in capsys.readouterr().out
     assert put_back(ha)
+    assert ha.logger_levels == {WIRE_LOGGER: "NOTSET"}
     assert not journal.path.exists()
     assert not (tmp_path / baseline.NAME).exists()
 
