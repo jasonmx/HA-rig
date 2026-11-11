@@ -6,7 +6,7 @@ preflight reads the profile, the adapter registry and the deployed tree hash, pr
 go (Authorization, below), then, at a terminal, asks.
 
 The rig tests the deviceside checkout it is run from, or DEVICE_SIDE_REPO (ha_rig/target.py): it deploys that
-checkout's code, records where its check_release.record_dir says, and keeps its locks and journals in its git
+checkout's code, records where its check_release.test_records_dir says, and keeps its locks and journals in its git
 common dir. The profiles and .env.rig live in this rig's main checkout. Each invocation refreshes deviceside's
 household terms (ha_rig/terms.py).
 
@@ -127,7 +127,7 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo, record_dir  # noqa: E402
+from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo, test_records_dir  # noqa: E402
 
 REPO = deviceside_repo()  # the deviceside checkout under test, whose code a run deploys and records
 sys.path.append(str(REPO))
@@ -191,8 +191,8 @@ SERVICE = ("deviceside", "turn_on_for")
 
 
 def checkout_records(integration: str) -> Path:
-    """The integration's test records directory in the checkout under test (its check_release.record_dir)."""
-    return record_dir(REPO, integration)
+    """The integration's test records directory in the checkout under test (its check_release.test_records_dir)."""
+    return test_records_dir(REPO, integration)
 
 
 # HA's bootstrap stage-1 (120 s) and stage-2 (300 s) timeouts, after which a stuck dependency is let go, plus the
@@ -2289,10 +2289,10 @@ async def report(
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, profile.name, into=staging.record_dir
+        result, registry, checkout_records, today, source, profile.name, into=staging.test_records_dir
     )
     by_path = {
-        staging.record_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
+        staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
     }
     for path in written:
         suite = by_path.get(path)

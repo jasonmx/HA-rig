@@ -2607,7 +2607,7 @@ def render_record(
     return "\n".join(lines) + "\n"
 
 
-Records = Callable[[str], Path]  # an integration's test records directory (the runner's: target.record_dir)
+Records = Callable[[str], Path]  # an integration's test records directory (the runner's: target.test_records_dir)
 
 
 def report_path(directory: Path, title: str) -> Path:

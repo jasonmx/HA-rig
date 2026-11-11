@@ -157,14 +157,14 @@ action's, and those its `call` steps name), as deviceside's `check_release.py --
 `core/` and `actions/` don't count, and nor does HA's version. Editing a suite's step file counts too. How:
 `ha_rig/coverage.py`.
 
-A suite is **covered** when its record (`<suite>.md` in the integration's records directory, deviceside's `check_release.record_dir`) cites a commit at which that
-code is unchanged and lists exactly the cases the suite plans now (and shows none as skipped that this profile
-runs: a narrower profile's record doesn't cover a broader one), or when the ledger holds a result for every case it
-plans. A run leaves a selected suite that is covered out, saying `covered (record <date>, commit <c>), skipped`,
-and runs only the cases of the rest with no saved result; a run whose every selected suite is covered says so and
-stops. `--fresh` ignores the records and the saved cases of the selected suites and reruns them whole. The selection
-(`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so a `-k` run's cases count towards their
-suite's record.
+A suite is **covered** when its record (`<suite>.md` in the integration's records directory, deviceside's
+`check_release.test_records_dir`) cites a commit at which that code is unchanged and lists exactly the cases the suite
+plans now (and shows none as skipped that this profile runs: a narrower profile's record doesn't cover a broader one),
+or when the ledger holds a result for every case it plans. A run leaves a selected suite that is covered out, saying
+`covered (record <date>, commit <c>), skipped`, and runs only the cases of the rest with no saved result; a run whose
+every selected suite is covered says so and stops. `--fresh` ignores the records and the saved cases of the selected
+suites and reruns them whole. The selection (`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so
+a `-k` run's cases count towards their suite's record.
 
 **`--coverage`** prints each selected suite's coverage at the checkout's HEAD, as `--check` does the devices: no
 lock, no deploy, nothing written. A suite is `covered`, `partial N/M` with its missing cases and the entities they

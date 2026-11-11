@@ -6,7 +6,7 @@ this one named deviceside (the repo's name) or device-side (so the rig's own tes
 and baseline live in the target's git common dir, shared by every worktree of it; the profiles and .env.rig live in
 this rig's main checkout.
 
-The target's own `scripts/check_release.py` says where its test records live (`record_dir`) and which files are an
+The target's own `scripts/check_release.py` says where its test records live (`test_records_dir`) and which files are an
 adapter's code (`adapter_code`), so the rig follows the gate's layout and staleness rule rather than restating them.
 
 Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
@@ -64,11 +64,11 @@ def check_release(repo: Path) -> ModuleType:
     return loaded
 
 
-def record_dir(repo: Path, integration: str, root: Path | None = None) -> Path:
-    """The integration's test records directory in `repo`, as its `check_release.record_dir` says, laid out under
+def test_records_dir(repo: Path, integration: str, root: Path | None = None) -> Path:
+    """The integration's test records directory in `repo`, as its `check_release.test_records_dir` says, laid out under
     `root` instead when given (a run's staging mirrors the checkout)."""
     loaded = check_release(repo)
-    return (root or repo) / loaded.record_dir(integration).relative_to(loaded.REPO)
+    return (root or repo) / loaded.test_records_dir(integration).relative_to(loaded.REPO)
 
 
 def is_deviceside(path: Path) -> bool:

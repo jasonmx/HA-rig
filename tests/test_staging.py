@@ -33,7 +33,7 @@ def staging(tmp_path: Path) -> Staging:
     """A run's staging in tmp_path/reports with one record, for the checkout at tmp_path/repo."""
     repo = gate_scripts(tmp_path / "repo")
     found = Staging(tmp_path / "reports" / "run.records", repo, tmp_path, "lab")
-    path = found.record_dir("shelly") / "raise_brightness.md"
+    path = found.test_records_dir("shelly") / "raise_brightness.md"
     path.parent.mkdir(parents=True)
     path.write_text("new\n")
     found.add(path, KEY)

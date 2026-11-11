@@ -1,7 +1,7 @@
 """Staged test records: a run's records wait next to its report until the run is known to be publishable.
 
 A run writes each record it earns into `<report>.records/`, at its path in the checkout (each integration's
-`target.record_dir`, then `<suite>.md`), with a manifest (`staged.json`) naming the checkout, the ledger and, per
+`target.test_records_dir`, then `<suite>.md`), with a manifest (`staged.json`) naming the checkout, the ledger and, per
 record, its suite's ledger entry and the hash of the checkout's file when it was staged. Only a run that ends
 cleanly promotes its records into the checkout itself; any other end leaves the checkout untouched and prints the one
 command that promotes them (`command`).
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .progress import EntryKey, Progress
-from .target import record_dir
+from .target import test_records_dir
 
 MANIFEST = "staged.json"
 RIG = Path(__file__).resolve().parents[1] / "scripts" / "rig.py"
@@ -49,9 +49,9 @@ class Staging:
     profile: str | None = None
     records: dict[str, dict] = field(default_factory=dict)  # by path relative to repo (and to directory)
 
-    def record_dir(self, integration: str) -> Path:
+    def test_records_dir(self, integration: str) -> Path:
         """Where this run stages the integration's records: its records directory in the checkout, under `directory`."""
-        return record_dir(self.repo, integration, self.directory)
+        return test_records_dir(self.repo, integration, self.directory)
 
     def add(self, staged: Path, entry: EntryKey | None) -> None:
         """Note a record written at `staged` (under `directory`) and its suite's ledger entry, and save the manifest:

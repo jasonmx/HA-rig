@@ -2,8 +2,8 @@
 
 The automated test rig for [DeviceSide](https://github.com/jasonmx/deviceside): it runs DeviceSide's actions
 against a live Home Assistant and its real devices, and writes the test records in deviceside (each
-integration's `docs/integrations/<integration>/records/`, from its `check_release.record_dir`) that clear an adapter's `experimental` flag and gate each release. Private; deviceside keeps
-only the records.
+integration's `docs/integrations/<integration>/test-records/`, from its `check_release.test_records_dir`) that clear
+an adapter's `experimental` flag and gate each release. Private; deviceside keeps only the records.
 
 Setup, running it, and writing step files: [docs/rig.md](docs/rig.md).
 

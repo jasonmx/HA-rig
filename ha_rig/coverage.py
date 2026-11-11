@@ -8,9 +8,9 @@ is left out, `core/` counts only where the adapter imports it, and HA's version 
 A suite's **fingerprint** at a commit hashes the git blob of each of those files there with the rig's step file, so
 editing a test changes it too. The saved progress (ha_rig/progress.py) keys its entries by it.
 
-A **fresh record** (`<suite name>.md` in the integration's `target.record_dir`) cites a commit at which the suite's
-code is the same as at the one tested now, as the gate compares them (`git diff --name-only`), and lists exactly the
-case IDs the suite plans now.
+A **fresh record** (`<suite name>.md` in the integration's `target.test_records_dir`) cites a commit at which the
+suite's code is the same as at the one tested now, as the gate compares them (`git diff --name-only`), and lists
+exactly the case IDs the suite plans now.
 
 A **firmware fact** (a test with `firmware_fact: true`) is covered while the ledger keeps its pass at the device's
 firmware, whatever the code (ha_rig/progress.py, Firmware facts): coverage lends that pass to the suite's entry, so
@@ -35,7 +35,7 @@ from .engine import Case, CaseResult, Outcome, Record, Suite, adapters_for, appl
 from .observed import Observation
 from .profile import Profile
 from .progress import Progress
-from .target import check_release, record_dir
+from .target import check_release, test_records_dir
 
 INTEGRATIONS = "custom_components/deviceside/integrations/"  # left off the changed files a stale record names
 
@@ -77,7 +77,7 @@ def fingerprint(repo: Path, commit: str, files: Iterable[str], step_file: Path) 
 
 
 def record_path(repo: Path, suite: Suite) -> Path:
-    return record_dir(repo, suite.integration) / f"{suite.name}.md"
+    return test_records_dir(repo, suite.integration) / f"{suite.name}.md"
 
 
 @dataclass(frozen=True, slots=True)
