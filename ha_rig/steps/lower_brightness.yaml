@@ -29,14 +29,14 @@ tests:
       - set: {state: on}
       - expect_state: {state: on, brightness: {min: 148, max: 158}, within: 2}
 
-  - name: lower_to_a_limit  # §2.4
+  - name: lower_to_a_limit  # §2.4; Hue's is in lower_brightness-predicted_state.yaml
     roles: [light_ct, group]
+    only: [zigbee2mqtt, zha]
     steps:
       - set: {state: on, brightness_pct: 100}
       - call: {limit: 30, sweep_time: 5}
       - expect_state: {state: on, brightness: {min: 70, max: 84}, within: 4 + tol}
-      # 100 % to 30 % takes 3.5 s. The first check can pass at once (Hue reports the end value at the call), and the
-      # bridge can still send a light's mid-fade value after it, so the hold check comes once the fade has ended.
+      # 100 % to 30 % takes 3.5 s; the hold check comes once the fade has ended.
       - wait: 3.5 + tol
       - expect_state: {state: on, brightness: {min: 70, max: 84}}
 
