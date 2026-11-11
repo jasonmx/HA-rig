@@ -425,6 +425,7 @@ change for every adapter (deviceside `scripts/check_release.py`, "Shared code").
 executed lines, which the run brackets around all its cases (no restart, no data file). The run holds HA exclusively,
 so no other run's lines mix in, and needs `HA_ADMIN_TOKEN`. One bracket covers every suite of the run, so a run in
 which any case failed writes no section in any record (a failing suite's lines are no proof); a record that also takes
-saved cases from earlier runs carries only this run's lines, which undercounts and is safe. A helper that is absent
+saved cases from earlier runs carries only this run's lines, which undercounts and is safe. The lines are everything HA ran in `core/` while the run was measured (its cases, and the household's own
+automations and unobserved cases included), so the section means "executed during the run", not "driven by a test". A helper that is absent
 or fails, or no `core/` lines, mean the records are written without the section, and the run says why. Set up once:
 your `RIG_SYNC_CMD` copies `ha_component/rig_coverage/` too, and HA's `configuration.yaml` has `rig_coverage:`.
