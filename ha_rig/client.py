@@ -13,7 +13,9 @@ from .bridge import normalize_ieee
 
 Z2M = "zigbee2mqtt"
 WIRE_EVENT = "deviceside_wire"  # DeviceSide's trace of each call it sends a device
-WIRE_LOGGER = "custom_components.deviceside.wire"  # at DEBUG, DeviceSide fires WIRE_EVENT
+WIRE_LOGGER = "custom_components.deviceside.wire"  # at DEBUG, DeviceSide fires WIRE_EVENT and SCOPE_EVENT
+# DeviceSide's trace of each target its dispatcher runs: the domain, capability and fields its scope weighed
+SCOPE_EVENT = "deviceside_scope"
 IEEE_INTEGRATIONS = ("zha", Z2M)
 Z2M_TOPIC = "zigbee2mqtt/bridge"
 Z2M_COORDINATOR = "Coordinator"  # the coordinator's friendly name, which permit_join's `device` takes
@@ -105,7 +107,8 @@ class HAClient:
         self._lost: str | None = None  # why the reader ended, once it has: no reply can come after that
         self._state_events: int | None = None  # the state_changed subscription's WebSocket id
         self._wire_events: int | None = None  # the deviceside_wire subscription's WebSocket id
-        self._taps: list[tuple[frozenset[str], list[dict]]] = []  # open wire_taps
+        self._scope_events: int | None = None  # the deviceside_scope subscription's WebSocket id
+        self._taps: list[tuple[str, frozenset[str], list[dict]]] = []  # open wire_taps, by event type
 
     async def connect(self) -> None:
         # The system resolver, not aiohttp's default aiodns: only the system one resolves mDNS (.local) names.
@@ -164,6 +167,8 @@ class HAClient:
             # Anything else is an MQTT message for a subscription already closed, which HA can still send.
             elif data["id"] == self._wire_events:
                 self.wire(data["event"]["data"])
+            elif data["id"] == self._scope_events:
+                self.wire(data["event"]["data"], SCOPE_EVENT)
             elif data["id"] == self._state_events:
                 event = data["event"]["data"]
                 async with self._changed:
@@ -171,31 +176,37 @@ class HAClient:
                     self._changed.notify_all()
 
     async def subscribe_wire(self) -> None:
-        """Receive DeviceSide's wire trace, for `wire_tap`. HA lets only an admin user subscribe to an integration's
-        events, so this is for the admin connection; DeviceSide fires them only while its wire logger is at DEBUG."""
+        """Receive DeviceSide's wire and scope traces, for `wire_tap`. HA lets only an admin user subscribe to an
+        integration's events, so this is for the admin connection; DeviceSide fires them only while its wire logger is
+        at DEBUG."""
         if self._wire_events is None:
             self._wire_events = next(self._ids)
             await self.command({"type": "subscribe_events", "event_type": WIRE_EVENT}, self._wire_events)
+        if self._scope_events is None:
+            self._scope_events = next(self._ids)
+            await self.command({"type": "subscribe_events", "event_type": SCOPE_EVENT}, self._scope_events)
 
     async def drain_wire(self) -> None:
         """Wait until every wire event DeviceSide fired before now has reached the taps: HA answers a ping after
         sending what it queued on this connection before it."""
         await self.command({"type": "ping"})
 
-    def wire(self, call: dict) -> None:
-        """A `deviceside_wire` event's data: into each open tap on its entity."""
-        for entity_ids, calls in self._taps:
-            if call.get("entity_id") in entity_ids:
+    def wire(self, call: dict, event_type: str = WIRE_EVENT) -> None:
+        """A `deviceside_wire` (or `event_type`) event's data: into each open tap of that type on its entity."""
+        for tapped, entity_ids, calls in self._taps:
+            if tapped == event_type and call.get("entity_id") in entity_ids:
                 calls.append(call)
 
     @contextlib.contextmanager
-    def wire_tap(self, entity_ids: Iterable[str]) -> Iterator[list[dict]]:
+    def wire_tap(self, entity_ids: Iterable[str], event_type: str = WIRE_EVENT) -> Iterator[list[dict]]:
         """The calls DeviceSide sends to `entity_ids` while the block runs, in order, as `deviceside_wire` data
-        (`entity_id`, `transport`, `command`, `params`): empty unless its wire logger is at DEBUG."""
-        tap: tuple[frozenset[str], list[dict]] = (frozenset(entity_ids), [])
+        (`entity_id`, `transport`, `command`, `params`): empty unless its wire logger is at DEBUG. With `SCOPE_EVENT`,
+        the `deviceside_scope` data of each of them DeviceSide's dispatcher runs instead (`action`, `integration`,
+        `domain`, `capability`, `fields`)."""
+        tap: tuple[str, frozenset[str], list[dict]] = (event_type, frozenset(entity_ids), [])
         self._taps.append(tap)
         try:
-            yield tap[1]
+            yield tap[2]
         finally:
             self._taps.remove(tap)
 

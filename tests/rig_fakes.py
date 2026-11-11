@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
-from ha_rig.client import HAClient, HAError, device_ieee
+from ha_rig.client import SCOPE_EVENT, HAClient, HAError, device_ieee
 from ha_rig.profile import Profile, RigEntity, colon_ieee, hex_ieee
 from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
 from ha_rig.target import deviceside_repo, test_records_dir
@@ -129,9 +129,11 @@ class FakeHA(HAClient):
         # DeviceSide's wire trace, once subscribed (subscribe_wire): each DeviceSide call is one `fake` call on the
         # entity, with the call's data, unless `wire_for` gives the (transport, command, params[, options]) it sends
         # instead.
-        self._taps: list[tuple[frozenset[str], list[dict]]] = []
+        self._taps: list[tuple[str, frozenset[str], list[dict]]] = []
         self._wire_events: int | None = None
         self.wire_for: Callable[[str, dict], list[tuple]] | None = None
+        # The deviceside_scope events a call fires, as (integration, domain, capability, fields) rows: None fires none.
+        self.scope_for: Callable[[str, dict], list[tuple]] | None = None
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
@@ -383,6 +385,18 @@ class FakeHA(HAClient):
         ):
             event = {"entity_id": data["entity_id"], "transport": transport, "command": command, "params": sent}
             self.wire(event | ({"options": options[0]} if options else {}))
+        for integration, domain, capability, fields in self.scope_for(action, data) if self.scope_for else ():
+            self.wire(
+                {
+                    "entity_id": data["entity_id"],
+                    "action": action,
+                    "integration": integration,
+                    "domain": domain,
+                    "capability": capability,
+                    "fields": sorted(fields),
+                },
+                SCOPE_EVENT,
+            )
 
     def _mqtt_publish(self, topic: str, payload: dict) -> None:
         """A Z2M bridge request, or a device's `/get`, answered while the device is there."""

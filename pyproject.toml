@@ -14,6 +14,7 @@ packages = ["ha_rig"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["untraced: keep a case's scope as the run left it (tests/conftest.py, dispatched_scope)"]
 
 [tool.ruff]
 line-length = 120

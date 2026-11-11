@@ -402,7 +402,13 @@ A run that observed anything writes its integrations' `_observed.md` straight in
 there, whether or not a suite record is written and however the run ends: observations stand whatever the code, and a
 `fail` row only blocks a lend once it is there. Review the diff before committing it.
 
-A record holds the date, the Home Assistant version, the devices' model and firmware, and each test's result. A failed
+A record holds the date, the Home Assistant version, the devices' model and firmware, a `Covers` row, and each test's
+result. `Covers` is what DeviceSide's `deviceside_scope` events named for the suite's proven cases (only its own action
+and integration's): `domains`, `capabilities` and `fields`, plus each of the adapter's `options` on or off, as the run
+pinned them (`domains=light,switch; capabilities=Switch; fields=brightness; options=predicted_state:on`). All four keys
+are always there, empty when none. It needs the admin connection's scope trace: a suite whose proven cases drew no
+scope event (no `HA_ADMIN_TOKEN`, or the wire logger would not go to DEBUG) writes no record, and the run says so.
+deviceside's `check_release.py --records` holds the row against the adapter's Verified scope. A failed
 suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run
 completes it (Coverage, above). The PR that clears an adapter's `experimental` flag cites one, and
 `cut-release-candidate` and `cut-release` refuse a head where a released adapter's code (its module and the modules it
