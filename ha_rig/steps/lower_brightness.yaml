@@ -35,7 +35,9 @@ tests:
       - set: {state: on, brightness_pct: 100}
       - call: {limit: 30, sweep_time: 5}
       - expect_state: {state: on, brightness: {min: 70, max: 84}, within: 4 + tol}
-      - wait: 2
+      # 100 % to 30 % takes 3.5 s. The first check can pass at once (Hue reports the end value at the call), and the
+      # bridge can still send a light's mid-fade value after it, so the hold check comes once the fade has ended.
+      - wait: 3.5 + tol
       - expect_state: {state: on, brightness: {min: 70, max: 84}}
 
   - name: light_raised_mid_room_lower  # needs light_ct to be one of the group's lights
