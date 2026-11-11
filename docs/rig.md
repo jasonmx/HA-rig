@@ -154,7 +154,7 @@ covers. `--dry-run` prints whether it may go and runs nothing.
 The rig treats the full-suite run before an RC as **coverage**: every test has a result at code unchanged since,
 built up over any number of runs. A suite's code is that of each adapter its tests call on its integration (its own
 action's, and those its `call` steps name), as deviceside's `check_release.py --records` defines an adapter's code:
-`core/` and `actions/` don't count, and nor does HA's version. Editing a suite's step file counts too. How:
+the `core/` modules it imports count, `actions/` doesn't, and nor does HA's version. Editing a suite's step file counts too. How:
 `ha_rig/coverage.py`.
 
 A suite is **covered** when its record (`<suite>.md` in the integration's records directory, deviceside's
