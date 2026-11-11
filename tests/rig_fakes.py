@@ -129,7 +129,7 @@ class FakeHA(HAClient):
         # DeviceSide's wire trace, once subscribed (subscribe_wire): each DeviceSide call is one `fake` call on the
         # entity, with the call's data, unless `wire_for` gives the (transport, command, params[, options]) it sends
         # instead.
-        self._taps: list[tuple[frozenset[str], list[dict]]] = []
+        self._taps: list[tuple[str, frozenset[str], list[dict]]] = []
         self._wire_events: int | None = None
         self.wire_for: Callable[[str, dict], list[tuple]] | None = None
 
