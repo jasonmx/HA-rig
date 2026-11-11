@@ -2607,6 +2607,9 @@ def render_record(
     return "\n".join(lines) + "\n"
 
 
+Records = Callable[[str], Path]  # an integration's test records directory (the runner's: target.test_records_dir)
+
+
 def report_path(directory: Path, title: str) -> Path:
     """Where the report titled `title` goes; the run's logs share its stem."""
     return directory / f"{title.replace(' ', '-').replace(':', '')}.md"
@@ -2647,31 +2650,31 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
 async def write_records(
     result: RunResult,
     registry: Any,
-    records_dir: Path,
+    records: Records,
     date: str,
     source: str,
     profile: str,
-    into: Path | None = None,
+    into: Records | None = None,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
-    under `into` (a run's staging, ha_rig/staging.py), laid out as `records_dir`, else into `records_dir`.
+    in its integration's directory of `into` (a run's staging, ha_rig/staging.py), else of `records`.
 
     A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
-    the file in `records_dir` stays as it is, and the suite is `kept` with those case IDs (its `records_dir` path). To
+    the file in `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To
     narrow on purpose, delete the record."""
     written, kept = [], []
-    into = into or records_dir
+    into = into or records
     for suite_result in result.suites:
         if not suite_result.recordable or suite_result.ha_version is None:
             continue
         suite = suite_result.suite
         title = registry.integrations[suite.integration].title
-        path = records_dir / suite.integration / f"{suite.name}.md"
+        path = records(suite.integration) / f"{suite.name}.md"
         if narrowed := narrows(suite_result.cases, Record.read(path)):
             kept.append((path, narrowed))
             continue
-        path = into / suite.integration / f"{suite.name}.md"
+        path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, profile)
@@ -2691,25 +2694,23 @@ def observed_by(case: CaseResult, date: str) -> tuple[list[Observation], dict] |
     return case.trace.rows(case.twin, date, passed), dict(case.trace.legend)
 
 
-def add_observed(records_dir: Path, integration: str, title: str, rows: list[Observation], legend: dict) -> Path:
-    """Merge `rows` into the integration's _observed.md in `records_dir` and write it."""
-    path = records_dir / integration / OBSERVED_FILE
+def add_observed(records: Records, integration: str, title: str, rows: list[Observation], legend: dict) -> Path:
+    """Merge `rows` into the integration's _observed.md in `records` and write it."""
+    path = records(integration) / OBSERVED_FILE
     observed = ObservedFile.read(path, title)
     observed.add(rows, legend)
     observed.write(path)
     return path
 
 
-def write_observed_case(suite: Suite, case: CaseResult, registry: Any, records_dir: Path, date: str) -> Path | None:
+def write_observed_case(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
     """Write what one finished case observed, dated now: each row is written once, when its case ends, so a later
     report or an interrupted run can't re-date it or lose it."""
     if (seen := observed_by(case, date)) is None:
         return None
-    return add_observed(
-        records_dir, suite.integration, registry.integrations[suite.integration].title, seen[0], seen[1]
-    )
+    return add_observed(records, suite.integration, registry.integrations[suite.integration].title, seen[0], seen[1])
 
 
-def load_observations(records_dir: Path, integrations: Iterable[str]) -> dict[str, list[Observation]]:
-    """Each integration's _observed.md rows in `records_dir`, for run()."""
-    return {key: ObservedFile.read(records_dir / key / OBSERVED_FILE, "").rows for key in integrations}
+def load_observations(records: Records, integrations: Iterable[str]) -> dict[str, list[Observation]]:
+    """Each integration's _observed.md rows in `records`, for run()."""
+    return {key: ObservedFile.read(records(key) / OBSERVED_FILE, "").rows for key in integrations}

@@ -154,17 +154,17 @@ covers. `--dry-run` prints whether it may go and runs nothing.
 The rig treats the full-suite run before an RC as **coverage**: every test has a result at code unchanged since,
 built up over any number of runs. A suite's code is that of each adapter its tests call on its integration (its own
 action's, and those its `call` steps name), as deviceside's `check_release.py --records` defines an adapter's code:
-`core/` and `actions/` don't count, and nor does HA's version. Editing a suite's step file counts too. How:
+the `core/` modules it imports count, `actions/` doesn't, and nor does HA's version. Editing a suite's step file counts too. How:
 `ha_rig/coverage.py`.
 
-A suite is **covered** when its record (`docs/test-records/<integration>/<suite>.md`) cites a commit at which that
-code is unchanged and lists exactly the cases the suite plans now (and shows none as skipped that this profile
-runs: a narrower profile's record doesn't cover a broader one), or when the ledger holds a result for every case it
-plans. A run leaves a selected suite that is covered out, saying `covered (record <date>, commit <c>), skipped`,
-and runs only the cases of the rest with no saved result; a run whose every selected suite is covered says so and
-stops. `--fresh` ignores the records and the saved cases of the selected suites and reruns them whole. The selection
-(`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so a `-k` run's cases count towards their
-suite's record.
+A suite is **covered** when its record (`<suite>.md` in the integration's records directory, deviceside's
+`check_release.test_records_dir`) cites a commit at which that code is unchanged and lists exactly the cases the suite
+plans now (and shows none as skipped that this profile runs: a narrower profile's record doesn't cover a broader one),
+or when the ledger holds a result for every case it plans. A run leaves a selected suite that is covered out, saying
+`covered (record <date>, commit <c>), skipped`, and runs only the cases of the rest with no saved result; a run whose
+every selected suite is covered says so and stops. `--fresh` ignores the records and the saved cases of the selected
+suites and reruns them whole. The selection (`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so
+a `-k` run's cases count towards their suite's record.
 
 **`--coverage`** prints each selected suite's coverage at the checkout's HEAD, as `--check` does the devices: no
 lock, no deploy, nothing written. A suite is `covered`, `partial N/M` with its missing cases and the entities they
@@ -326,7 +326,7 @@ integrations; the rest run automated only. `--unattended` doesn't ask, so an obs
 **An observed pass proves a call pattern, not a test** (`ha_rig/observed.py`). It shows how a maker's devices,
 started from a state, respond to a sequence of calls, and to any sequence that sequence begins with: a device can't
 know which calls are still to come. Every attended answer adds a row per device to the integration's
-`docs/test-records/<integration>/_observed.md`: maker, model, firmware, starting state, the calls the observed case
+`_observed.md`, in its records directory: maker, model, firmware, starting state, the calls the observed case
 sent, the case it was seen in, the date and `pass` or `fail` (a `n`; a step that broke adds nothing). A row with the
 same device, state and calls is replaced unless it is newer; on one date a fail wins. Its Calls section maps each call's hash to the call.
 
@@ -387,8 +387,9 @@ rig never sets it.
 
 ### Test records
 
-When every test of an adapter passes, the run stages its record, `<integration>/<action>.md`, in `<report>.records/`
-next to its report, and writes it to `docs/test-records/` in the deviceside checkout only when the run ends cleanly:
+When every test of an adapter passes, the run stages its record, `<action>.md` at its path in the checkout, in
+`<report>.records/` next to its report, and writes it to the integration's records directory in the deviceside
+checkout only when the run ends cleanly:
 exit 0 (no failure, not stopped, the bulbs home, no unexpected DeviceSide log line) with a result for every case it
 planned (an unreachable skip isn't one). Any other end, a crash included, leaves the checkout untouched and prints
 the one command that promotes the staged records, `scripts/rig.py --promote <dir>` (any checkout of this repo runs

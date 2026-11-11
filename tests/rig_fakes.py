@@ -15,6 +15,7 @@ from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
 from ha_rig.client import HAClient, HAError, device_ieee
 from ha_rig.profile import Profile, RigEntity, colon_ieee, hex_ieee
 from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
+from ha_rig.target import deviceside_repo, test_records_dir
 
 
 @functools.cache
@@ -828,3 +829,22 @@ class ShellyAuto:
         ha.calls.append(("reload", entity_id, {}))
         del self.pending[entity_id]
         PENDING.remove(asyncio.current_task())  # done: nothing for a test's teardown to cancel
+
+
+GATE = deviceside_repo() / "scripts" / "check_release.py"
+
+
+def gate_scripts(repo: Path) -> Path:
+    """Give a deviceside-shaped `repo` the target checkout's scripts/check_release.py, linked, so
+    target.test_records_dir and adapter_code answer for it as for the target."""
+    (repo / "scripts").mkdir(parents=True, exist_ok=True)
+    if not (link := repo / "scripts" / "check_release.py").is_symlink():
+        link.symlink_to(GATE)
+    return repo
+
+
+@functools.cache  # read before a test swaps target.is_deviceside
+def records_at(integration: str) -> str:
+    """The integration's test records directory relative to a checkout, as the target's check_release lays it out."""
+    target = deviceside_repo()
+    return test_records_dir(target, integration).relative_to(target).as_posix()

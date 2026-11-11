@@ -14,6 +14,7 @@ from ha_rig.observed import Observation, Trace, sequence
 from ha_rig.profile import Profile
 from ha_rig.progress import Progress, _saved
 from ha_rig.target import deviceside_repo
+from tests.rig_fakes import gate_scripts, records_at
 
 FILES = {st.action: st for st in load_step_files() if not st.options and st.name is None}
 SUITE = Suite(FILES["turn_on_for"], "shelly")
@@ -56,9 +57,9 @@ def record(suite: Suite, cited: str, ids=IDS, date: str = "2026-11-01", skipped=
 
 @pytest.fixture
 def repo(tmp_path) -> Path:
-    """A deviceside-shaped repo: two integration packages and core/."""
+    """A deviceside-shaped repo: two integration packages, core/ and the gate's check_release.py."""
     path = tmp_path / "deviceside"
-    path.mkdir()
+    gate_scripts(path)
     git(path, "init", "-q")
     commit(
         path,
@@ -86,7 +87,7 @@ def test_code_is_the_gates_adapter_code_with_the_called_actions():
     registry, repo = AdapterRegistry.discover(), deviceside_repo()
     own = coverage.code(SUITE, registry, repo)
     assert f"{PKG}/shelly/turn_on_for.py" in own and f"{PKG}/shelly/__init__.py" in own
-    assert not any("/core/" in path or "/actions/" in path for path in own)
+    assert not any("/actions/" in path for path in own)  # core/ counts only where the adapter imports it
     calling = coverage.code(Suite(FILES["set_auto_off"], "shelly"), registry, repo)  # calls turn_on_for
     assert {f"{PKG}/shelly/set_auto_off.py", *own} <= set(calling)
 
@@ -107,8 +108,8 @@ def test_the_fingerprint_follows_the_suites_code_and_step_file(repo, tmp_path):
 
 def test_a_record_stays_fresh_until_its_adapters_code_changes(repo):
     cited = git(repo, "rev-parse", "HEAD")
-    commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited)})
-    commit(repo, {f"docs/test-records/hue/{OTHER.name}.md": record(OTHER, cited)})
+    commit(repo, {f"{records_at('shelly')}/{SUITE.name}.md": record(SUITE, cited)})
+    commit(repo, {f"{records_at('hue')}/{OTHER.name}.md": record(OTHER, cited)})
     core = commit(repo, {"custom_components/deviceside/core/engine.py": "y = 2\n"})
     fresh = coverage.freshness(repo, SUITE, core, shelly(repo), plan())
     assert fresh.fresh  # a core/ change stales nothing, as the gate decides
@@ -121,7 +122,7 @@ def test_a_record_stays_fresh_until_its_adapters_code_changes(repo):
 
 def test_a_record_whose_cases_differ_is_stale(repo):
     cited = git(repo, "rev-parse", "HEAD")
-    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited)})
+    head = commit(repo, {f"{records_at('shelly')}/{SUITE.name}.md": record(SUITE, cited)})
     stale = coverage.freshness(repo, SUITE, head, shelly(repo), plan([IDS[0], "new[switch_plug]"]))
     assert str(stale) == f"stale: cases changed: new new[switch_plug]; gone {IDS[1]}"
 
@@ -129,9 +130,9 @@ def test_a_record_whose_cases_differ_is_stale(repo):
 def test_no_record_an_unknown_commit_or_none_cited(repo):
     head = git(repo, "rev-parse", "HEAD")
     assert str(coverage.freshness(repo, SUITE, head, shelly(repo), plan())) == "no record"
-    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, "abcdef1234")})
+    head = commit(repo, {f"{records_at('shelly')}/{SUITE.name}.md": record(SUITE, "abcdef1234")})
     assert "which git can't find" in str(coverage.freshness(repo, SUITE, head, shelly(repo), plan()))
-    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": "# no source\n"})
+    head = commit(repo, {f"{records_at('shelly')}/{SUITE.name}.md": "# no source\n"})
     assert str(coverage.freshness(repo, SUITE, head, shelly(repo), plan())) == "stale: cites no commit"
 
 
@@ -184,7 +185,7 @@ def test_a_firmware_fact_covers_its_case_across_a_code_change_and_fresh_reruns_i
 
 def test_a_narrower_profiles_record_does_not_cover_a_broader_one(repo):
     cited = git(repo, "rev-parse", "HEAD")
-    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited, skipped=[IDS[0]])})
+    head = commit(repo, {f"{records_at('shelly')}/{SUITE.name}.md": record(SUITE, cited, skipped=[IDS[0]])})
     bulb = coverage.freshness(repo, SUITE, head, shelly(repo), plan(absent=[IDS[0]]))
     assert bulb.fresh
     full = coverage.freshness(repo, SUITE, head, shelly(repo), plan())
@@ -198,7 +199,7 @@ def suite_coverage(repo: Path, head: str, planned: list, saved=None) -> coverage
 
 def test_a_broader_record_covers_the_narrower_profile_and_a_stale_one_warns_it_will_not_be_narrowed(repo):
     cited = git(repo, "rev-parse", "HEAD")
-    head = commit(repo, {f"docs/test-records/shelly/{SUITE.name}.md": record(SUITE, cited)})
+    head = commit(repo, {f"{records_at('shelly')}/{SUITE.name}.md": record(SUITE, cited)})
     bulb = suite_coverage(repo, head, plan(absent=[IDS[0]]))
     assert bulb.covered and bulb.narrows == [IDS[0]]  # fresh: covered, nothing to warn of
     assert str(bulb) == f"covered (record 2026-11-01, commit {cited[:7]})"

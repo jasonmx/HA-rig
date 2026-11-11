@@ -21,7 +21,7 @@ from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
 from tests import rig_fakes as fakes
-from tests.rig_fakes import write
+from tests.rig_fakes import gate_scripts, records_at, write
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("rig", RIG_HOME / "scripts" / "rig.py")
@@ -780,7 +780,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
 
     written = []
 
-    async def write_records(result, registry, records_dir, date, source, profile, into=None):
+    async def write_records(result, registry, records, date, source, profile, into=None):
         written.append(source)
         assert profile == "house"
         return [], []
@@ -969,7 +969,12 @@ def test_a_file_with_no_test_for_an_integration_is_not_selected_there(profile, t
     assert rig.select(step_files, profile, ["shelly"], ["lifecycle"]) == []
     monkeypatch.setattr(rig.coverage, "code", lambda suite, registry, repo: ())
     found = rig.coverage.of(
-        rig.select(step_files, profile, None, ["lifecycle"]), profile, AdapterRegistry.discover(), tmp_path, "c1", None
+        rig.select(step_files, profile, None, ["lifecycle"]),
+        profile,
+        AdapterRegistry.discover(),
+        gate_scripts(tmp_path),
+        "c1",
+        None,
     )
     assert {(c.suite.integration, c.suite.name) for c in found} == {("hue", "lifecycle")}
 
@@ -1263,7 +1268,7 @@ def test_a_bad_profile_leaves_the_terms_stale_but_stops_no_mode(tmp_path, monkey
 
 def test_the_runner_tests_a_deviceside_checkout():
     assert (rig.REPO / rig.COMPONENT / "manifest.json").is_file()
-    assert rig.TEST_RECORDS_DIR == rig.REPO / "docs" / "test-records"
+    assert rig.checkout_records("shelly") == rig.REPO / records_at("shelly")
 
 
 # --- stopping and resuming -----------------------------------------------------------------------------------------
@@ -1337,7 +1342,7 @@ ENTITY = {"shelly": "light.a", "zha": "light.b"}
 def planned(tmp_path, monkeypatch, suites, profile, **kwargs) -> rig.Setup:
     """plan_coverage() on HA 2026.10.1 at commit c1, with tmp_path as the deviceside checkout: no record anywhere,
     and each suite's code no files, so its fingerprint is its step file's."""
-    monkeypatch.setattr(rig, "REPO", tmp_path)
+    monkeypatch.setattr(rig, "REPO", gate_scripts(tmp_path))
     monkeypatch.setattr(rig.coverage, "code", lambda suite, registry, repo: ())
     monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
     deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
@@ -1441,22 +1446,28 @@ def test_an_edited_step_file_stales_its_saved_cases(tmp_path, monkeypatch):
 
 
 def staged(directory: Path) -> list[str]:
-    """The records staged under `directory`, by integration/name."""
-    return sorted(str(path.relative_to(directory)) for path in directory.rglob("*.md"))
+    """The records under `directory` (a staging, or the checkout bar its reports), by their path in the checkout."""
+    found = (path.relative_to(directory) for path in directory.rglob("*.md"))
+    return sorted(path.as_posix() for path in found if path.parts[0] != "reports")
+
+
+def record_path(integration: str, name: str = "raise_brightness") -> str:
+    """A record's path in the checkout, and in a staging."""
+    return f"{records_at(integration)}/{name}.md"
 
 
 def recording(written: list[list[str]]):
     """A write_records that notes each call's recordable suites and writes a stub record for each, where it is told."""
 
-    async def write_records(result, registry, records_dir, date, source, profile, into=None):
+    async def write_records(result, registry, records, date, source, profile, into=None):
         paths = []
         for part in result.suites:
             if part.recordable:
-                path = (into or records_dir) / part.suite.integration / f"{part.suite.name}.md"
+                path = (into or records)(part.suite.integration) / f"{part.suite.name}.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(f"{part.suite.integration} {date}\n")
                 paths.append(path)
-        written.append([path.parent.name for path in paths])
+        written.append([part.suite.integration for part in result.suites if part.recordable])
         return paths, []
 
     return write_records
@@ -1466,8 +1477,7 @@ def test_a_run_stopped_by_its_budget_stages_and_its_clean_resume_promotes_both(t
     ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
     ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 200}}
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
-    records = tmp_path / "docs" / "test-records"
-    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", records)
+    records = tmp_path  # the checkout, once planned() makes it so
     written: list[list[str]] = []
     monkeypatch.setattr(rig, "write_records", recording(written))
     profile, suites = resumable(tmp_path)
@@ -1508,9 +1518,9 @@ def test_a_run_stopped_by_its_budget_stages_and_its_clean_resume_promotes_both(t
     out = capsys.readouterr().out
     assert "Stopped with 1 cases left (budget spent); rerun the same command to resume." in out
     assert written == [["shelly"]]  # zha is one case short
-    assert not records.exists()  # the checkout is untouched
+    assert staged(records) == []  # the checkout is untouched
     [staging] = (tmp_path / "reports").glob("*.records")
-    assert staged(staging) == ["shelly/raise_brightness.md"]
+    assert staged(staging) == [record_path("shelly")]
     assert "No test records written to the checkout: the run didn't end cleanly (exit 75)" in out
     assert f"rig.py --promote {staging}" in out
 
@@ -1518,7 +1528,7 @@ def test_a_run_stopped_by_its_budget_stages_and_its_clean_resume_promotes_both(t
     assert session() == 0
     assert "Resuming" not in capsys.readouterr().out
     assert written == [["shelly"], ["shelly", "zha"]]  # shelly's, still in the ledger, is staged again
-    assert staged(records) == ["shelly/raise_brightness.md", "zha/raise_brightness.md"]
+    assert staged(records) == [record_path("shelly"), record_path("zha")]
     assert not rig.Progress.load(tmp_path, "house").entries  # the records carry both now
 
 
@@ -1527,7 +1537,6 @@ async def test_a_staged_record_keeps_its_suite_in_the_ledger_until_promoted(tmp_
     progress = planned(tmp_path, monkeypatch, suites, profile).progress
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
-    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", tmp_path / "docs" / "test-records")
     for suite in suites:
         for case_id in ("t[light_ct]", "u[light_ct]"):
             outcome = (
@@ -1543,14 +1552,14 @@ async def test_a_staged_record_keeps_its_suite_in_the_ledger_until_promoted(tmp_
     staging = rig.staging_for("2026-11-09 10:00:00", profile, progress)
     result = engine.RunResult(progress.parts(suites))
     await rig.report(result, fakes.OPTION_REGISTRY, "c1", profile, staging, progress=progress)
-    assert written == [["shelly"]] and list(staging.records) == ["shelly/raise_brightness.md"]
+    assert written == [["shelly"]] and list(staging.records) == [record_path("shelly")]
     assert {key[0] for key in progress.done()} == {"shelly", "zha"}  # nothing leaves before promotion
     assert rig.end_code(result, True, None, progress, suites, profile, fakes.OPTION_REGISTRY) == 1
     assert {entry[0] for entry in rig.Progress.load(tmp_path, "house").entries} == {"shelly"}  # the failure reruns
 
     staging.promote(progress)
     assert not rig.Progress.load(tmp_path, "house").entries  # shelly's record carries it now
-    assert (tmp_path / "docs" / "test-records" / "shelly" / "raise_brightness.md").exists()
+    assert (tmp_path / record_path("shelly")).exists()
     assert not staging.directory.exists()
 
 
@@ -1559,8 +1568,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
     progress = planned(tmp_path, monkeypatch, suites, profile).progress
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
-    monkeypatch.setattr(rig, "REPO", tmp_path)
-    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", tmp_path / "docs" / "test-records")
+    monkeypatch.setattr(rig, "REPO", gate_scripts(tmp_path))
     for suite in suites:
         for case_id in ("t[light_ct]", "u[light_ct]"):
             result = engine.CaseResult(
@@ -1569,11 +1577,11 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
             progress.record(suite, result)
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records_dir, date, source, profile, into=None):
-        path = into / "zha" / "raise_brightness.md"
+    async def write_records(result, registry, records, date, source, profile, into=None):
+        path = into("zha") / "raise_brightness.md"
         path.parent.mkdir(parents=True)
         path.write_text("zha\n")
-        return [path], [(records_dir / "shelly" / "raise_brightness.md", ["t[switch_plug]", "u[switch_plug]"])]
+        return [path], [(records("shelly") / "raise_brightness.md", ["t[switch_plug]", "u[switch_plug]"])]
 
     monkeypatch.setattr(rig, "write_records", write_records)
     staging = rig.staging_for("2026-11-09 10:00:00", profile, progress)
@@ -1581,7 +1589,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
     await rig.report(result, fakes.OPTION_REGISTRY, "c1", profile, staging, progress=progress)
 
     out = capsys.readouterr().out
-    assert "Kept docs/test-records/shelly/" in out
+    assert f"Kept {record_path('shelly')}:" in out
     assert "skips t[switch_plug], u[switch_plug], which it passed; run a profile with those roles" in out
     staging.promote(progress)
     assert {key[0] for key in progress.done()} == {"shelly"}  # the kept suite still needs its run; zha's is promoted
@@ -1604,7 +1612,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     written: list[list[str]] = []
 
-    async def write_records(result, registry, records_dir, date, source, profile, into=None):
+    async def write_records(result, registry, records, date, source, profile, into=None):
         written.append([part.suite.integration for part in result.suites if part.recordable])
         return [], []
 
@@ -1786,9 +1794,9 @@ def test_the_dry_run_plan_lists_no_option_case_for_shelly(tmp_path, capsys):
 
 def one_staged(tmp_path: Path) -> rig.Staging:
     """A run's staging holding one record, for the checkout at tmp_path/repo."""
-    repo = tmp_path / "repo"
-    staging = rig.Staging(tmp_path / "reports" / "run.records", repo, repo / "docs" / "test-records")
-    path = staging.directory / "shelly" / "raise_brightness.md"
+    repo = gate_scripts(tmp_path / "repo")
+    staging = rig.Staging(tmp_path / "reports" / "run.records", repo)
+    path = staging.test_records_dir("shelly") / "raise_brightness.md"
     path.parent.mkdir(parents=True)
     path.write_text("pass\n")
     staging.add(path, None)
@@ -1806,7 +1814,7 @@ def one_staged(tmp_path: Path) -> rig.Staging:
 def test_a_run_that_doesnt_end_cleanly_leaves_the_checkout_untouched(tmp_path, capsys, code, unrun, why):
     staging = one_staged(tmp_path)
     rig.settle_records(staging, code, unrun, None)
-    assert not (tmp_path / "repo").exists()
+    assert staged(tmp_path / "repo") == []
     out = capsys.readouterr().out
     assert f"No test records written to the checkout: {why}. 1 staged in {staging.directory}" in out
     assert staging.command() in out
@@ -1815,7 +1823,7 @@ def test_a_run_that_doesnt_end_cleanly_leaves_the_checkout_untouched(tmp_path, c
 def test_a_clean_run_promotes_its_records(tmp_path, capsys):
     staging = one_staged(tmp_path)
     rig.settle_records(staging, 0, 0, None)
-    assert (tmp_path / "repo" / "docs" / "test-records" / "shelly" / "raise_brightness.md").read_text() == "pass\n"
+    assert (tmp_path / "repo" / record_path("shelly")).read_text() == "pass\n"
     assert "--promote" not in capsys.readouterr().out
 
 
@@ -1834,15 +1842,14 @@ def test_promote_runs_the_staged_dir_alone(tmp_path, monkeypatch, capsys):
     assert "--promote takes only the staged directory" in capsys.readouterr().err
     monkeypatch.setattr(rig.target, "is_deviceside", lambda path: path == tmp_path / "repo")
     assert rig.promote_staged(staging.directory) == 0
-    assert (tmp_path / "repo" / "docs" / "test-records" / "shelly" / "raise_brightness.md").exists()
+    assert (tmp_path / "repo" / record_path("shelly")).exists()
 
 
 def test_a_run_whose_logs_are_flagged_stages_its_records_and_keeps_its_suites_saved(tmp_path, monkeypatch, capsys):
     ha = rig_ha(monkeypatch, light="on", opt=True, automation="on")
     ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 200}}
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
-    records = tmp_path / "docs" / "test-records"
-    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", records)
+    records = tmp_path  # the checkout, once planned() makes it so
     written: list[list[str]] = []
     monkeypatch.setattr(rig, "write_records", recording(written))
     monkeypatch.setattr(rig.RunLogs, "settle", lambda self, clean: True)  # an unexpected DeviceSide line
@@ -1855,7 +1862,7 @@ def test_a_run_whose_logs_are_flagged_stages_its_records_and_keeps_its_suites_sa
         )
     )  # fmt: skip
     assert code == 1 and written == [["shelly", "zha"]]
-    assert not records.exists()
+    assert staged(records) == []
     assert "the run didn't end cleanly (exit 1)" in capsys.readouterr().out
     after = planned(tmp_path, monkeypatch, suites, profile)
     assert rig.pending(after) == {("shelly", "raise_brightness"), ("zha", "raise_brightness")}
@@ -1868,10 +1875,11 @@ def test_two_runs_started_the_same_second_stage_apart(tmp_path, profile, monkeyp
 
 
 def observing_run(tmp_path, monkeypatch):
-    """rig.observing's on_result over a checkout in tmp_path; returns it, the suite and the records directory."""
+    """rig.observing's on_result over a checkout in tmp_path; returns it, the suite and the checkout's records
+    directory for an integration."""
     _, suites = resumable(tmp_path)
-    records = tmp_path / "docs" / "test-records"
-    monkeypatch.setattr(rig, "TEST_RECORDS_DIR", records)
+    monkeypatch.setattr(rig, "REPO", gate_scripts(tmp_path))
+    records = rig.checkout_records
     registry = types.SimpleNamespace(integrations={"shelly": types.SimpleNamespace(title="Shelly")})
     return rig.observing(registry, None), suites[0], records
 
@@ -1891,8 +1899,8 @@ def watched(passed: bool) -> engine.CaseResult:
     )
 
 
-def observed_rows(records: Path) -> list[tuple[str, str]]:
-    return [(row.date, row.result) for row in observed.ObservedFile.read(records / "shelly" / "_observed.md", "").rows]
+def observed_rows(records) -> list[tuple[str, str]]:
+    return [(row.date, row.result) for row in observed.ObservedFile.read(records("shelly") / "_observed.md", "").rows]
 
 
 def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_then(tmp_path, monkeypatch, capsys):
@@ -1906,7 +1914,7 @@ def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_th
 def test_a_report_leaves_a_rows_date_alone(tmp_path, monkeypatch):
     on_result, suite, records = observing_run(tmp_path, monkeypatch)
     on_result(suite, watched(True))
-    path = records / "shelly" / "_observed.md"
+    path = records("shelly") / "_observed.md"
     path.write_text(path.read_text().replace(rig.datetime.date.today().isoformat(), "2026-01-01"))
     result = engine.RunResult([engine.SuiteResult(suite, [watched(True)], True)])
     asyncio.run(rig.report(result, fakes.OPTION_REGISTRY, None, resumable(tmp_path)[0], None))
@@ -1916,7 +1924,7 @@ def test_a_report_leaves_a_rows_date_alone(tmp_path, monkeypatch):
 def test_an_old_pass_does_not_replace_a_newer_fail_and_a_same_day_fail_beats_a_pass(tmp_path, monkeypatch):
     on_result, suite, records = observing_run(tmp_path, monkeypatch)
     on_result(suite, watched(False))
-    [row] = observed.ObservedFile.read(records / "shelly" / "_observed.md", "").rows
+    [row] = observed.ObservedFile.read(records("shelly") / "_observed.md", "").rows
     older = observed.ObservedFile("Shelly", [replace(row, date="2026-01-01", result="pass")], {})
     older.add([replace(row, date="2026-01-01", result="pass")], {})
     assert [(r.date, r.result) for r in older.rows] == [("2026-01-01", "pass")]

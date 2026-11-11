@@ -2,15 +2,15 @@
 
 A suite's code is that of each adapter its tests call on its integration: its own action's and those its `call`
 steps name (engine.adapters_for). Each adapter's files are deviceside's own `check_release.adapter_code`, read from
-the target checkout's `scripts/`, so a suite goes stale exactly when the release gate says its record does: `core/`
-and `actions/` are left out, and HA's version doesn't count.
+the target checkout's `scripts/`, so a suite goes stale exactly when the release gate says its record does: `actions/`
+is left out, `core/` counts only where the adapter imports it, and HA's version doesn't count.
 
 A suite's **fingerprint** at a commit hashes the git blob of each of those files there with the rig's step file, so
 editing a test changes it too. The saved progress (ha_rig/progress.py) keys its entries by it.
 
-A **fresh record** (`docs/test-records/<integration>/<suite name>.md`) cites a commit at which the suite's code is
-the same as at the one tested now, as the gate compares them (`git diff --name-only`), and lists exactly the case
-IDs the suite plans now.
+A **fresh record** (`<suite name>.md` in the integration's `target.test_records_dir`) cites a commit at which the
+suite's code is the same as at the one tested now, as the gate compares them (`git diff --name-only`), and lists
+exactly the case IDs the suite plans now.
 
 A **firmware fact** (a test with `firmware_fact: true`) is covered while the ledger keeps its pass at the device's
 firmware, whatever the code (ha_rig/progress.py, Firmware facts): coverage lends that pass to the suite's entry, so
@@ -24,10 +24,8 @@ Pure file and git reading: --coverage and the plan run it before anything change
 """
 
 import hashlib
-import importlib.util
 import inspect
 import subprocess
-import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,26 +35,14 @@ from .engine import Case, CaseResult, Outcome, Record, Suite, adapters_for, appl
 from .observed import Observation
 from .profile import Profile
 from .progress import Progress
+from .target import check_release, test_records_dir
 
-RECORDS = Path("docs") / "test-records"
 INTEGRATIONS = "custom_components/deviceside/integrations/"  # left off the changed files a stale record names
 
 
 def adapter_code(repo: Path) -> Callable[[Path], list[Path]]:
-    """deviceside's `check_release.adapter_code`, from `repo`'s scripts/, loaded once per checkout. Loading it puts its
-    checkout first on sys.path, which is put back, so the rig's own `tests` package still wins."""
-    script = (repo / "scripts" / "check_release.py").resolve()
-    name = f"check_release_{hashlib.sha256(str(script).encode()).hexdigest()[:8]}"
-    if (loaded := sys.modules.get(name)) is None:
-        spec = importlib.util.spec_from_file_location(name, script)
-        loaded = importlib.util.module_from_spec(spec)
-        saved = list(sys.path)
-        try:
-            spec.loader.exec_module(loaded)
-        finally:
-            sys.path[:] = saved
-        sys.modules[name] = loaded
-    return loaded.adapter_code
+    """deviceside's `check_release.adapter_code`, from `repo`'s scripts/."""
+    return check_release(repo).adapter_code
 
 
 def code(suite: Suite, registry: Any, repo: Path) -> tuple[str, ...]:
@@ -91,7 +77,7 @@ def fingerprint(repo: Path, commit: str, files: Iterable[str], step_file: Path) 
 
 
 def record_path(repo: Path, suite: Suite) -> Path:
-    return repo / RECORDS / suite.integration / f"{suite.name}.md"
+    return test_records_dir(repo, suite.integration) / f"{suite.name}.md"
 
 
 @dataclass(frozen=True, slots=True)
