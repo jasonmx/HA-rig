@@ -27,6 +27,7 @@ from typing import Any
 
 import yaml
 
+from . import shared_coverage
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
 from .client import SCOPE_EVENT, HAClient, HAError, device_ieee
@@ -2630,9 +2631,10 @@ def render_record(
     date: str,
     source: str,
     options: Mapping[str, bool] = MappingProxyType({}),
+    shared: shared_coverage.Rows = (),
 ) -> str:
-    """The test record: a key/value table, then the per-test table. deviceside's check_release.py --records reads
-    its commit."""
+    """The test record: a key/value table, then the per-test table, then the run's `core/` coverage when it has
+    some (`shared`). deviceside's check_release.py --records reads its commit and that section."""
     suite = suite_result.suite
     rows = [
         ("Result", "pass"),
@@ -2661,6 +2663,7 @@ def render_record(
             "A firmware fact proves the device's behavior, not the adapter's code: its pass stands at the firmware "
             "listed under Device, and may come from an earlier commit at that firmware.",
         ]
+    lines += shared_coverage.section(list(shared))
     return "\n".join(lines) + "\n"
 
 
@@ -2712,6 +2715,7 @@ async def write_records(
     source: str,
     into: Records | None = None,
     untraced: list[Path] | None = None,
+    shared: shared_coverage.Rows = (),
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
@@ -2723,7 +2727,9 @@ async def write_records(
 
     A suite whose proven cases drew no scope event (no admin connection, or the wire logger would not go to DEBUG)
     has nothing to put in `Covers`, and an empty row would replace a record that had one: its `records` path is
-    added to `untraced`, if given, and nothing is written."""
+    added to `untraced`, if given, and nothing is written.
+
+    Each record carries the `shared` rows (the run's `core/` coverage), if any."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2745,7 +2751,9 @@ async def write_records(
         adapter = registry.adapter(suite.action, suite.integration)
         options = {name: name in suite.file.options for name in adapter.scope.options} if adapter else {}
         path.write_text(
-            render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, options)
+            render_record(
+                suite_result, title, suite_result.ha_version, suite_result.devices, date, source, options, shared
+            )
         )
         written.append(path)
     return written, kept

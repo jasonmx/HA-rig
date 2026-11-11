@@ -351,7 +351,9 @@ def test_claims_cover_and_combine():
 
 
 def run_args(*argv: str) -> argparse.Namespace:
-    return argparse.Namespace(no_deploy="--no-deploy" in argv, roam_check="--roam-check" in argv)
+    return argparse.Namespace(
+        no_deploy="--no-deploy" in argv, roam_check="--roam-check" in argv, shared_coverage="--shared-coverage" in argv
+    )
 
 
 def setup(tmp_path, profile, suites, deploy_needed=False, roaming=False, grouping=False, registry=None) -> rig.Setup:
@@ -481,7 +483,9 @@ def approved(tmp_path, monkeypatch, run, deploying: bool) -> tuple[locks.Held, l
     monkeypatch.setattr(rig, "run_rig", lambda *_args, claim, **_kw: given.append(claim))
     monkeypatch.setattr(rig, "run_tests", lambda _run, aborted=None: 0)
     rig.run_approved(
-        SimpleNamespace(keyword=None, unattended=True, debug_logs=False, budget=None, reobserve=False),
+        SimpleNamespace(
+            keyword=None, unattended=True, debug_logs=False, budget=None, reobserve=False, shared_coverage=False
+        ),
         run,
         held,
         None,

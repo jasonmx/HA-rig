@@ -134,7 +134,7 @@ sys.path.append(str(REPO))
 
 from custom_components.deviceside.core.registry import AdapterRegistry  # noqa: E402
 
-from ha_rig import coverage, locks, target, terms  # noqa: E402
+from ha_rig import coverage, locks, shared_coverage, target, terms  # noqa: E402
 from ha_rig.authorize import APPROVAL, OLD_SENSOR_KEY, SENSOR_KEY, Decision, authorize  # noqa: E402
 from ha_rig.baseline import NAME as BASELINE_NAME  # noqa: E402
 from ha_rig.baseline import Baseline  # noqa: E402
@@ -147,6 +147,7 @@ from ha_rig.engine import (  # noqa: E402
     Case,
     CaseResult,
     EntryOptions,
+    Outcome,
     RunResult,
     Snapshot,
     StepFile,
@@ -735,6 +736,12 @@ def main(argv: list[str] | None = None) -> int:
         help="ask no one: an observed test whose calls no observed pass covers is reported not observed",
     )
     parser.add_argument(
+        "--shared-coverage",
+        action="store_true",
+        help="measure DeviceSide's core/ lines the run executes in HA (the rig_coverage helper) and write them into "
+        "each record, if every suite passed; holds HA exclusively; needs HA_ADMIN_TOKEN",
+    )
+    parser.add_argument(
         "--reobserve",
         action="store_true",
         help="run observed tests even where an observed pass covers their calls, as after a major firmware upgrade",
@@ -829,6 +836,22 @@ def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, 
     if args.promote and any(value for name, value in vars(args).items() if name != "promote"):  # command included
         parser.error("--promote takes only the staged directory")
     refuse_mode_conflicts(parser, args, command)
+    refuse_shared_coverage(parser, args, command)
+
+
+def refuse_shared_coverage(parser: argparse.ArgumentParser, args: argparse.Namespace, command: list[str]) -> None:
+    """--shared-coverage measures a run that writes records: not a probe, --check, --no-deploy or --deploy-only."""
+    if args.shared_coverage and (
+        args.check
+        or args.coverage
+        or args.roam_check
+        or args.recover
+        or args.wait_free
+        or args.no_deploy
+        or args.deploy_only
+        or command
+    ):
+        parser.error("--shared-coverage is for a test run that writes records: not with --no-deploy or a probe")
 
 
 def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, command: list[str]) -> None:
@@ -1011,9 +1034,16 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
     if directory is not None and not args.no_deploy and not args.roam_check:
         plan_coverage(args, setup, directory)
+    refuse_unmeasurable(args, env)
     if not args.dry_run:
         check_tokens(env, setup.suites, registry, setup.roaming or setup.grouping)
     return setup
+
+
+def refuse_unmeasurable(args: argparse.Namespace, env: dict) -> None:
+    """--shared-coverage calls the rig_coverage helper's admin-only services."""
+    if args.shared_coverage and not env.get("HA_ADMIN_TOKEN"):
+        raise SystemExit("--shared-coverage needs HA_ADMIN_TOKEN in .env.rig: the helper's services are admin-only")
 
 
 def plan_coverage(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
@@ -1075,14 +1105,14 @@ def claim(args: argparse.Namespace, setup: Setup) -> Claim:
     """What the run must hold: each integration with a suite that has an adapter, the integrations their entities draw
     power through, and the networks its roaming bulbs visit, home included; HA exclusively when it deploys, which
     restarts HA, or runs a suite that reloads the entry (DeviceSide options, whose save does, or entry steps); HA
-    shared otherwise."""
+    shared otherwise; exclusively too for --shared-coverage, so no other run's `core/` lines mix in."""
     integrations = {suite.integration for suite in runnable(setup)}
     integrations |= supplies(setup.profile, integrations)
     if setup.roaming:
         integrations |= {network for network, _ in phases(setup.suites, setup.profile, roaming=True) if network}
     if setup.grouping:
         integrations.add(setup.profile.roam_home)
-    exclusive = setup.deploying(args) or reloads(setup)
+    exclusive = setup.deploying(args) or reloads(setup) or args.shared_coverage
     return Claim("exclusive" if exclusive else "shared", frozenset(integrations))
 
 
@@ -1270,7 +1300,9 @@ def run_approved(
     env, deploy = setup.env, setup.deploy
     budget = Budget(time.monotonic() + args.budget) if args.budget else None
     deploy_and_wait(env, deploy.branch if deploying else None)
-    if deploying and not reloads(setup):  # HA is back, and nothing left restarts or reloads it under other runs
+    if (
+        deploying and not reloads(setup) and not args.shared_coverage
+    ):  # HA is back, and nothing left restarts or reloads it under other runs
         held.share_ha()
     commit = tested_commit(env.get("RIG_STATUS_CMD", ""), deploy, deploying)
     return run_tests(
@@ -1289,6 +1321,7 @@ def run_approved(
             claim=held.claim,
             debug_logs=args.debug_logs,
             reobserve=args.reobserve,
+            shared_coverage=args.shared_coverage,
             progress=setup.progress,
             selected=setup.selected,
             budget=budget,
@@ -1874,6 +1907,7 @@ async def run_rig(
     budget: Budget | None = None,
     pending: set[tuple[str, str]] | None = None,
     reobserve: bool = False,
+    shared_coverage: bool = False,
 ) -> int:
     """Run the step files, in lanes first when `lanes` (run_phases), then phase by phase, moving the roaming bulbs
     before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then stage a
@@ -1893,7 +1927,10 @@ async def run_rig(
     With `progress`, each case is saved as it finishes and the report joins the saved results of every `selected`
     suite to this session's, so a suite finished across sessions writes its record, which takes it out of the ledger;
     a suite that failed a case leaves it when the run ends. A run the `budget` stopped says what is left and returns
-    RESUMABLE, unless the logs flag it."""
+    RESUMABLE, unless the logs flag it.
+
+    With `shared_coverage`, the run is measured in HA (begin_coverage) and each record carries the `core/` lines it
+    executed, unless a suite failed."""
     lab = roaming or grouping
     selected = selected or suites
     if lab and not (env.get("HA_ADMIN_TOKEN") and env.get("HUE_BRIDGE_HOST") and env.get("HUE_APP_KEY")):
@@ -1922,39 +1959,46 @@ async def run_rig(
     staging = staging_for(stamp, profile, progress)
     code = 1  # only a run that returns 0 is clean; any other end keeps the logs and promotes no record
     unrun = 0  # the cases the run planned with no result, once it ends 0
+    core_rows: shared_coverage.Rows = []  # the run's `core/` coverage, once the measuring stops
     try:
         try:
             await begin_logging(logs, levels, admin, suites, roaming, debug_logs)
-            result = await run_phases(
-                ha,
-                admin,
-                bridge,
-                roamer,
-                roaming,
-                suites,
-                profile,
-                registry,
-                keyword,
-                unattended,
-                (lambda: pauses.pause(pausing)) if pauses and pausing else None,
-                journal,
-                results,
-                lanes,
-                reloads=claim is None or claim.ha == "exclusive",  # holding HA shared, it may not reload the entry
-                progress=progress,
-                budget=budget,
-                reobserve=reobserve,
+            result = await measured(
+                admin if shared_coverage else None,
+                core_rows,
+                run_phases(
+                    ha,
+                    admin,
+                    bridge,
+                    roamer,
+                    roaming,
+                    suites,
+                    profile,
+                    registry,
+                    keyword,
+                    unattended,
+                    (lambda: pauses.pause(pausing)) if pauses and pausing else None,
+                    journal,
+                    results,
+                    lanes,
+                    reloads=claim is None or claim.ha == "exclusive",  # holding HA shared, it may not reload the entry
+                    progress=progress,
+                    budget=budget,
+                    reobserve=reobserve,
+                ),
             )
             result, touched = joined(result, progress, selected)
             if suites:
-                await report(result, registry, commit, profile, staging, stamp, touched | (pending or set()), progress)
+                await report(
+                    result, registry, commit, profile, staging, stamp, touched | (pending or set()), progress, core_rows
+                )
         except RoamError as err:
             # A move that failed isn't retried here; the journal keeps where the bulbs are, for --recover. The groups
             # made so far still go, and after a group that couldn't be made, the bulbs still go home. The phases that
             # ran still get their report and records.
             if not isinstance(err, GroupError):
                 stopped, roamer = roamer, None
-            await report_ran(results, registry, commit, profile, staging, stamp)
+            await report_ran(results, registry, commit, profile, staging, stamp, core_rows)
             if progress is not None:
                 progress.drop_failed()  # the run ends here, so its failed suites rerun whole
             raise SystemExit(f"Roaming stopped: {err}") from None
@@ -1972,6 +2016,25 @@ async def run_rig(
         finally:
             settle_records(staging, 1 if flagged else code, unrun, progress)
     return 1 if flagged else code
+
+
+async def measured(admin: HAClient | None, rows: shared_coverage.Rows, running: Coroutine[Any, Any, Any]) -> Any:
+    """`running`, measured when `admin` is given: the helper starts from empty first and stops in a `finally`, so an
+    aborted run leaves no tracing on; its `core/` rows go into `rows`. A helper that is absent or fails costs the
+    section, said once, not the run."""
+    if admin is None:
+        return await running
+    reason = await shared_coverage.start(admin)
+    if reason:
+        print(f"No shared coverage: {reason}. Is `rig_coverage:` in HA's configuration and the component deployed?")
+        return await running
+    try:
+        return await running
+    finally:
+        found, why = await shared_coverage.stop(admin)
+        if why:
+            print(f"No shared coverage: {why}.")
+        rows += found
 
 
 def staging_for(stamp: str, profile: Profile, progress: Progress | None) -> Staging:
@@ -2249,13 +2312,14 @@ async def report_ran(
     profile: Profile,
     staging: Staging,
     stamp: str | None = None,
+    shared: shared_coverage.Rows = (),
 ) -> None:
     """After a failed move, report the phases that ran before it, staging their records. A report that fails is
     printed, never raised: the move's error, with its recovery steps, must still show."""
     if not results:
         return
     try:
-        await report(RunResult(results), registry, commit, profile, staging, stamp)
+        await report(RunResult(results), registry, commit, profile, staging, stamp, shared=shared)
     except Exception as err:  # noqa: BLE001
         print(f"The phases that ran couldn't be reported: {err}")
 
@@ -2269,12 +2333,14 @@ async def report(
     stamp: str | None = None,
     touched: set[tuple[str, str]] | None = None,
     progress: Progress | None = None,
+    shared: shared_coverage.Rows = (),
 ):
     """The run's report, and a test record per fully passed suite when a commit names the tree HA ran, staged in
     `staging` with its suite's ledger entry (`progress`), which leaves the ledger only when the record is promoted. A
     suite whose cases ran in parts (lanes, then phases, or runs) is joined first; one missing a part writes no record,
     and says how far it got. With `touched`, only those suites write theirs: those with a case in this session, and
-    those an earlier one finished whose records were never promoted (pending)."""
+    those an earlier one finished whose records were never promoted (pending). Each record carries the run's `core/`
+    coverage (`shared`), unless a case failed: a failing suite's lines are no proof."""
     result = merge(result.suites, profile, registry)
     stamp = stamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     today = datetime.date.today().isoformat()
@@ -2289,8 +2355,18 @@ async def report(
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     untraced: list[Path] = []
+    if shared and any(case.outcome is Outcome.FAIL for part in result.suites for case in part.cases):
+        print("No shared coverage in any record: a case failed, and its lines would count as passing proof.")
+        shared = ()
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, into=staging.test_records_dir, untraced=untraced
+        result,
+        registry,
+        checkout_records,
+        today,
+        source,
+        into=staging.test_records_dir,
+        untraced=untraced,
+        shared=shared,
     )
     by_path = {
         staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites

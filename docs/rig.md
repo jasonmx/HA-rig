@@ -417,3 +417,14 @@ imports from its integration package) differs from the commit one of its records
 loaded, never one of this repo's. So every adapter changed since its last run needs a new run before the next RC:
 `scripts/rig.py --coverage` lists them. A run never overwrites a record with one that skips, for a role its profile
 lacks, a case the record passed (Profiles, above); `--coverage` says `won't write a record` for such a suite.
+
+**Shared coverage.** `--shared-coverage` also writes deviceside's `## Shared coverage` section into each record the
+run writes: the `core/` lines the run executed in HA's own process, so one passing Verified record can clear a `core/`
+change for every adapter (deviceside `scripts/check_release.py`, "Shared code"). A small rig-only component,
+`ha_component/rig_coverage/`, measures them: `rig_coverage.start` begins from empty and `rig_coverage.stop` returns the
+executed lines, which the run brackets around all its cases (no restart, no data file). The run holds HA exclusively,
+so no other run's lines mix in, and needs `HA_ADMIN_TOKEN`. One bracket covers every suite of the run, so a run in
+which any case failed writes no section in any record (a failing suite's lines are no proof); a record that also takes
+saved cases from earlier runs carries only this run's lines, which undercounts and is safe. A helper that is absent
+or fails, or no `core/` lines, mean the records are written without the section, and the run says why. Set up once:
+your `RIG_SYNC_CMD` copies `ha_component/rig_coverage/` too, and HA's `configuration.yaml` has `rig_coverage:`.

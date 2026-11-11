@@ -20,9 +20,9 @@ cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 ```text
 usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--coverage] [--no-deploy]
               [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
-              [--unattended] [--reobserve] [--serial] [--debug-logs] [--deploy-only]
-              [--for DURATION] [--fresh] [--ignore-unreachables] [--recover] [--promote DIR]
-              [--roam-check] [--wait-free] [--hold INTEGRATION] [--exclusive]
+              [--unattended] [--shared-coverage] [--reobserve] [--serial] [--debug-logs]
+              [--deploy-only] [--for DURATION] [--fresh] [--ignore-unreachables] [--recover]
+              [--promote DIR] [--roam-check] [--wait-free] [--hold INTEGRATION] [--exclusive]
               [--visual {none,profile}]
 
 Run the rig tests against the live HA, behind an authorization gate.
@@ -44,6 +44,9 @@ options:
   -k KEYWORD            run only test cases whose id contains this text
   --unattended          ask no one: an observed test whose calls no observed pass covers is
                         reported not observed
+  --shared-coverage     measure DeviceSide's core/ lines the run executes in HA (the rig_coverage
+                        helper) and write them into each record, if every suite passed; holds HA
+                        exclusively; needs HA_ADMIN_TOKEN
   --reobserve           run observed tests even where an observed pass covers their calls, as
                         after a major firmware upgrade
   --serial              run every case one at a time, with no lanes: to tell a case that fails in

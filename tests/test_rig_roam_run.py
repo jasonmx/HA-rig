@@ -186,7 +186,7 @@ async def test_a_failed_move_still_reports_the_phases_before_it(tmp_path, monkey
 
     reported = []
 
-    async def report(result, *args):
+    async def report(result, *args, **kwargs):
         reported.append(result.suites)
 
     monkeypatch.setattr(rig, "run", run)
@@ -559,7 +559,7 @@ async def test_a_group_timeout_in_a_later_phase_reports_the_phases_that_passed(t
 
     reported = []
 
-    async def report(result, *args):
+    async def report(result, *args, **kwargs):
         reported.append(result.suites)
 
     async def z2m_group_add(name, members=()):

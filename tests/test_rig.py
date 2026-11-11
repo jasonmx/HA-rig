@@ -780,7 +780,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
 
     written = []
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None, shared=()):
         written.append(source)
         return [], []
 
@@ -1332,7 +1332,9 @@ def run_args(**kwargs) -> types.SimpleNamespace:
         "unattended": True,
         "dry_run": False,
     }
-    return types.SimpleNamespace(**(defaults | {"fresh": False, "no_deploy": False, "roam_check": False} | kwargs))
+    return types.SimpleNamespace(
+        **(defaults | {"fresh": False, "no_deploy": False, "roam_check": False, "shared_coverage": False} | kwargs)
+    )
 
 
 ENTITY = {"shelly": "light.a", "zha": "light.b"}
@@ -1367,9 +1369,9 @@ def resumed(tmp_path, monkeypatch, done_ids: dict[str, list[str]], **kwargs) -> 
 def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypatch, capsys):
     setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]", "u[light_ct]"], "zha": ["t[light_ct]"]})
     assert [suite.integration for suite in setup.suites] == ["zha"]
-    assert rig.claim(types.SimpleNamespace(no_deploy=False, roam_check=False), setup) == rig.Claim(
-        "shared", frozenset({"zha"})
-    )
+    assert rig.claim(
+        types.SimpleNamespace(no_deploy=False, roam_check=False, shared_coverage=False), setup
+    ) == rig.Claim("shared", frozenset({"zha"}))
     assert rig.estimate(setup.suites, fakes.OPTION_REGISTRY, False, done=setup.done, resumed=setup.profile) == 30
     rig.print_resume(types.SimpleNamespace(budget=None, keyword=None), setup)
     out = capsys.readouterr().out
@@ -1458,7 +1460,7 @@ def record_path(integration: str, name: str = "raise_brightness") -> str:
 def recording(written: list[list[str]]):
     """A write_records that notes each call's recordable suites and writes a stub record for each, where it is told."""
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None, shared=()):
         paths = []
         for part in result.suites:
             if part.recordable:
@@ -1576,7 +1578,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
             progress.record(suite, result)
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None, shared=()):
         path = into("zha") / "raise_brightness.md"
         path.parent.mkdir(parents=True)
         path.write_text("zha\n")
@@ -1611,7 +1613,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     written: list[list[str]] = []
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None, shared=()):
         written.append([part.suite.integration for part in result.suites if part.recordable])
         return [], []
 
@@ -1781,7 +1783,9 @@ def test_a_shelly_only_run_with_the_option_files_holds_ha_shared(tmp_path):
     assert not any(suite.file.options for suite in suites)
     deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
     setup = rig.Setup({}, profile, FADE_ROSTER, suites, False, False, deploy, selected=suites)
-    assert rig.claim(types.SimpleNamespace(no_deploy=False, roam_check=False), setup).ha == "shared"
+    assert (
+        rig.claim(types.SimpleNamespace(no_deploy=False, roam_check=False, shared_coverage=False), setup).ha == "shared"
+    )
 
 
 def test_the_dry_run_plan_lists_no_option_case_for_shelly(tmp_path, capsys):
