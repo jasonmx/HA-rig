@@ -1511,7 +1511,7 @@ async def test_set_waits_for_every_member_to_reach_the_brightness(tmp_path):
     assert outcomes(result)["t[group]"] == (Outcome.PASS, "")
 
 
-def stale_room(drops: int, lights: dict | None = None) -> FakeHA:
+def stale_room(drops: int) -> FakeHA:
     """A room whose member `light.a` ignores the first `drops` turn_on calls to it, as a bulb left stale."""
 
     class Stale(FakeHA):
@@ -1529,11 +1529,9 @@ def stale_room(drops: int, lights: dict | None = None) -> FakeHA:
             return None
 
     return Stale(
-        lights
-        or {
+        {
             "light.room": {"state": "on", "attributes": {"entity_id": ["light.a"], "brightness": 255}},
             "light.a": {"state": "on", "attributes": {"brightness": 255}},
-            "light.lamp": {"state": "on", "attributes": {"brightness": 255}},
         }
     )
 
