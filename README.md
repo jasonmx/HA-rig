@@ -1,9 +1,9 @@
 # ha-rig
 
 The automated test rig for [DeviceSide](https://github.com/jasonmx/deviceside): it runs DeviceSide's actions
-against a live Home Assistant and its real devices, and writes the test records in deviceside's
-`docs/test-records/` that clear an adapter's `experimental` flag and gate each release. Private; deviceside keeps
-only the records.
+against a live Home Assistant and its real devices, and writes the test records in deviceside (each
+integration's `docs/integrations/<integration>/test-records/`, from its `check_release.test_records_dir`) that clear
+an adapter's `experimental` flag and gate each release. Private; deviceside keeps only the records.
 
 Setup, running it, and writing step files: [docs/rig.md](docs/rig.md).
 
@@ -63,8 +63,7 @@ options:
                         doesn't list and of fixed scenes; their suites write no record
   --recover             put back what an aborted run left changed, then stop
   --promote DIR         copy the test records a run staged in DIR (it prints the command) into the
-                        checkout's docs/test-records and take their suites out of the ledger; no
-                        lock, no HA
+                        checkout's records and take their suites out of the ledger; no lock, no HA
   --roam-check          move the profile's roam bulbs to every network and home, no suites
   --wait-free           wait until no rig run holds the locks (with --integration, those
                         integrations' and HA exclusively), without taking them; another run may

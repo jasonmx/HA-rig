@@ -6,13 +6,20 @@ this one named deviceside (the repo's name) or device-side (so the rig's own tes
 and baseline live in the target's git common dir, shared by every worktree of it; the profiles and .env.rig live in
 this rig's main checkout.
 
+The target's own `scripts/check_release.py` says where its test records live (`test_records_dir`) and which files are an
+adapter's code (`adapter_code`), so the rig follows the gate's layout and staleness rule rather than restating them.
+
 Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
 """
 
+import hashlib
+import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 
 RIG_HOME = Path(__file__).resolve().parents[1]
 COMPONENT = "custom_components/deviceside"
@@ -38,6 +45,30 @@ def main_checkout(repo: Path) -> Path:
     """The main checkout of `repo`, which holds the gitignored files every linked worktree shares; else `repo`."""
     common = git_path(repo, "--git-common-dir")
     return common.parent if common else repo
+
+
+def check_release(repo: Path) -> ModuleType:
+    """deviceside's `scripts/check_release.py` in `repo`, loaded once per checkout. Loading it puts its checkout first
+    on sys.path, which is put back, so the rig's own `tests` package still wins."""
+    script = (repo / "scripts" / "check_release.py").resolve()
+    name = f"check_release_{hashlib.sha256(str(script).encode()).hexdigest()[:8]}"
+    if (loaded := sys.modules.get(name)) is None:
+        spec = importlib.util.spec_from_file_location(name, script)
+        loaded = importlib.util.module_from_spec(spec)
+        saved = list(sys.path)
+        try:
+            spec.loader.exec_module(loaded)
+        finally:
+            sys.path[:] = saved
+        sys.modules[name] = loaded
+    return loaded
+
+
+def test_records_dir(repo: Path, integration: str, root: Path | None = None) -> Path:
+    """The integration's test records directory in `repo`, as its `check_release.test_records_dir` says, laid out under
+    `root` instead when given (a run's staging mirrors the checkout)."""
+    loaded = check_release(repo)
+    return (root or repo) / loaded.test_records_dir(integration).relative_to(loaded.REPO)
 
 
 def is_deviceside(path: Path) -> bool:
