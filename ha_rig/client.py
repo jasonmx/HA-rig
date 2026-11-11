@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import itertools
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from typing import Any
 
@@ -26,6 +27,10 @@ Z2M_ANSWER_S = 10  # for a device to answer a read through Z2M; no reply means i
 Z2M_SETTLE_S = 1.0  # after subscribing to a device's topic, for its retained state, which is no answer, to land
 Z2M_CRASH_WATCH_S = 30  # after a failed remove, for Z2M to go offline: its coordinator crashed
 Z2M_RESTART_S = 120  # for Z2M to come back online after a crash
+Z2M_LOGGING = f"{Z2M_TOPIC}/logging"
+MQTT_QUIET_S = 20  # a feed with nothing for this long is subscribed afresh (MQTTFeed)
+# Z2M's error when the coordinator refuses a send: Herdsman's Ember adapter retries BUSY on unicasts, not on groupcasts.
+Z2M_BUSY = re.compile(r"Publish 'set'.* to '(?P<target>[^']+)' failed:.*\bBUSY\b")
 
 
 def device_ieee(device: dict, integration: str) -> str | None:
@@ -90,6 +95,43 @@ def _state_of(raw: str) -> str | None:
     return decoded.get("state") if isinstance(decoded, dict) else str(decoded)
 
 
+class MQTTFeed:
+    """The payloads on an MQTT topic with no retained message, from HAClient.mqtt_feed. HA can drop a subscription
+    without a word, and a topic like Z2M's log is then silent for good: after `quiet_s` of nothing the feed
+    subscribes afresh, the new subscription live before the old one is dropped, so no payload falls between."""
+
+    def __init__(self, ha: HAClient, topic: str, quiet_s: float):
+        self.ha, self.topic, self.quiet_s = ha, topic, quiet_s
+        self.renewed = 0  # how many times a quiet subscription was replaced
+        self._stack = contextlib.AsyncExitStack()
+        self._queue: asyncio.Queue[str] | None = None
+
+    async def open(self) -> None:
+        self._queue = await self._stack.enter_async_context(self.ha._mqtt_messages(self.topic))
+
+    async def get(self) -> str:
+        assert self._queue is not None
+        while True:
+            try:
+                return await asyncio.wait_for(self._queue.get(), self.quiet_s)
+            except TimeoutError:
+                await self.renew()
+
+    async def renew(self) -> None:
+        fresh = contextlib.AsyncExitStack()
+        try:
+            queue = await fresh.enter_async_context(self.ha._mqtt_messages(self.topic))
+        except BaseException:
+            await fresh.aclose()
+            raise
+        old, self._stack, self._queue = self._stack, fresh, queue
+        self.renewed += 1
+        await old.aclose()
+
+    async def close(self) -> None:
+        await self._stack.aclose()
+
+
 class HAClient:
     def __init__(self, url: str, token: str):
         self.url = url.rstrip("/")
@@ -106,6 +148,9 @@ class HAClient:
         self._state_events: int | None = None  # the state_changed subscription's WebSocket id
         self._wire_events: int | None = None  # the deviceside_wire subscription's WebSocket id
         self._taps: list[tuple[frozenset[str], list[dict]]] = []  # open wire_taps
+        # Each BUSY refusal of a `set` Z2M logged while watch_z2m_busy ran: (loop time it arrived, target's name).
+        self.z2m_busy: list[tuple[float, str]] = []
+        self._busy_watch: asyncio.Task | None = None
 
     async def connect(self) -> None:
         # The system resolver, not aiohttp's default aiodns: only the system one resolves mDNS (.local) names.
@@ -126,6 +171,7 @@ class HAClient:
         await self.command({"type": "subscribe_events", "event_type": "state_changed"}, self._state_events)
 
     async def close(self) -> None:
+        await self.stop_z2m_busy()
         if self._reader is not None:
             self._reader.cancel()
         if self._ws is not None:
@@ -288,6 +334,56 @@ class HAClient:
             with contextlib.suppress(HAError):
                 await self.command({"type": "unsubscribe_events", "subscription": msg_id})
             del self._mqtt[msg_id]
+
+    @contextlib.asynccontextmanager
+    async def mqtt_feed(self, topic: str, quiet_s: float | None = None) -> AsyncIterator[MQTTFeed]:
+        """A MQTTFeed on `topic` (one with no retained message) while the block runs. Needs an admin token."""
+        feed = MQTTFeed(self, topic, MQTT_QUIET_S if quiet_s is None else quiet_s)
+        await feed.open()
+        try:
+            yield feed
+        finally:
+            await feed.close()
+
+    async def watch_z2m_busy(self) -> None:
+        """Note each time Z2M logs that the coordinator refused a `set` with BUSY (`z2m_busy`), from now on; returns
+        once the subscription is live. Z2M logs it as an error, whatever its log level. Idempotent."""
+        if self._busy_watch is not None and not self._busy_watch.done():
+            return
+        ready = asyncio.Event()
+        self._busy_watch = asyncio.create_task(self._pump_busy(ready))
+        await ready.wait()
+        if self._busy_watch.done():
+            self._busy_watch.result()  # a subscription that failed raises here
+
+    async def _pump_busy(self, ready: asyncio.Event) -> None:
+        try:
+            async with self.mqtt_feed(Z2M_LOGGING) as feed:
+                ready.set()
+                while True:
+                    try:
+                        message = json.loads(await feed.get()).get("message", "")
+                    except ValueError, AttributeError:
+                        continue
+                    if (found := Z2M_BUSY.search(str(message))) is not None:
+                        self.z2m_busy.append((asyncio.get_running_loop().time(), found["target"]))
+        finally:
+            ready.set()
+
+    @property
+    def watching_z2m_busy(self) -> bool:
+        return self._busy_watch is not None and not self._busy_watch.done()
+
+    async def stop_z2m_busy(self) -> None:
+        if self._busy_watch is not None:
+            self._busy_watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._busy_watch
+            self._busy_watch = None
+
+    def z2m_busy_between(self, start: float, end: float) -> list[str]:
+        """The targets Z2M logged a BUSY refusal for between two loop times."""
+        return [target for at, target in self.z2m_busy if start <= at <= end]
 
     async def z2m_device_options(self, ieee: str) -> dict:
         """A Zigbee2MQTT device's options, from Z2M's retained bridge/info."""
@@ -479,13 +575,16 @@ class HAClient:
     async def z2m_availability(self, name: str) -> str | None:
         """`online` or `offline`, from Z2M's retained availability for the device `name`; None when Z2M's
         availability is off or it published none. Z2M marks a mains device offline only after 10 min unheard."""
-        config = (await self.z2m_info()).get("config") or {}
-        enabled = config.get("availability")
-        if isinstance(enabled, dict):
-            enabled = enabled.get("enabled", True)
-        if not enabled:
+        if not await self.z2m_availability_enabled():
             return None
         return await self._retained_state(f"zigbee2mqtt/{name}/availability")
+
+    async def z2m_availability_enabled(self) -> bool:
+        """Whether Z2M's availability feature is enabled, from its retained bridge/info."""
+        enabled = ((await self.z2m_info()).get("config") or {}).get("availability")
+        if isinstance(enabled, dict):
+            enabled = enabled.get("enabled", True)
+        return bool(enabled)
 
     async def z2m_answers(self, name: str) -> bool:
         """Whether the Z2M device `name` answers a read of its on/off state (genOnOff) within Z2M_ANSWER_S."""

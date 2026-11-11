@@ -168,9 +168,9 @@ class Progress:
         return entry
 
     def record(self, suite: Suite, result: CaseResult) -> None:
-        """Save one finished case, replacing any earlier result of it; an unreachable skip is never saved, as it
-        proves nothing."""
-        if result.unreachable:
+        """Save one finished case, replacing any earlier result of it; an unreachable skip or a case not run is
+        never saved, as it proves nothing (a resume runs the case again)."""
+        if result.unreachable or result.outcome is Outcome.NOT_RUN:
             return
         entry = self._entry(suite)
         case = _saved(result)

@@ -16,10 +16,9 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from .baseline import Apply, Baseline
-from .client import WIRE_LOGGER, HAClient
+from .client import WIRE_LOGGER, Z2M_LOGGING, HAClient
 from .engine import report_path
 
-Z2M_LOGGING_TOPIC = "zigbee2mqtt/bridge/logging"
 HA_DOMAINS = {"hue": "hue", "zha": "zha", "zigbee2mqtt": "mqtt", "shelly": "shelly", "matter": "matter"}
 ROAM_INTEGRATIONS = ("hue", "zha", "zigbee2mqtt")
 STAMPED = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
@@ -134,12 +133,22 @@ class RunLogs:
     async def _pump(self, ha: HAClient, ready: asyncio.Event) -> None:
         try:
             self.z2m_path.parent.mkdir(parents=True, exist_ok=True)
-            async with ha._mqtt_messages(Z2M_LOGGING_TOPIC) as messages:
+            # A quiet feed subscribes afresh: HA can drop a subscription silently (the log once went quiet mid-run).
+            async with ha.mqtt_feed(Z2M_LOGGING) as feed:
                 with self.z2m_path.open("a") as file:
                     self.written.append(self.z2m_path)
                     ready.set()
+                    renewed = 0
                     while True:
-                        file.write(z2m_line(await messages.get(), datetime.datetime.now()))
+                        raw = await feed.get()
+                        now = datetime.datetime.now()
+                        if feed.renewed != renewed:
+                            renewed = feed.renewed
+                            file.write(
+                                f"{now:%H:%M:%S.%f}"[:-3]
+                                + f" -- the rig renewed its Z2M log subscription ({renewed})\n"
+                            )
+                        file.write(z2m_line(raw, now))
                         file.flush()  # a crash keeps what came before it
         except asyncio.CancelledError:
             raise
