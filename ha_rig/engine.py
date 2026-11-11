@@ -2572,7 +2572,7 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
 
 
 def render_record(
-    suite_result: SuiteResult, title: str, ha_version: str, devices: list[Device], date: str, source: str, profile: str
+    suite_result: SuiteResult, title: str, ha_version: str, devices: list[Device], date: str, source: str
 ) -> str:
     """The test record: a key/value table, then the per-test table. deviceside's check_release.py --records reads
     its commit."""
@@ -2581,7 +2581,6 @@ def render_record(
         ("Result", "pass"),
         ("Date", date),
         ("Source", source),
-        ("Profile", profile),
         ("Home Assistant", ha_version),
         ("Device", "; ".join(map(str, devices)) or "none"),
     ]
@@ -2650,7 +2649,6 @@ async def write_records(
     records_dir: Path,
     date: str,
     source: str,
-    profile: str,
     into: Path | None = None,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
@@ -2673,9 +2671,7 @@ async def write_records(
             continue
         path = into / suite.integration / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, profile)
-        )
+        path.write_text(render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source))
         written.append(path)
     return written, kept
 

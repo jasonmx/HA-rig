@@ -2283,9 +2283,7 @@ async def report(
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
-    written, kept = await write_records(
-        result, registry, TEST_RECORDS_DIR, today, source, profile.name, into=staging.directory
-    )
+    written, kept = await write_records(result, registry, TEST_RECORDS_DIR, today, source, into=staging.directory)
     by_path = {
         staging.directory / part.suite.integration / f"{part.suite.name}.md": part.suite for part in result.suites
     }
