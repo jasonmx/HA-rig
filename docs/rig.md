@@ -224,7 +224,7 @@ tests:
 
 | Step | Does |
 |---|---|
-| `set` | Puts the target in a known state with plain HA actions (`state`, plus light attributes). |
+| `set` | Puts the target in a known state with plain HA actions (`state`, plus light attributes). In a setup, a group whose member misses the value is set once more before the case fails: a Hue room's member can be left stale, and a fresh command makes it report (deviceside's integration-internals, Tested behavior). |
 | `call` | Calls the file's action with these fields; `duration` is sent in seconds. |
 | `expect_response` | Checks the call's response: `status` (`expected` means `confirmed` where the adapter can confirm, else `sent`), `integration` (`self` is the one under test), `detail`, `clamped_to`, `attributes`. |
 | `expect_error` | The call before it must fail, with this `key` and/or `summary`. |

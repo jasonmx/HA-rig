@@ -1511,6 +1511,87 @@ async def test_set_waits_for_every_member_to_reach_the_brightness(tmp_path):
     assert outcomes(result)["t[group]"] == (Outcome.PASS, "")
 
 
+def stale_room(drops: int) -> FakeHA:
+    """A room whose member `light.a` ignores the first `drops` turn_on calls to it, as a bulb left stale."""
+
+    class Stale(FakeHA):
+        dropped = 0
+
+        async def call_service(self, domain, service, data=None, return_response=False):
+            self.calls.append((domain, service, dict(data or {})))
+            if service != "turn_on":
+                return None
+            self.states["light.room"]["attributes"]["brightness"] = 153
+            if self.dropped < drops:
+                self.dropped += 1
+                return None
+            self.set("light.a", "on", brightness=153)
+            return None
+
+    return Stale(
+        {
+            "light.room": {"state": "on", "attributes": {"entity_id": ["light.a"], "brightness": 255}},
+            "light.a": {"state": "on", "attributes": {"brightness": 255}},
+        }
+    )
+
+
+def set_calls(ha: FakeHA) -> list:
+    """The calls the case's set sent, not the restore's."""
+    return [call for call in ha.calls if call[0] == "light" and "brightness_pct" in call[2]]
+
+
+SETUP_SET = (
+    "action: turn_on_for\nrig_seconds: 5\ntests:\n  - name: t\n    roles: [{role}]\n"
+    "    setup:\n      - set: {{state: on, brightness_pct: 60}}\n    steps:\n      - expect_state: {{state: on}}\n"
+)
+
+
+async def test_a_groups_setup_set_is_sent_once_more_when_a_member_misses_it(tmp_path, caplog):
+    """Catches the retry: the first group call leaves light.a stale, the second makes it report."""
+    ha = stale_room(1)
+    result = await run_one(ha, suite(tmp_path, SETUP_SET.format(role="group")), profile(group="light.room"))
+    assert outcomes(result)["t[group]"] == (Outcome.PASS, "")
+    sets = set_calls(ha)
+    assert len(sets) == 2 and sets[0] == sets[1]
+    assert "setting the group again" in caplog.text
+
+
+async def test_a_groups_setup_set_retries_only_once(tmp_path):
+    """Catches the bound: a member that ignores both calls fails the setup after exactly two."""
+    ha = stale_room(2)
+    result = await run_one(ha, suite(tmp_path, SETUP_SET.format(role="group")), profile(group="light.room"))
+    got, detail = outcomes(result)["t[group]"]
+    assert got is Outcome.FAIL and detail.startswith("setup step 1 (set)")
+    assert len(set_calls(ha)) == 2
+
+
+async def test_a_set_in_steps_is_not_retried(tmp_path):
+    """Catches the phase limit: a retry in steps would add a traced call, so the first timeout fails."""
+    ha = stale_room(1)
+    text = header("group") + "      - set: {state: on, brightness_pct: 60}\n"
+    result = await run_one(ha, suite(tmp_path, text), profile(group="light.room"))
+    got, detail = outcomes(result)["t[group]"]
+    assert got is Outcome.FAIL and detail.startswith("step 1 (set)")
+    assert len(set_calls(ha)) == 1
+
+
+async def test_a_single_lights_setup_set_is_not_retried(tmp_path):
+    """Catches the target limit: only a group is sent again; a lone light that misses its set fails at once."""
+
+    class Lossy(FakeHA):
+        async def call_service(self, domain, service, data=None, return_response=False):
+            self.calls.append((domain, service, dict(data or {})))
+
+    ha = Lossy({"light.lamp": {"state": "on", "attributes": {"brightness": 255}}})
+    result = await run_one(
+        ha, suite(tmp_path, SETUP_SET.format(role="light_dimmable")), profile(light_dimmable="light.lamp")
+    )
+    got, detail = outcomes(result)["t[light_dimmable]"]
+    assert got is Outcome.FAIL and detail.startswith("setup step 1 (set)")
+    assert len(set_calls(ha)) == 1
+
+
 @pytest.mark.parametrize(
     ("step", "outcome", "failure"),
     [("{state: off, transition: 0.6}", Outcome.PASS, ""), ("{state: off}", Outcome.FAIL, "step 1 (set)")],
