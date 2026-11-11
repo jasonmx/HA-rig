@@ -2289,7 +2289,7 @@ async def report(
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, profile.name, into=staging.test_records_dir
+        result, registry, checkout_records, today, source, into=staging.test_records_dir
     )
     by_path = {
         staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
