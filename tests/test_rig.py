@@ -780,7 +780,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
 
     written = []
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None):
         written.append(source)
         return [], []
 
@@ -1458,7 +1458,7 @@ def record_path(integration: str, name: str = "raise_brightness") -> str:
 def recording(written: list[list[str]]):
     """A write_records that notes each call's recordable suites and writes a stub record for each, where it is told."""
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None):
         paths = []
         for part in result.suites:
             if part.recordable:
@@ -1576,7 +1576,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
             progress.record(suite, result)
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None):
         path = into("zha") / "raise_brightness.md"
         path.parent.mkdir(parents=True)
         path.write_text("zha\n")
@@ -1611,7 +1611,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     written: list[list[str]] = []
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, untraced=None):
         written.append([part.suite.integration for part in result.suites if part.recordable])
         return [], []
 

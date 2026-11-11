@@ -1358,6 +1358,7 @@ def planned_result(steps: Suite, inv: Profile) -> RunResult:
             Outcome.SKIPPED if case.skip else Outcome.PASS,
             case.skip or "",
             absent=case.absent,
+            scope=() if case.skip else ((steps.action, steps.integration, "light", None, ()),),
         )
         for case in cases(steps, inv)
     ]
@@ -2098,13 +2099,18 @@ def test_expected_log_must_be_a_list_of_regular_expressions(tmp_path, value, err
 
 async def test_a_record_with_options_on_is_named_for_them(tmp_path):
     steps = suite(tmp_path, option_file("predicted_state"), "hue")
-    case = CaseResult("t[light_ct]", "light_ct", "light", Outcome.PASS)
+    case = CaseResult(
+        "t[light_ct]", "light_ct", "light", Outcome.PASS, scope=(("raise_brightness", "hue", "light", None, ()),)
+    )
     result = RunResult([SuiteResult(steps, [case], complete=True, ha_version="2026.10.1")])
 
-    [path], _ = await write_records(result, REGISTRY, under(tmp_path / "test-records"), "2026-10-27", "rig run")
+    [path], _ = await write_records(
+        result, Roster({"hue": {"raise_brightness"}}), under(tmp_path / "test-records"), "2026-10-27", "rig run"
+    )
 
     assert path == tmp_path / "test-records" / "hue" / "raise_brightness-predicted_state.md"
     assert path.read_text().startswith("# Hue · raise_brightness-predicted_state\n")
+    assert "options=predicted_state:on |" in path.read_text()
 
 
 # --- entry steps ----------------------------------------------------------------------------------------------
@@ -3089,3 +3095,16 @@ async def test_a_run_collects_the_scope_events_of_each_case_and_records_them(tmp
     assert case.scope == (("turn_on_for", "shelly", "switch", "Switch", ("duration",)),)
     [path], _ = await write_records(result, REGISTRY, under(tmp_path / "test-records"), "2026-11-11", "rig run")
     assert "| Covers | domains=switch; capabilities=Switch; fields=duration; options= |" in path.read_text()
+
+
+@pytest.mark.untraced
+async def test_a_run_that_drew_no_scope_event_writes_no_record_and_says_so(tmp_path):
+    ha = FakeHA({"switch.plug": {}}, timer_on)
+    result = await run_one(ha, suite(tmp_path, ON_THEN_OFF), profile(switch_plug="switch.plug"))
+    assert result.suites[0].recordable  # it passed: only the missing trace holds the record back
+    untraced: list[Path] = []
+    written, kept = await write_records(
+        result, REGISTRY, under(tmp_path / "test-records"), "2026-11-11", "rig run", untraced=untraced
+    )
+    assert (written, kept) == ([], [])
+    assert untraced == [tmp_path / "test-records" / "shelly" / "turn_on_for.md"]

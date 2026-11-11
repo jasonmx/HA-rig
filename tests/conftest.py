@@ -85,3 +85,21 @@ def no_approval(monkeypatch) -> None:
     """No test inherits an approval for restricted work, or the variable it replaced, from the shell running it."""
     monkeypatch.delenv("DEVICE_SIDE_RIG_RESTRICTED", raising=False)
     monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def dispatched_scope(monkeypatch, request) -> None:
+    """A case run without the admin connection draws no scope event, and a record without one is not written
+    (write_records). Most tests are not about that: give each passing case the one event DeviceSide's dispatcher
+    would fire. `@pytest.mark.untraced` keeps a test's cases as the run left them."""
+    if request.node.get_closest_marker("untraced"):
+        return
+    attach = engine._CaseRun.attach
+
+    async def attach_with_scope(self, result, slots, traced) -> None:
+        await attach(self, result, slots, traced)
+        if result.outcome is engine.Outcome.PASS and not result.scope:
+            suite = self.case.suite
+            result.scope = ((suite.action, suite.integration, result.domain or "", None, ()),)
+
+    monkeypatch.setattr(engine._CaseRun, "attach", attach_with_scope)

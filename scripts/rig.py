@@ -2288,8 +2288,9 @@ async def report(
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
+    untraced: list[Path] = []
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, into=staging.test_records_dir
+        result, registry, checkout_records, today, source, into=staging.test_records_dir, untraced=untraced
     )
     by_path = {
         staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
@@ -2297,6 +2298,11 @@ async def report(
     for path in written:
         suite = by_path.get(path)
         staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
+    for path in untraced:
+        print(
+            f"No record for {display(path, REPO)}: the run drew no DeviceSide scope trace (no HA_ADMIN_TOKEN, or its "
+            "wire logger would not go to DEBUG), so its Covers row would be empty."
+        )
     for path, narrowed in kept:
         print(
             f"Kept {display(path, REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "

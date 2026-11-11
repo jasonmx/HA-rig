@@ -1410,7 +1410,7 @@ class _CaseRun:
         self.bridge = bridge
         self.wire, self.makers = wire, makers  # the admin connection the wire trace comes on, and its devices
         self.traced: list[dict] | None = None  # the open wire tap's calls, while the case's steps run
-        self.scoped: list[dict] = []  # the scope events the last case's steps drew
+        self.scoped: list[dict] = []  # the scope events the case's steps drew; kept after its tap closes, for `attach`
         self.in_setup = False  # while the case's setup runs: a group's `set` may be sent once more
         self.entry = entry  # for entry steps; None without an admin connection
         self.case, self.ha, self.registry, self.ask, self.out, self.position = case, ha, registry, ask, out, position
@@ -2597,16 +2597,22 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     return sorted(case.id for case in cases if record and case.absent and case.id in record.passed)
 
 
-def covers(suite_result: SuiteResult, options: Mapping[str, bool]) -> str:
-    """The `Covers` row's value: what DeviceSide's scope named for the suite's proven cases (only events of the
-    suite's own action and integration: a test's steps can call others), and each option on or off."""
+def scope_events(suite_result: SuiteResult) -> set[tuple]:
+    """What DeviceSide's scope named for the suite's proven cases: only events of the suite's own action and
+    integration (a test's steps can call others). Empty when the run had no trace: every dispatched call fires one."""
     suite = suite_result.suite
-    events = {
+    return {
         row
         for case in suite_result.proven
         for row in case.scope
         if row[0] == suite.action and row[1] == suite.integration
     }
+
+
+def covers(suite_result: SuiteResult, options: Mapping[str, bool]) -> str:
+    """The `Covers` row's value: the domains, capabilities and fields of `scope_events`, and each option on or
+    off."""
+    events = scope_events(suite_result)
     parts = {
         "domains": {row[2] for row in events},
         "capabilities": {row[3] for row in events if row[3]},
@@ -2705,6 +2711,7 @@ async def write_records(
     date: str,
     source: str,
     into: Records | None = None,
+    untraced: list[Path] | None = None,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
@@ -2712,7 +2719,11 @@ async def write_records(
 
     A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
     the file in `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To
-    narrow on purpose, delete the record."""
+    narrow on purpose, delete the record.
+
+    A suite whose proven cases drew no scope event (no admin connection, or the wire logger would not go to DEBUG)
+    has nothing to put in `Covers`, and an empty row would replace a record that had one: its `records` path is
+    added to `untraced`, if given, and nothing is written."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2724,8 +2735,13 @@ async def write_records(
         if narrowed := narrows(suite_result.cases, Record.read(path)):
             kept.append((path, narrowed))
             continue
+        if not scope_events(suite_result):
+            if untraced is not None:
+                untraced.append(path)
+            continue
         path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
+        # The adapter is always there for a suite that ran; a test's roster may not declare it.
         adapter = registry.adapter(suite.action, suite.integration)
         options = {name: name in suite.file.options for name in adapter.scope.options} if adapter else {}
         path.write_text(
