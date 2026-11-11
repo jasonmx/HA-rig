@@ -142,3 +142,10 @@ def test_the_opt_out_passes_anywhere(tmp_path):
     from tests.conftest import REAL_REFUSE_UNOWNED
 
     REAL_REFUSE_UNOWNED(tmp_path, {target.UNOWNED_OK: "1"})
+
+
+def test_record_dir_is_the_targets_own_answer_laid_out_under_a_root(tmp_path):
+    repo = target.deviceside_repo()
+    gate = target.check_release(repo)
+    assert target.record_dir(repo, "shelly") == gate.record_dir("shelly")
+    assert target.record_dir(repo, "shelly", tmp_path) == tmp_path / gate.record_dir("shelly").relative_to(repo)

@@ -6,9 +6,9 @@ preflight reads the profile, the adapter registry and the deployed tree hash, pr
 go (Authorization, below), then, at a terminal, asks.
 
 The rig tests the deviceside checkout it is run from, or DEVICE_SIDE_REPO (ha_rig/target.py): it deploys that
-checkout's code, records into its docs/test-records, and keeps its locks and journals in its git common dir. The
-profiles and .env.rig live in this rig's main checkout. Each invocation refreshes deviceside's household terms
-(ha_rig/terms.py).
+checkout's code, records where its check_release.record_dir says, and keeps its locks and journals in its git
+common dir. The profiles and .env.rig live in this rig's main checkout. Each invocation refreshes deviceside's
+household terms (ha_rig/terms.py).
 
 Runs share the rig through locks in deviceside's git common dir, shared by every worktree (ha_rig/locks.py): each holds
 the integrations it moves, so runs on different ones go side by side, and HA, shared, or exclusively for a deploy or a
@@ -127,7 +127,7 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo  # noqa: E402
+from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo, record_dir  # noqa: E402
 
 REPO = deviceside_repo()  # the deviceside checkout under test, whose code a run deploys and records
 sys.path.append(str(REPO))
@@ -187,8 +187,14 @@ from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
 from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa: E402
 from ha_rig.staging import Staging, display  # noqa: E402
 
-TEST_RECORDS_DIR = REPO / "docs" / "test-records"
 SERVICE = ("deviceside", "turn_on_for")
+
+
+def checkout_records(integration: str) -> Path:
+    """The integration's test records directory in the checkout under test (its check_release.record_dir)."""
+    return record_dir(REPO, integration)
+
+
 # HA's bootstrap stage-1 (120 s) and stage-2 (300 s) timeouts, after which a stuck dependency is let go, plus the
 # container's start. A restart behind a hung ZHA took about 350 s.
 READY_TIMEOUT_S = 450
@@ -773,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
         "--promote",
         type=Path,
         metavar="DIR",
-        help="copy the test records a run staged in DIR (it prints the command) into the checkout's docs/test-records "
+        help="copy the test records a run staged in DIR (it prints the command) into the checkout's records "
         "and take their suites out of the ledger; no lock, no HA",
     )
     parser.add_argument(
@@ -1388,7 +1394,7 @@ def coverage_only(args: argparse.Namespace, directory: Path) -> int:
         else:
             progress.check_ha(version)
     plan = coverage.of(suites, profile, registry, REPO, commit, progress, unattended=args.unattended)
-    observations = load_observations(TEST_RECORDS_DIR, {suite.integration for suite in suites})
+    observations = load_observations(checkout_records, {suite.integration for suite in suites})
     hints = coverage.observed_hints(plan, progress, observations)
     for line in coverage_lines(plan, profile, args.keyword, hints):
         print(line)
@@ -1974,7 +1980,6 @@ def staging_for(stamp: str, profile: Profile, progress: Progress | None) -> Stag
     return Staging(
         report_path(REPORT_DIR, f"rig run {stamp}").with_suffix(f".{os.getpid()}.records"),
         REPO,
-        TEST_RECORDS_DIR,
         progress.path.parents[1] if progress is not None else None,
         profile.name,
     )
@@ -2165,7 +2170,7 @@ async def run_phases(
         "busy": {},
         "reloads": reloads,
         "budget": budget,
-        "observations": load_observations(TEST_RECORDS_DIR, {suite.integration for suite in suites}),
+        "observations": load_observations(checkout_records, {suite.integration for suite in suites}),
         "reobserve": reobserve,
         **saving(progress),
         "on_result": observing(registry, progress),
@@ -2231,7 +2236,7 @@ def observing(registry: AdapterRegistry, progress: Progress | None) -> Callable[
     def on_result(suite: Suite, case: CaseResult) -> None:
         if progress is not None:
             progress.record(suite, case)
-        if path := write_observed_case(suite, case, registry, TEST_RECORDS_DIR, datetime.date.today().isoformat()):
+        if path := write_observed_case(suite, case, registry, checkout_records, datetime.date.today().isoformat()):
             print(f"Wrote {display(path, REPO)}; review the diff before committing it.")
 
     return on_result
@@ -2284,10 +2289,10 @@ async def report(
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     written, kept = await write_records(
-        result, registry, TEST_RECORDS_DIR, today, source, profile.name, into=staging.directory
+        result, registry, checkout_records, today, source, profile.name, into=staging.record_dir
     )
     by_path = {
-        staging.directory / part.suite.integration / f"{part.suite.name}.md": part.suite for part in result.suites
+        staging.record_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
     }
     for path in written:
         suite = by_path.get(path)

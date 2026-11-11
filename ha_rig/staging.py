@@ -1,10 +1,10 @@
 """Staged test records: a run's records wait next to its report until the run is known to be publishable.
 
-A run writes each record it earns into `<report>.records/`, laid out as the checkout's `docs/test-records`
-(`<integration>/<suite>.md`), with a manifest (`staged.json`) naming the checkout, the ledger and, per record, its
-suite's ledger entry and the hash of the checkout's file when it was staged. Only a run that ends cleanly promotes its
-records into the checkout itself; any other end leaves the checkout untouched and prints the one command that
-promotes them (`command`).
+A run writes each record it earns into `<report>.records/`, at its path in the checkout (each integration's
+`target.record_dir`, then `<suite>.md`), with a manifest (`staged.json`) naming the checkout, the ledger and, per
+record, its suite's ledger entry and the hash of the checkout's file when it was staged. Only a run that ends
+cleanly promotes its records into the checkout itself; any other end leaves the checkout untouched and prints the one
+command that promotes them (`command`).
 
 Promoting copies each record into the checkout, then drops its suite's ledger entry (the record carries its coverage
 from then on), then removes the staged dir. A record whose file in the checkout changed since it was staged (a later
@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .progress import EntryKey, Progress
+from .target import record_dir
 
 MANIFEST = "staged.json"
 RIG = Path(__file__).resolve().parents[1] / "scripts" / "rig.py"
@@ -39,28 +40,30 @@ def digest(path: Path) -> str | None:
 
 @dataclass
 class Staging:
-    """The records one run staged, in `directory`, for `records_dir` (the checkout's docs/test-records), with the
-    ledger (`ledger_dir`, `profile`) that holds their suites' entries until promotion."""
+    """The records one run staged, in `directory`, for the checkout `repo`, with the ledger (`ledger_dir`,
+    `profile`) that holds their suites' entries until promotion."""
 
     directory: Path
     repo: Path
-    records_dir: Path
     ledger_dir: Path | None = None
     profile: str | None = None
-    records: dict[str, dict] = field(default_factory=dict)  # by path relative to records_dir
+    records: dict[str, dict] = field(default_factory=dict)  # by path relative to repo (and to directory)
+
+    def record_dir(self, integration: str) -> Path:
+        """Where this run stages the integration's records: its records directory in the checkout, under `directory`."""
+        return record_dir(self.repo, integration, self.directory)
 
     def add(self, staged: Path, entry: EntryKey | None) -> None:
         """Note a record written at `staged` (under `directory`) and its suite's ledger entry, and save the manifest:
         the hash it notes is of the checkout's file as it is now, before any promotion."""
         relative = staged.relative_to(self.directory).as_posix()
-        self.records[relative] = {"entry": list(entry) if entry else None, "base": digest(self.records_dir / relative)}
+        self.records[relative] = {"entry": list(entry) if entry else None, "base": digest(self.repo / relative)}
         self.save()
 
     def save(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         manifest = {
             "repo": str(self.repo),
-            "records_dir": str(self.records_dir),
             "ledger_dir": str(self.ledger_dir) if self.ledger_dir else None,
             "profile": self.profile,
             "records": self.records,
@@ -72,10 +75,14 @@ class Staging:
         """The staging in `directory`. Raises SystemExit, naming the problem, when it holds none."""
         try:
             manifest = json.loads((directory / MANIFEST).read_text())
+            if "records_dir" in manifest:  # staged under the old docs/test-records layout, its paths relative to that
+                raise SystemExit(
+                    f"{directory} was staged by an older rig, under {manifest['records_dir']}: promote it with that "
+                    "rig, or rerun its suites"
+                )
             return cls(
                 directory,
                 Path(manifest["repo"]),
-                Path(manifest["records_dir"]),
                 Path(manifest["ledger_dir"]) if manifest.get("ledger_dir") else None,
                 manifest.get("profile"),
                 dict(manifest["records"]),
@@ -97,7 +104,7 @@ class Staging:
             if why := self._copy(relative, staged.get("base")):
                 refused[relative] = why
                 continue
-            promoted.append(self.records_dir / relative)
+            promoted.append(self.repo / relative)
             if staged.get("entry"):
                 dropped.append(tuple(staged["entry"]))
         self._drop(dropped, progress)
@@ -116,7 +123,7 @@ class Staging:
         """Copy one staged record into the checkout; None once it is there (one already there, from an attempt that
         stopped part way, counts), else why not: the staged file is gone, or the checkout's changed since staging.
         Either keeps the suite in the ledger."""
-        source, target = self.directory / relative, self.records_dir / relative
+        source, target = self.directory / relative, self.repo / relative
         if (staged := digest(source)) is None:
             return f"{source} is gone; its suite stays saved, and the next run that ends cleanly writes its record"
         if (now := digest(target)) == staged:
