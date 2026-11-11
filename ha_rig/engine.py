@@ -59,6 +59,12 @@ POWER_RETRY_S = 3.0
 # republishes a group's state onto every member, so a late `on` from one light overwrites another's `off` in the next
 # case. The restore waits this long before the next case starts.
 RESTORE_SETTLE_S = 1.5
+# Z2M's coordinator answers BUSY to a groupcast it has no room for, and Herdsman doesn't retry it. A BUSY in the
+# window of a DeviceSide call (its start to its answer plus the log's lag) means the case didn't test DeviceSide: it
+# runs again after the coordinator has had this long to clear.
+BUSY_LAG_S = 1.0
+BUSY_RERUN_WAIT_S = 10.0
+COORDINATOR_BUSY = "coordinator busy"
 
 # A light reports off as its fade starts: an observed case waits this long after setup, so the brief comes once the
 # lights have reached the start state it describes.
@@ -913,6 +919,7 @@ class Outcome(StrEnum):
     NOT_OBSERVED = "not observed"
     FAIL = "fail"
     SKIPPED = "skipped"
+    NOT_RUN = "not run"  # the case never tested DeviceSide (coordinator busy); never saved, so a resume runs it again
 
 
 @dataclass(slots=True)
@@ -1051,6 +1058,7 @@ class Snapshot:
     journal_key: str = SERIAL
     integration: str | None = None  # whose ENTRY_RELOADS a write to `auto` waits for
     reads_auto: frozenset[str] = frozenset()
+    paced: bool = False  # a Z2M group case: its restore waits RESTORE_SETTLE_S though nothing was put back
     auto: dict[str, dict] = field(default_factory=dict)  # entity -> {auto_off, auto_on}, as get_attributes reads them
     reloading: dict[str, asyncio.Task] = field(default_factory=dict)  # entity -> its entry reload's watcher
 
@@ -1171,7 +1179,8 @@ class Snapshot:
             elif (self.taken[self.power[entity_id]] or {}).get("state") == "on":  # unpowered before: nothing to restore
                 if not await self.put_back_after_power(entity_id, state):
                     failed.append(entity_id)
-        if clear and put_back:
+        # A paced case's next groupcasts mustn't land in this one's broadcast-table entries (~9 s each on EmberZNet).
+        if clear and (put_back or self.paced):
             await asyncio.sleep(RESTORE_SETTLE_S)
         if clear and self.journal is not None:
             self.journal.drop("cases", self.journal_key)
@@ -1412,6 +1421,8 @@ class _CaseRun:
         self.traced: list[dict] | None = None  # the open wire tap's calls, while the case's steps run
         self.scoped: list[dict] = []  # the scope events the case's steps drew; kept after its tap closes, for `attach`
         self.in_setup = False  # while the case's setup runs: a group's `set` may be sent once more
+        self.step: Step | None = None  # the step being run
+        self.call_windows: list[tuple[float, float]] = []  # each DeviceSide call's loop times, sent and answered
         self.entry = entry  # for entry steps; None without an admin connection
         self.case, self.ha, self.registry, self.ask, self.out, self.position = case, ha, registry, ask, out, position
         self.integration = case.suite.integration
@@ -1431,6 +1442,7 @@ class _CaseRun:
             journal_key=journal_key,
             integration=self.integration,
             reads_auto=self.reads_auto(),
+            paced=self.integration == "zigbee2mqtt" and any(role in GROUP_ROLES for role in case.entities),
         )
         # Z2M device options a z2m_option step sets, held for the case in the baseline, which puts them back.
         self.baseline: Baseline | None = None
@@ -1516,7 +1528,14 @@ class _CaseRun:
             await self.snapshot.restore()
             if self.baseline is not None:
                 await self.baseline.release()
-        await self.attach(result, slots, traced)
+        return await self.concluded(result, slots, traced)
+
+    async def concluded(self, result: CaseResult, slots: dict[str, str], traced: list[dict]) -> CaseResult:
+        """The case's result, not run if the coordinator was busy for a call, else with what the traces saw."""
+        if await self.met_busy_coordinator():
+            result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
+        else:
+            await self.attach(result, slots, traced)
         return result
 
     async def attach(self, result: CaseResult, slots: dict[str, str], traced: list[dict]) -> None:
@@ -1529,6 +1548,20 @@ class _CaseRun:
                 result.trace = await self.trace(slots, traced)
             except Exception as err:  # noqa: BLE001 - a lookup that fails costs the trace, not the case
                 _LOGGER.warning("Could not read the devices behind %s, so it has no trace: %s", self.case.id, err)
+
+    @property
+    def watches_busy(self) -> bool:
+        """Whether Z2M's BUSY refusals are watched for: a Z2M case with the admin connection's log feed."""
+        return self.integration == "zigbee2mqtt" and self.wire is not None and self.wire.watching_z2m_busy
+
+    async def met_busy_coordinator(self) -> bool:
+        """Whether Z2M logged a BUSY refusal in the window of any DeviceSide call the case sent: the call may not have
+        reached the lights, so the case proved nothing about DeviceSide."""
+        if not self.watches_busy or not self.call_windows:
+            return False
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, max(end for _, end in self.call_windows) + BUSY_LAG_S - loop.time()))
+        return any(self.wire.z2m_busy_between(start, end + BUSY_LAG_S) for start, end in self.call_windows)
 
     async def slots(self) -> dict[str, str]:
         """The slot of each entity the case's calls may reach: `target` for its role, the role's name for another,
@@ -1590,6 +1623,7 @@ class _CaseRun:
                 handler = getattr(self, f"_{step.kind}")
                 if relaxed:
                     handler = getattr(self, f"_relaxed_{step.kind}", handler)
+                self.step = step
                 try:
                     await handler(step.args, following)
                 except StepFailure as err:
@@ -1679,6 +1713,8 @@ class _CaseRun:
                 {"entity_id": entity_id, "transport": "ha", "command": f"{domain}.{service}", "params": data}
             )
         call = {"entity_id": entity_id, **data}
+        loop = asyncio.get_running_loop()
+        sent_at = loop.time()
         await self.ha.call_service(domain, service, call)
         if domain == "scene":
             return
@@ -1693,6 +1729,13 @@ class _CaseRun:
         try:
             await self.await_state(entity_id, want, within)
         except StepFailure as err:
+            if self.watches_busy and self.wire.z2m_busy_between(sent_at, loop.time()):
+                # Z2M's coordinator refused the send with BUSY, so nothing reached the lights: send it once more.
+                label = self.step.label if self.step is not None else "set"
+                self.out(f"  {self.case.id}: {label}: Z2M's coordinator answered BUSY; sent the set again")
+                await self.ha.call_service(domain, service, call)
+                await self.await_state(entity_id, want, within)
+                return
             if not (self.in_setup and self.is_group(entity_id)):
                 raise
             # The bridge never reports a stale member again by itself, but a fresh command makes the bulb report.
@@ -1780,8 +1823,11 @@ class _CaseRun:
         self.query = getattr(getattr(self.registry, "actions", {}).get(action), "kind", None) == "query"
         sent_at = asyncio.get_running_loop().time()
         try:
-            self.response = await self.ha.call_service("deviceside", action, data, return_response=True)
-            self.call_times = (sent_at, asyncio.get_running_loop().time())
+            try:
+                self.response = await self.ha.call_service("deviceside", action, data, return_response=True)
+            finally:
+                self.call_windows.append((sent_at, asyncio.get_running_loop().time()))
+            self.call_times = self.call_windows[-1]
         except HAError as err:
             if following != "expect_error":
                 raise StepFailure(f"deviceside.{action} raised {err.translation_key}: {err}") from None
@@ -2146,10 +2192,17 @@ async def run(
     rig_run.seed([suite for suite, *_ in planned], done or {})
     suite_results: list[SuiteResult] = []
     try:
+        if admin is not None and any(suite.integration == "zigbee2mqtt" for suite, *_ in planned):
+            try:
+                await admin.watch_z2m_busy()
+            except Exception as err:  # noqa: BLE001 - without it a BUSY fails a case as it did before
+                out(f"Z2M's BUSY refusals aren't watched: {err}")
         waiting = await rig_run.all_automated([(suite, client, cases_) for suite, _, client, cases_ in planned])
         await rig_run.observed(waiting)
         await rig_run.unlend()
     finally:
+        if admin is not None:
+            await admin.stop_z2m_busy()
         # A failure here must not hide the one that ended the run.
         if rig_run.entry_options is not None:
             try:
@@ -2338,7 +2391,14 @@ class _Run:
     ) -> CaseResult:
         if wanted := self.options.get(id(case.suite)):
             await self.entry_options.apply(wanted)
-        return await self.case_run(case, client, ask, position).run()
+        result = await self.case_run(case, client, ask, position).run()
+        if result.outcome is Outcome.NOT_RUN:
+            self.out(
+                f"  {case.id}: {COORDINATOR_BUSY} in DeviceSide's call; it runs again in {BUSY_RERUN_WAIT_S:.0f} s"
+            )
+            await asyncio.sleep(BUSY_RERUN_WAIT_S)  # the case has restored what it took
+            result = await self.case_run(case, client, ask, position).run()
+        return result
 
     def report(self, case: Case, result: CaseResult) -> None:
         self.results[id(case.suite), case.id] = result
@@ -2458,8 +2518,8 @@ def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
 def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunResult:
     """One result per suite from its parts, which runs split between them (the lanes, then the phases, or runs), in
     the order the parts first name each suite, its cases in file order. A suite is complete only when every case it
-    plans has a result, none of them an unreachable skip: lanes whose phases never ran write no record, and neither
-    does a run that left a case out (-k) until another runs it."""
+    plans has a result, none of them an unreachable skip or a case not run: lanes whose phases never ran write no
+    record, and neither does a run that left a case out (-k) until another runs it."""
     joined: dict[tuple[str, str], SuiteResult] = {}
     for part in parts:
         key = (part.suite.integration, part.suite.name)
@@ -2476,7 +2536,8 @@ def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunR
         position = {case_id: index for index, case_id in enumerate(planned)}
         result.cases.sort(key=lambda case: position.get(case.id, len(position)))
         result.planned = len(planned)
-        result.complete = set(planned) <= {case.id for case in result.cases if not case.unreachable}
+        ran = {case.id for case in result.cases if not case.unreachable and case.outcome is not Outcome.NOT_RUN}
+        result.complete = set(planned) <= ran
     return RunResult(list(joined.values()))
 
 

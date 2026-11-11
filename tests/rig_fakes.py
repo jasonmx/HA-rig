@@ -7,7 +7,7 @@ import copy
 import functools
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,6 +73,26 @@ def _merge(into: dict, options: dict) -> None:
             into[key] = value
 
 
+class LogFeed:
+    """Z2M's bridge/logging: each line goes to every live subscription, as the broker's would."""
+
+    def __init__(self) -> None:
+        self.queues: list[asyncio.Queue[str]] = []
+
+    def put_nowait(self, line: str) -> None:
+        for queue in self.queues:
+            queue.put_nowait(line)
+
+    @contextlib.contextmanager
+    def subscribed(self) -> Iterator[asyncio.Queue[str]]:
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        self.queues.append(queue)
+        try:
+            yield queue
+        finally:
+            self.queues.remove(queue)
+
+
 class FakeHA(HAClient):
     """Entity states HA would hold, plain on/off services, and DeviceSide actions answered by `respond`.
 
@@ -110,7 +130,9 @@ class FakeHA(HAClient):
         self.z2m_republishes = True
         self.z2m_level = "warning"  # Z2M's log level
         self.z2m_debug_to_mqtt = False  # bridge/info's config.advanced.log_debug_to_mqtt_frontend
-        self.z2m_logging: asyncio.Queue[str] = asyncio.Queue()  # what Z2M publishes to bridge/logging
+        self.z2m_logging = LogFeed()  # what Z2M publishes to bridge/logging, to each subscription
+        self.z2m_busy: list[tuple[float, str]] = []  # HAClient's, which this init doesn't reach
+        self._busy_watch = None
         self.ha_log = ""  # what /api/error_log returns; an Exception instance is raised instead
         self.ha_levels: dict[str, int] = {"deviceside": 30, "hue": 20, "zha": 30, "mqtt": 30}  # logger/log_info
         self.log_level_calls: list[tuple[str, str]] = []  # each integration_log_level (domain, level)
@@ -120,6 +142,7 @@ class FakeHA(HAClient):
         self.on_leave: Callable[[str, str], None] | None = None  # (integration, IEEE) after a remove
         self.z2m_offline: set[str] = set()  # IEEEs Z2M lists that aren't there: availability offline, no reply
         self.z2m_availability_on = True  # bridge/info's config.availability.enabled
+        self.z2m_group_offline: set[str] = set()  # Z2M groups whose availability never says online
         self.z2m_bridge_state = "online"  # the retained bridge/state
         self.z2m_remove_fails: dict[str, int] = {}  # IEEE -> removes still to fail with an error response
         self.z2m_crash_on_remove = False  # a failing remove takes Z2M offline, back online after z2m_restart_s
@@ -280,7 +303,8 @@ class FakeHA(HAClient):
     @contextlib.asynccontextmanager
     async def _mqtt_messages(self, topic: str) -> AsyncIterator[asyncio.Queue[str]]:
         if topic.endswith("/logging"):
-            yield self.z2m_logging
+            with self.z2m_logging.subscribed() as queue:
+                yield queue
             return
         queue: asyncio.Queue[str] = asyncio.Queue()
         if not topic.startswith("zigbee2mqtt/bridge/"):
@@ -327,6 +351,8 @@ class FakeHA(HAClient):
             if any(normalize_ieee(i) == normalize_ieee(name) for i in self.z2m_devices):
                 state = "offline" if normalize_ieee(name) in self.z2m_offline else "online"
                 queue.put_nowait(json.dumps({"state": state}))
+            elif name in self.z2m_groups and name not in self.z2m_group_offline:
+                queue.put_nowait(json.dumps({"state": "online"}))
         else:
             self._z2m_device_topics[topic] = queue
         return queue

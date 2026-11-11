@@ -75,6 +75,7 @@ HUE_SEARCHES = 2
 POLL_S = 2.0
 PRIME_ATTEMPTS = 3  # reads of a newly joined Z2M bulb: the first, just after its interview, can go unanswered
 PRIME_GAP_S = 3.0
+Z2M_ONLINE_S = 60  # for a bulb, then its new group, to show online in Z2M's availability before a group case starts
 GONE_S = 15  # for HA to drop a rig-made group's entity once the group is removed; after that the rig removes it
 # The rig-made Hue scene: every member on at 40 %, and 366 mirek (2732 K) where it takes a color temperature. Below
 # full, so a recall mid-fade shows (raise_brightness-predicted_state's bridge_scene_recall_mid_fade_shows_at_once).
@@ -932,6 +933,10 @@ class Roamer:
     async def make_z2m_group(self, group: RoamGroup) -> tuple[str, Finder]:
         name = rig_name(group.entity_id)
         by_id = {bulb.entity_id: bulb for bulb in self.bulbs}
+        # A member Z2M hasn't marked online is a groupcast target the coordinator can't count on: `live` calls "no
+        # sign either way" live, which locating a bulb wants and this doesn't.
+        for member in group.members:
+            await self.z2m_online(await self.z2m_name(by_id[member]), f"{member}, a member of {name}")
         try:
             await self.ha.z2m_group_add(name, tuple(hex_ieee(by_id[member].ieee) for member in group.members))
         except ValueError as err:
@@ -939,6 +944,7 @@ class Roamer:
         made = await self.ha.z2m_group(name)
         if made is None:
             raise GroupError(f"Z2M lists no group {name} after making it")
+        await self.z2m_online(name, f"the group {name}")
         identifier = ["mqtt", Z2M_GROUP_IDENTIFIER.format(made["id"])]
 
         async def find() -> dict | None:
@@ -949,6 +955,20 @@ class Roamer:
             return next((e for e in lights if e.get("device_id") in ids), None)
 
         return str(made["id"]), find
+
+    async def z2m_online(self, topic: str, what: str) -> None:
+        """Wait until Z2M's availability for `topic` says online, for up to Z2M_ONLINE_S; a GroupError naming `what` if
+        it doesn't. Nothing to wait for where Z2M's availability is off."""
+        if not await self.ha.z2m_availability_enabled():
+            return
+        deadline = asyncio.get_running_loop().time() + Z2M_ONLINE_S
+        while (state := await self.ha.z2m_availability(topic)) != "online":
+            if asyncio.get_running_loop().time() > deadline:
+                raise GroupError(
+                    f"Z2M's availability for {what} is {state or 'not published'} after {Z2M_ONLINE_S} s, so a group "
+                    "case would send its groupcasts to a target Z2M doesn't count as there"
+                )
+            await asyncio.sleep(POLL_S)
 
     def entity(self, platform: str, domain: str, unique_id: str) -> Finder:
         """A finder for the registry entry with this platform, domain and unique_id."""
