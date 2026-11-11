@@ -1,6 +1,6 @@
 # ha-rig
 
-The private test rig for DeviceSide (`jasonmx/deviceside`, public). It tests a deviceside checkout and writes test
+The private test rig for DeviceSide (`DeviceSide/DeviceSide`, public). It tests a deviceside checkout and writes test
 records into it: see `docs/rig.md`, Setup. What a record must prove, when an adapter's `experimental` flag clears, and
 how releases gate on records are deviceside's rules (its `CLAUDE.md`); a change here that alters what a record
 proves needs a matching change there.
@@ -36,7 +36,7 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 - Before adding a case, name what it catches that no existing case or unit test does: a different call shape, a
   live-reply branch, or a firmware fact. No name, no case.
 - A new or renamed deviceside action needs its step file here, landed with or before the deviceside PR it tests.
-  The rig PR's plan names it in Coordination, `Tests-with: jasonmx/deviceside#N`, so CI tests the pair together
+  The rig PR's plan names it in Coordination, `Tests-with: DeviceSide/DeviceSide#N`, so CI tests the pair together
   (`scripts/ci_deviceside.sh`). Nothing reruns it when that PR moves or merges, and `ci-green` counts every run at the
   head: before merging, `gh run rerun` the PR's Tests runs, which read both afresh.
 - Async throughout; American English, matching HA.

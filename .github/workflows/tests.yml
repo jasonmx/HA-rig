@@ -29,7 +29,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The rig imports deviceside's registry and actions. A PR whose body has `Tests-with: jasonmx/deviceside#N`
+      # The rig imports deviceside's registry and actions. A PR whose body has `Tests-with: DeviceSide/DeviceSide#N`
       # tests against that deviceside PR; anything else tests against deviceside's newest line of work. The script
       # says which, and why.
       - name: Check out deviceside

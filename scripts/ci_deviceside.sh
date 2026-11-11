@@ -3,7 +3,7 @@
 #
 #   ci_deviceside.sh <clone> <rig-pr>     <rig-pr> is empty when CI isn't running for a PR
 #
-# A rig PR whose body has a `Tests-with: jasonmx/deviceside#N` line tests against that deviceside PR: its head while
+# A rig PR whose body has a `Tests-with: DeviceSide/DeviceSide#N` line tests against that deviceside PR: its head while
 # it's open, its base branch once merged. A closed, unmerged PR, or a Tests-with line in any other shape, fails.
 # Without one, deviceside's newest line of work: whichever of main and the release branches had the latest commit,
 # as deviceside's PRs pick their base. The choice and its reason are always printed, so a fallback can't pass as
@@ -15,7 +15,7 @@ set -euo pipefail
 usage='usage: ci_deviceside.sh <clone> <rig-pr>'
 clone=${1:?$usage}
 rig_pr=${2-}
-deviceside=jasonmx/deviceside
+deviceside=DeviceSide/DeviceSide
 
 fail() {
     echo "ci_deviceside: $*" >&2
@@ -31,7 +31,7 @@ tests_with() {
         line=${line%$'\r'}
         # Any line that starts like Tests-with must be one exactly: a typo shouldn't quietly test the default.
         [[ ${line,,} =~ $looks_like ]] || continue
-        [[ $line =~ ^Tests-with:[[:space:]]*jasonmx/deviceside#([0-9]+)[[:space:]]*$ ]] ||
+        [[ $line =~ ^Tests-with:[[:space:]]*DeviceSide/DeviceSide#([0-9]+)[[:space:]]*$ ]] ||
             fail "rig PR #$rig_pr: '$line' isn't 'Tests-with: $deviceside#N'"
         [[ -z $found ]] || fail "rig PR #$rig_pr names more than one Tests-with PR"
         found=${BASH_REMATCH[1]}
