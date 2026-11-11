@@ -3027,3 +3027,65 @@ def test_a_traced_and_lent_result_survives_the_ledger():
     again = progress_result(json.loads(json.dumps(progress_saved(case))))
     assert again == case
     assert again.trace.legend == case.trace.legend
+
+
+# --- the Covers row -------------------------------------------------------------------------------------------
+
+
+def scoped(*rows: tuple) -> list[CaseResult]:
+    return [CaseResult("t[light_ct]", "light_ct", "light", Outcome.PASS, scope=rows)]
+
+
+async def test_a_record_names_what_the_scope_covered_and_each_option_on_or_off(tmp_path):
+    steps = suite(tmp_path, option_file("predicted_state"), "hue")
+    cases = scoped(
+        ("raise_brightness", "hue", "light", "Dimmer", ("brightness",)),
+        ("raise_brightness", "hue", "light", None, ("brightness", "color_temp")),
+        ("raise_brightness", "hue", "switch", "Switch", ()),
+        (
+            "turn_on",
+            "hue",
+            "fan",
+            "Fan",
+            ("speed",),
+        ),  # another action: a test's steps called it, it proves nothing here
+        ("raise_brightness", "zha", "cover", "Cover", ("position",)),  # another integration
+    )
+    record = render_record(
+        SuiteResult(steps, cases, True), "Hue", "2026.10.1", [], "d", "t", {"predicted_state": True, "other": False}
+    )
+    assert (
+        "| Covers | domains=light,switch; capabilities=Dimmer,Switch; fields=brightness,color_temp; "
+        "options=other:off,predicted_state:on |"
+    ) in record
+    assert record.index("| Options |") < record.index("| Covers |") < record.index("## Tests")
+
+
+async def test_a_record_with_nothing_scoped_has_all_four_keys_empty(tmp_path):
+    steps = suite(tmp_path, ON_THEN_OFF)
+    case = CaseResult("on_then_off[switch_plug]", "switch_plug", "switch", Outcome.PASS)
+    record = render_record(SuiteResult(steps, [case], True), "Shelly", "2026.10.1", [], "d", "t")
+    assert "| Covers | domains=; capabilities=; fields=; options= |" in record
+
+
+async def test_only_proven_cases_count_toward_covers(tmp_path):
+    steps = suite(tmp_path, ON_THEN_OFF)
+    row = ("turn_on_for", "shelly", "switch", "Switch", ("duration",))
+    failed = CaseResult("a[switch_plug]", "switch_plug", "switch", Outcome.FAIL, scope=(row,))
+    twinned = CaseResult("b observed", "switch_plug", "switch", Outcome.PASS, twin="a[switch_plug]", scope=(row,))
+    record = render_record(SuiteResult(steps, [failed, twinned], True), "Shelly", "2026.10.1", [], "d", "t")
+    assert "| Covers | domains=; capabilities=; fields=; options= |" in record
+
+
+async def test_a_run_collects_the_scope_events_of_each_case_and_records_them(tmp_path):
+    ha = FakeHA({"switch.plug": {}}, timer_on)
+    await ha.subscribe_wire()
+    ha.scope_for = lambda action, data: [
+        ("shelly", "switch", "Switch", ("duration",)),
+        ("shelly", "switch", "Switch", ("duration",)),  # a repeat is one row
+    ]
+    result = await run_one(ha, suite(tmp_path, ON_THEN_OFF), profile(switch_plug="switch.plug"), admin=ha)
+    [case] = result.suites[0].cases
+    assert case.scope == (("turn_on_for", "shelly", "switch", "Switch", ("duration",)),)
+    [path], _ = await write_records(result, REGISTRY, under(tmp_path / "test-records"), "2026-11-11", "rig run")
+    assert "| Covers | domains=switch; capabilities=Switch; fields=duration; options= |" in path.read_text()

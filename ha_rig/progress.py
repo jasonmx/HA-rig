@@ -353,6 +353,7 @@ class Progress:
 def _saved(result: CaseResult) -> dict:
     case = asdict(result) | {"outcome": str(result.outcome), "entity_ids": list(result.entity_ids)}
     case["trace"] = result.trace.to_json() if result.trace else None
+    case["scope"] = [[*row[:4], list(row[4])] for row in result.scope]
     case.pop("unreachable")
     return case
 
@@ -369,4 +370,5 @@ def _result(case: dict) -> CaseResult:
         absent=case.get("absent", False),
         trace=Trace.from_json(case["trace"]) if case.get("trace") else None,
         lent=case.get("lent"),
+        scope=tuple((a, i, d, c, tuple(f)) for a, i, d, c, f in case.get("scope", [])),
     )
