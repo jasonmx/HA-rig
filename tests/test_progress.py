@@ -2,7 +2,7 @@
 
 import datetime
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from ha_rig import progress as progress_module
@@ -271,3 +271,14 @@ def test_an_absent_skip_round_trips(tmp_path):
     progress = loaded(tmp_path)
     progress.record(SUITE, absent)
     assert loaded(tmp_path).done()[("shelly", SUITE.name, absent.id)].absent
+
+
+def test_a_cases_scope_round_trips_and_an_older_entry_loads_empty(tmp_path):
+    scope = (("turn_on_for", "shelly", "switch", "Switch", ("duration",)), ("turn_on_for", "shelly", "light", None, ()))
+    case = replace(PASSED, scope=scope)
+    progress = started(tmp_path)
+    progress.record(SUITE, case)
+    assert loaded(tmp_path).done()[("shelly", SUITE.name, case.id)].scope == scope
+    older = progress_module._saved(PASSED)
+    del older["scope"]  # saved before the scope was
+    assert progress_module._result(older).scope == ()

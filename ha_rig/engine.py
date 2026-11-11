@@ -18,17 +18,18 @@ import operator
 import re
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
 
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
-from .client import HAClient, HAError, device_ieee
+from .client import SCOPE_EVENT, HAClient, HAError, device_ieee
 from .journal import Journal
 from .observed import FILE as OBSERVED_FILE
 from .observed import Device as Maker
@@ -933,7 +934,23 @@ class CaseResult:
     unreachable: bool = False  # Case.unreachable
     absent: bool = False  # Case.absent
     trace: Trace | None = None  # what the case sent, when DeviceSide's wire trace was on
+    # What its scope weighed for the case's targets, when the trace was on: the sorted distinct (action,
+    # integration, domain, capability, fields) of DeviceSide's `deviceside_scope` events.
+    scope: tuple[tuple[str, str, str, str | None, tuple[str, ...]], ...] = ()
     lent: str | None = None  # an observed case not run: the date of the _observed.md pass that covers its twin's calls
+
+
+def _scope(events: Iterable[dict]) -> tuple[tuple[str, str, str, str | None, tuple[str, ...]], ...]:
+    """The distinct scope events as sorted (action, integration, domain, capability, fields) tuples."""
+    return tuple(
+        sorted(
+            {
+                (e["action"], e["integration"], e["domain"], e.get("capability"), tuple(e.get("fields") or ()))
+                for e in events
+            },
+            key=lambda row: tuple("" if part is None else part for part in row),
+        )
+    )
 
 
 @dataclass(slots=True)
@@ -1402,6 +1419,7 @@ class _CaseRun:
         self.bridge = bridge
         self.wire, self.makers = wire, makers  # the admin connection the wire trace comes on, and its devices
         self.traced: list[dict] | None = None  # the open wire tap's calls, while the case's steps run
+        self.scoped: list[dict] = []  # the scope events the case's steps drew; kept after its tap closes, for `attach`
         self.in_setup = False  # while the case's setup runs: a group's `set` may be sent once more
         self.step: Step | None = None  # the step being run
         self.call_windows: list[tuple[float, float]] = []  # each DeviceSide call's loop times, sent and answered
@@ -1481,6 +1499,7 @@ class _CaseRun:
         )
         slots: dict[str, str] = {}
         traced: list[dict] = []
+        self.scoped = []
         try:
             if case.observed:
                 self.out("")
@@ -1512,15 +1531,23 @@ class _CaseRun:
         return await self.concluded(result, slots, traced)
 
     async def concluded(self, result: CaseResult, slots: dict[str, str], traced: list[dict]) -> CaseResult:
-        """The case's result, not run if the coordinator was busy for a call, else with the trace of what it sent."""
+        """The case's result, not run if the coordinator was busy for a call, else with what the traces saw."""
         if await self.met_busy_coordinator():
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
-        elif traced and result.outcome in (Outcome.PASS, Outcome.FAIL):
+        else:
+            await self.attach(result, slots, traced)
+        return result
+
+    async def attach(self, result: CaseResult, slots: dict[str, str], traced: list[dict]) -> None:
+        """What the wire and scope traces saw, on a case that passed or failed."""
+        if result.outcome not in (Outcome.PASS, Outcome.FAIL):
+            return
+        result.scope = _scope(self.scoped)
+        if traced:
             try:
                 result.trace = await self.trace(slots, traced)
             except Exception as err:  # noqa: BLE001 - a lookup that fails costs the trace, not the case
                 _LOGGER.warning("Could not read the devices behind %s, so it has no trace: %s", self.case.id, err)
-        return result
 
     @property
     def watches_busy(self) -> bool:
@@ -1555,7 +1582,7 @@ class _CaseRun:
         if self.wire is None:
             yield []
             return
-        with self.wire.wire_tap(slots) as traced:
+        with self.wire.wire_tap(slots) as traced, self.wire.wire_tap(slots, SCOPE_EVENT) as self.scoped:
             self.traced = traced
             try:
                 yield traced
@@ -2631,8 +2658,39 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     return sorted(case.id for case in cases if record and case.absent and case.id in record.passed)
 
 
+def scope_events(suite_result: SuiteResult) -> set[tuple]:
+    """What DeviceSide's scope named for the suite's proven cases: only events of the suite's own action and
+    integration (a test's steps can call others). Empty when the run had no trace: every dispatched call fires one."""
+    suite = suite_result.suite
+    return {
+        row
+        for case in suite_result.proven
+        for row in case.scope
+        if row[0] == suite.action and row[1] == suite.integration
+    }
+
+
+def covers(suite_result: SuiteResult, options: Mapping[str, bool]) -> str:
+    """The `Covers` row's value: the domains, capabilities and fields of `scope_events`, and each option on or
+    off."""
+    events = scope_events(suite_result)
+    parts = {
+        "domains": {row[2] for row in events},
+        "capabilities": {row[3] for row in events if row[3]},
+        "fields": {field for row in events for field in row[4]},
+        "options": {f"{name}:{'on' if on else 'off'}" for name, on in options.items()},
+    }
+    return "; ".join(f"{key}={','.join(sorted(values))}" for key, values in parts.items())
+
+
 def render_record(
-    suite_result: SuiteResult, title: str, ha_version: str, devices: list[Device], date: str, source: str
+    suite_result: SuiteResult,
+    title: str,
+    ha_version: str,
+    devices: list[Device],
+    date: str,
+    source: str,
+    options: Mapping[str, bool] = MappingProxyType({}),
 ) -> str:
     """The test record: a key/value table, then the per-test table. deviceside's check_release.py --records reads
     its commit."""
@@ -2646,6 +2704,7 @@ def render_record(
     ]
     if suite.file.options:
         rows.append(("Options", ", ".join(sorted(suite.file.options))))
+    rows.append(("Covers", covers(suite_result, options)))
     lines = [f"# {title} · {suite.name}", "", "| | |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     lines += ["", "## Tests", "", *table(suite_result)]
@@ -2713,6 +2772,7 @@ async def write_records(
     date: str,
     source: str,
     into: Records | None = None,
+    untraced: list[Path] | None = None,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
@@ -2720,7 +2780,11 @@ async def write_records(
 
     A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
     the file in `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To
-    narrow on purpose, delete the record."""
+    narrow on purpose, delete the record.
+
+    A suite whose proven cases drew no scope event (no admin connection, or the wire logger would not go to DEBUG)
+    has nothing to put in `Covers`, and an empty row would replace a record that had one: its `records` path is
+    added to `untraced`, if given, and nothing is written."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2732,9 +2796,18 @@ async def write_records(
         if narrowed := narrows(suite_result.cases, Record.read(path)):
             kept.append((path, narrowed))
             continue
+        if not scope_events(suite_result):
+            if untraced is not None:
+                untraced.append(path)
+            continue
         path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source))
+        # The adapter is always there for a suite that ran; a test's roster may not declare it.
+        adapter = registry.adapter(suite.action, suite.integration)
+        options = {name: name in suite.file.options for name in adapter.scope.options} if adapter else {}
+        path.write_text(
+            render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, options)
+        )
         written.append(path)
     return written, kept
 
