@@ -126,13 +126,13 @@ async def test_an_error_in_one_lane_cancels_the_other_and_both_put_back(tmp_path
     suites, profile = two_lanes(tmp_path)
     steps = engine._CaseRun.steps
 
-    async def crash_on_zha(self, case_steps, relaxed=False):
+    async def crash_on_zha(self, case_steps, relaxed=False, setup=False):
         if self.integration == "zha":
             await self.touch("light.b")
             await self.ha.call_service("light", "turn_off", {"entity_id": "light.b"})
             await asyncio.sleep(0.05)  # the other lane is mid-call
             raise ConnectionResetError("HA went away")
-        await steps(self, case_steps, relaxed)
+        await steps(self, case_steps, relaxed, setup)
 
     monkeypatch.setattr(engine._CaseRun, "steps", crash_on_zha)
 

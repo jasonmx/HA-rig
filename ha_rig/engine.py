@@ -1393,6 +1393,7 @@ class _CaseRun:
         self.bridge = bridge
         self.wire, self.makers = wire, makers  # the admin connection the wire trace comes on, and its devices
         self.traced: list[dict] | None = None  # the open wire tap's calls, while the case's steps run
+        self.in_setup = False  # while the case's setup runs: a group's `set` may be sent once more
         self.entry = entry  # for entry steps; None without an admin connection
         self.case, self.ha, self.registry, self.ask, self.out, self.position = case, ha, registry, ask, out, position
         self.integration = case.suite.integration
@@ -1474,7 +1475,7 @@ class _CaseRun:
                 self.out(f"--- {case.suite.action} / {case.test.name} on {case.role} ({self.position}) ---")
             await self.await_settled()
             await self.check_power()
-            await self.steps(case.test.setup)
+            await self.steps(case.test.setup, setup=True)
             slots = await self.slots()
             async with self.tap(slots) as traced:
                 if case.observed:
@@ -1553,22 +1554,26 @@ class _CaseRun:
             return f"could not enable DeviceSide's entry again: {err}"
         return None
 
-    async def steps(self, steps: tuple[Step, ...], relaxed: bool = False) -> None:
+    async def steps(self, steps: tuple[Step, ...], relaxed: bool = False, setup: bool = False) -> None:
         integration = self.case.suite.integration
         steps = tuple(step for step in steps if step.only is None or integration in step.only)
-        for index, step in enumerate(steps):
-            following = steps[index + 1].kind if index + 1 < len(steps) else None
-            handler = getattr(self, f"_{step.kind}")
-            if relaxed:
-                handler = getattr(self, f"_relaxed_{step.kind}", handler)
-            try:
-                await handler(step.args, following)
-            except StepFailure as err:
-                raise StepFailure(f"{step.label}: {err}") from None
-            except _NoOneThere:
-                raise
-            except Exception as err:  # noqa: BLE001 - any error ends the case as a fail, not the run
-                raise StepFailure(f"{step.label}: {type(err).__name__}: {err}") from None
+        self.in_setup = setup
+        try:
+            for index, step in enumerate(steps):
+                following = steps[index + 1].kind if index + 1 < len(steps) else None
+                handler = getattr(self, f"_{step.kind}")
+                if relaxed:
+                    handler = getattr(self, f"_relaxed_{step.kind}", handler)
+                try:
+                    await handler(step.args, following)
+                except StepFailure as err:
+                    raise StepFailure(f"{step.label}: {err}") from None
+                except _NoOneThere:
+                    raise
+                except Exception as err:  # noqa: BLE001 - any error ends the case as a fail, not the run
+                    raise StepFailure(f"{step.label}: {type(err).__name__}: {err}") from None
+        finally:
+            self.in_setup = False
 
     async def observed(self) -> None:
         observe = self.case.test.observe
@@ -1647,7 +1652,8 @@ class _CaseRun:
             self.traced.append(
                 {"entity_id": entity_id, "transport": "ha", "command": f"{domain}.{service}", "params": data}
             )
-        await self.ha.call_service(domain, service, {"entity_id": entity_id, **data})
+        call = {"entity_id": entity_id, **data}
+        await self.ha.call_service(domain, service, call)
         if domain == "scene":
             return
         want: dict[str, Any] = {"state": args["state"]}
@@ -1657,7 +1663,16 @@ class _CaseRun:
             brightness = round(data["brightness_pct"] * 255 / 100)
             want["brightness"] = {"min": brightness - 2, "max": brightness + 2}
         # A transition is the light's own fade, which the state follows only at its end.
-        await self.await_state(entity_id, want, self.names["tol"] + data.get("transition", 0))
+        within = self.names["tol"] + data.get("transition", 0)
+        try:
+            await self.await_state(entity_id, want, within)
+        except StepFailure as err:
+            if not (self.in_setup and self.is_group(entity_id)):
+                raise
+            # The bridge never reports a stale member again by itself, but a fresh command makes the bulb report.
+            _LOGGER.warning("%s: setup set to %s; %s; setting the group again", entity_id, data, err)
+            await self.ha.call_service(domain, service, call)
+            await self.await_state(entity_id, want, within)
 
     async def z2m_ieee(self, entity_id: str) -> str:
         entry = await self.ha.command({"type": "config/entity_registry/get", "entity_id": entity_id})
