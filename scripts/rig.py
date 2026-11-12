@@ -71,15 +71,15 @@ device left unpowered stops the run only when its phase comes, after the bulbs h
 --ignore-unreachables an unavailable fixed entity skips its cases instead (engine.unreachable), and while any is,
 those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
-A run runs the suites it is asked for; what needs testing is deviceside's to say. Fact tests (firmware facts, and
-tests a person watches) run only with --facts, automated and watched parts together: a default run skips them. It saves
-each case as it finishes in the profile's ledger (ha_rig/progress.py), keyed by the commit, the suite and its step
-file's digest (progress.run_key), so one that stops part way, on a signal, the restricted sensor or --for's budget,
-exits 75 and, rerun at the same commit with the same step files, picks up where it stopped; a suite finished across
-runs still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish; it
-counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case. A
-suite with a failed default case, or saved on another HA version, reruns whole; --fresh drops the selected suites'
-saved cases.
+A run runs the suites it is asked for; what needs testing is deviceside's to say. Fact cases (every case of a firmware
+fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
+automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
+(ha_rig/progress.py), keyed by the commit, the suite and its step file's digest (progress.run_key), so one that stops
+part way, on a signal, the restricted sensor or --for's budget, exits 75 and, rerun at the same commit with the same
+step files, picks up where it stopped; a suite finished across runs still writes its record. --for DURATION (30m, 1h15m)
+starts no case once spent, letting in-flight ones finish; it counts from approval, the deploy included. A move starts
+only with MOVE_LEAD_S left and always runs its first case. A suite with a failed default case, or saved on another HA
+version, reruns whole; --fresh drops the selected suites' saved cases.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -240,7 +240,7 @@ def select(
     facts: bool = False,
 ) -> list[Suite]:
     """Every step file on every integration in the profile it has a test for (`only:`), narrowed to --integration
-    and --action, each running its fact tests when `facts` (--facts) asks for them. A file with
+    and --action, each running its fact cases when `facts` (--facts) asks for them. A file with
     no adapter there stays, for the dry-run's `no adapter, will skip`. An action takes every step file for it
     (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its record; a file with a
     `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is run_suites's job
@@ -727,13 +727,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--facts",
         action="store_true",
-        help="also run the fact tests, automated and watched parts, which a default run skips; their results go to "
-        "_facts.md",
+        help="also run the fact cases a default run skips, firmware facts and watched cases, for _facts.md",
     )
     parser.add_argument(
         "--unattended",
         action="store_true",
-        help="ask no one: with --facts, the watched parts are reported not observed, and the automated ones run",
+        help="ask no one: with --facts, the watched cases are reported not observed",
     )
     parser.add_argument(
         "--serial",

@@ -68,10 +68,11 @@ COORDINATOR_BUSY = "coordinator busy"
 SETUP_SETTLE_S = 2.0
 NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
 
-# A fact test (RigTest.fact) finds a fact, whose result stands as written down until evidence contradicts it, so a
-# default run leaves every case of it out; --facts (Suite.facts) runs it whole, its automated and watched parts. Its
-# results go to the integration's _facts.md (ha_rig/facts.py), never into a record.
-OPTED_OUT = "fact test: runs with --facts"  # the skip detail of a fact test's case in a default run
+# A fact case (Case.fact: a watched case, or any case of a firmware fact) finds a fact, whose result stands as written
+# down until evidence contradicts it, so a default run leaves it out and --facts (Suite.facts) adds it. A test's
+# automated case is an ordinary check of a shipped call, and runs by default, unless the test is a firmware fact.
+# Fact cases' results go to the integration's _facts.md (ha_rig/facts.py), never into a record.
+OPTED_OUT = "fact case: runs with --facts"  # the skip detail of a fact case in a default run
 
 # ZCL Color Control's hue attributes, which bulb_hue reads on ZHA.
 _COLOR_CLUSTER, _CURRENT_HUE, _ENHANCED_CURRENT_HUE = 0x0300, 0x0000, 0x4000
@@ -201,14 +202,9 @@ class RigTest:
     steps: tuple[Step, ...]
     setup: tuple[Step, ...] = ()
     observe: Observe | None = None
-    # A device behavior (precedence, bounds, timing) rather than the adapter's code: one kind of fact test (`fact`).
+    # A device behavior (precedence, bounds, timing) rather than the adapter's code: its every case, its watched one
+    # included, is a fact case (Case.fact). It may also `observe`.
     firmware_fact: bool = False
-
-    @property
-    def fact(self) -> bool:
-        """Whether it is a fact test: a firmware fact, or one a person watches (`observe`), or both. Its every case
-        runs only with --facts, and its results are facts for _facts.md, not a record's."""
-        return self.firmware_fact or self.observe is not None
 
     @property
     def automated(self) -> bool:
@@ -643,7 +639,7 @@ def load_step_files(steps_dir: Path = STEPS_DIR) -> list[StepFile]:
 
 @dataclass(frozen=True, slots=True)
 class Suite:
-    """One step file on one integration; `facts` when the run asked for its fact tests (--facts)."""
+    """One step file on one integration; `facts` when the run asked for its fact cases (--facts)."""
 
     file: StepFile
     integration: str
@@ -692,6 +688,12 @@ class Case:
         return f"{self.test.name}[{self.role}]" + (" observed" if self.observed else "")
 
     @property
+    def fact(self) -> bool:
+        """Whether it is a fact case, which runs only with --facts and whose result is a fact for _facts.md, not a
+        record's: its test's watched case, or any case of a firmware fact."""
+        return is_fact(self.id, self.test)
+
+    @property
     def twin(self) -> str | None:
         """The id of the test's other case on this role, when it has both: an observed case is skipped when its
         automated twin failed."""
@@ -731,7 +733,7 @@ def cases(
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
     ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped, and
-    so is a fact test's case the suite didn't opt in to (`opt_out`)."""
+    so is a fact case the suite didn't opt in to (`opt_out`)."""
     result = []
     for test in suite.file.tests:
         if not test.runs_on(suite.integration):
@@ -768,9 +770,9 @@ def cases(
 
 
 def opt_out(case: Case) -> str | None:
-    """Why a run leaves the case out, or None: a fact test's case, its automated part or its watched part, in a run
-    without --facts. It is skipped, with no entities, so it moves and locks nothing."""
-    return OPTED_OUT if case.test.fact and not case.suite.facts else None
+    """Why a run leaves the case out, or None: a fact case (Case.fact) in a run without --facts. It is skipped, with
+    no entities, so it moves and locks nothing."""
+    return OPTED_OUT if case.fact and not case.suite.facts else None
 
 
 def unreachable(case: Case, profile: Profile) -> str | None:
@@ -2440,8 +2442,13 @@ def _result_cell(suite: Suite, case: CaseResult, details: bool) -> str:
 
 
 def opt_in(suite: Suite, case_id: str) -> bool:
-    """Whether the case is a fact test's, which a default run skips (RigTest.fact)."""
-    return (test := suite.test(case_id)) is not None and test.fact
+    """Whether the case is a fact case, which a default run skips (Case.fact)."""
+    return is_fact(case_id, suite.test(case_id))
+
+
+def is_fact(case_id: str, test: RigTest | None) -> bool:
+    """A watched case, or any case of a firmware fact."""
+    return case_id.endswith(" observed") or (test is not None and test.firmware_fact)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2550,7 +2557,7 @@ def render_record(
     if chosen := [case.id for case in suite_result.cases if opt_in(suite, case.id)]:
         lines += [
             "",
-            f"Fact tests run only when asked (--facts), and their results go to [`{FACTS_FILE}`]({FACTS_FILE}), "
+            f"Fact cases run only when asked (--facts), and their results go to [`{FACTS_FILE}`]({FACTS_FILE}), "
             "never here:",
             "",
         ]
@@ -2621,8 +2628,8 @@ def observed_answer(case: CaseResult) -> bool:
 
 
 def fact_kind(suite: Suite, case: CaseResult) -> str | None:
-    """How a fact test's result was seen, for _facts.md, or None for no fact: `observed` for a watched part a person
-    answered, `automated` for an automated part that passed or failed."""
+    """How a fact case's result was seen, for _facts.md, or None for no fact: `observed` for a watched case a person
+    answered, `automated` for a firmware fact's automated case that passed or failed."""
     if case.id.endswith(" observed"):
         return OBSERVED_KIND if observed_answer(case) else None
     if opt_in(suite, case.id) and case.outcome in (Outcome.PASS, Outcome.FAIL):
@@ -2631,7 +2638,7 @@ def fact_kind(suite: Suite, case: CaseResult) -> str | None:
 
 
 def write_fact(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
-    """Append what one fact test's case found to its integration's _facts.md in `records`, dated now: each row is
+    """Append what one fact case found to its integration's _facts.md in `records`, dated now: each row is
     written once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None for a
     result that is no fact (fact_kind), or whose devices couldn't be read."""
     if (kind := fact_kind(suite, case)) is None or not case.devices:
