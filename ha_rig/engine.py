@@ -27,9 +27,10 @@ import yaml
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
 from .client import HAClient, HAError, device_ieee
+from .facts import FAIL, FIRMWARE_FACT, PASS, Fact, FactsFile
+from .facts import FILE as FACTS_FILE
+from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
-from .observed import FAIL, PASS, Observation, ObservedFile
-from .observed import FILE as OBSERVED_FILE
 from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,7 +68,8 @@ SETUP_SETTLE_S = 2.0
 NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
 
 # The cases a default run leaves out, and the option that asks for them (Suite.opt_in): an observed case needs
-# someone at the rig, and a firmware fact's pass stands as written down until evidence contradicts it.
+# someone at the rig, and a firmware fact's result stands as written down until evidence contradicts it. Either's
+# result goes to the integration's _facts.md (ha_rig/facts.py), never into a record.
 OBSERVED, FACTS = "observed", "facts"
 OPT_IN = {OBSERVED: "--observed", FACTS: "--facts"}
 OPTED_OUT = {OBSERVED: "observed: runs with --observed", FACTS: "firmware fact: runs with --facts"}  # skips
@@ -200,8 +202,8 @@ class RigTest:
     steps: tuple[Step, ...]
     setup: tuple[Step, ...] = ()
     observe: Observe | None = None
-    # A device behavior (precedence, bounds, timing) rather than the adapter's code: once passed, it stands, so it
-    # runs only when asked (--facts).
+    # A device behavior (precedence, bounds, timing) rather than the adapter's code: its result stands as a fact in
+    # _facts.md, so it runs only when asked (--facts). Never with `observe`: a test is one kind of opt-in or the other.
     firmware_fact: bool = False
 
     @property
@@ -527,6 +529,8 @@ def _parse_test(raw: Any) -> RigTest:
             raise ValueError("only must be a non-empty list of integration keys")
         if not isinstance(firmware_fact := raw.get("firmware_fact", False), bool):
             raise ValueError("firmware_fact must be true or false")
+        if firmware_fact and "observe" in raw:
+            raise ValueError("a firmware_fact test can't also observe: make the observed part its own test")
         steps, setup, observe = _parse_phases(raw)
         test = RigTest(name, tuple(roles), frozenset(only) if only else None, steps, setup, observe, firmware_fact)
         _check_observe_scope(test)
@@ -674,6 +678,9 @@ class Case:
     # The skip is for a role the profile lacks (`no <role> entity in the profile`), so a record written from it would
     # narrow what an earlier profile proved.
     absent: bool = False
+    # The skip is for a case that doesn't apply here: the role is not in the profile (absent), a group lacks the
+    # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult).
+    inapplicable: bool = False
 
     @property
     def id(self) -> str:
@@ -681,7 +688,8 @@ class Case:
 
     @property
     def twin(self) -> str | None:
-        """The id of the test's other case on this role, when it has both: either proves nothing alone."""
+        """The id of the test's other case on this role, when it has both: an observed case is skipped when its
+        automated twin failed."""
         if not self.test.observed_on(self.role, self.suite.integration) or not self.test.automated:
             return None
         return replace(self, observed=not self.observed).id
@@ -733,12 +741,13 @@ def cases(
                     result.append(replace(case, skip=why))
                     continue
                 if lacking:
-                    result.append(replace(case, skip=f"no {lacking} adapter on {suite.integration}"))
+                    result.append(replace(case, skip=f"no {lacking} adapter on {suite.integration}", inapplicable=True))
                     continue
                 needed = test.roles_needed(role)
                 entities = {name: profile.entity(suite.integration, name) for name in needed}
                 if missing := [name for name, entity_id in entities.items() if entity_id is None]:
-                    case = Case(suite, test, role, {}, f"no {missing[0]} entity in the profile", observed, absent=True)
+                    why = f"no {missing[0]} entity in the profile"
+                    case = Case(suite, test, role, {}, why, observed, absent=True, inapplicable=True)
                 else:
                     group = next((name for name in entities if name in GROUP_ROLES), None)
                     members = profile.members(suite.integration, entities[group]) if group else ()
@@ -746,7 +755,7 @@ def cases(
                     lights = [name for name in entities if name.startswith("light_")]
                     outside = [name for name in lights if members and entities[name] not in members]
                     skip = f"{outside[0]} is not one of the group's members" if outside else None
-                    case = Case(suite, test, role, entities, skip, observed, members)
+                    case = Case(suite, test, role, entities, skip, observed, members, inapplicable=bool(outside))
                     if skip is None and (why := unreachable(case, profile)):
                         case = replace(case, skip=why, unreachable=True)
                 result.append(case)
@@ -940,7 +949,8 @@ class CaseResult:
     twin: str | None = None  # Case.twin
     unreachable: bool = False  # Case.unreachable
     absent: bool = False  # Case.absent
-    # An observed case a person answered: the devices it ran on, for its _observed.md row. Never saved.
+    inapplicable: bool = False  # Case.inapplicable
+    # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()
 
 
@@ -971,9 +981,14 @@ class SuiteResult:
 
     @property
     def recordable(self) -> bool:
-        """A complete run that passed something and failed nothing; an all-unobserved run would erase a record."""
-        passed = any(case.outcome is Outcome.PASS for case in self.cases)
-        return self.complete and passed and all(case.outcome is not Outcome.FAIL for case in self.cases)
+        """A complete run in which every default case that applies passed: the only skips allowed are of opt-in cases,
+        whose results are facts, not the record's, and of cases that don't apply (Case.inapplicable). At least one
+        passed: a record of nothing would replace one that proved something."""
+        default = [case for case in self.cases if not opt_in(self.suite, case.id)]
+        allowed = all(
+            case.outcome is Outcome.PASS or (case.outcome is Outcome.SKIPPED and case.inapplicable) for case in default
+        )
+        return self.complete and allowed and any(case.outcome is Outcome.PASS for case in default)
 
 
 @dataclass(slots=True)
@@ -1492,19 +1507,19 @@ class _CaseRun:
                 await self.baseline.release()
         if await self.met_busy_coordinator():
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
-        elif observed_answer(result):
-            result.devices = await self.observed_devices()
+        elif fact_kind(case.suite, result):
+            result.devices = await self.fact_devices()
         return result
 
-    async def observed_devices(self) -> tuple[Device, ...]:
-        """The devices behind an observed case's entities, a group's members included, for its _observed.md row;
-        none when the lookup fails, which costs the row, not the case."""
+    async def fact_devices(self) -> tuple[Device, ...]:
+        """The devices behind the case's entities, a group's members included, for its _facts.md row; none when the
+        lookup fails, which costs the row, not the case."""
         try:
             lights = [member for entity_id in self.case.entities.values() for member in await self.members(entity_id)]
             entity_ids = dict.fromkeys([*self.case.entities.values(), *lights])
             return tuple((await rig_facts(self.ha, entity_ids))[1])
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Could not read the devices behind %s, so _observed.md gets no row: %s", self.case.id, err)
+            _LOGGER.warning("Could not read the devices behind %s, so _facts.md gets no row: %s", self.case.id, err)
             return ()
 
     @property
@@ -2362,7 +2377,15 @@ class _Run:
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
     domain = case.entities[case.role].partition(".")[0] if case.entities else None
     return CaseResult(
-        case.id, case.role, domain, outcome, detail, twin=case.twin, unreachable=case.unreachable, absent=case.absent
+        case.id,
+        case.role,
+        domain,
+        outcome,
+        detail,
+        twin=case.twin,
+        unreachable=case.unreachable,
+        absent=case.absent,
+        inapplicable=case.inapplicable,
     )
 
 
@@ -2396,21 +2419,31 @@ def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunR
 
 
 def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
-    """The pass/fail table, by role and domain: a record is public, so it never names a household entity."""
+    """The pass/fail table, by role and domain: a record is public, so it never names a household entity. With
+    `details` (the run's report), each result has its reason, opt-in cases' included; without (a record), an opt-in
+    case reads `skipped` whatever it did, as its result is a fact in _facts.md, not the record's."""
     lines = ["| Test | Target | Result |", "|---|---|---|"]
     for case in suite_result.cases:
         target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
         if not case.domain and not case.absent:  # skipped before planning entities: no adapter, or not opted in
             target = case.role
-        outcome = str(case.outcome) + (f": {case.detail}" if details and case.detail else "")
-        if case.outcome is Outcome.PASS and _firmware_fact(suite_result.suite, case.id):
-            outcome += FIRMWARE_FACT
-        lines.append(f"| `{case.id}` | {target} | {outcome} |")
+        lines.append(f"| `{case.id}` | {target} | {_result_cell(suite_result.suite, case, details)} |")
     return lines
+
+
+def _result_cell(suite: Suite, case: CaseResult, details: bool) -> str:
+    if details:
+        return str(case.outcome) + (f": {case.detail}" if case.detail else "")
+    return str(Outcome.SKIPPED if opt_in(suite, case.id) else case.outcome)
 
 
 def _firmware_fact(suite: Suite, case_id: str) -> bool:
     return (test := suite.test(case_id)) is not None and test.firmware_fact
+
+
+def opt_in(suite: Suite, case_id: str) -> bool:
+    """Whether the case is one a default run skips: an observed case, or a firmware fact."""
+    return case_id.endswith(" observed") or _firmware_fact(suite, case_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2440,9 +2473,9 @@ async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[
     return config["version"], list(found)
 
 
-CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # check_release's
+CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # deviceside's Source row
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
-FIRMWARE_FACT = " (firmware fact)"  # after a firmware fact's PASS in a record's Tests table
+OLD_FACT_MARK = " (firmware fact)"  # after a firmware fact's PASS in an older record's Tests table: read, never written
 CASE_ROW = re.compile(r"^\| `([^`]+)` \|.*\| ([^|]*?) \|$", re.MULTILINE)  # id, then the result column
 
 
@@ -2465,7 +2498,7 @@ class Record:
         text = path.read_text()
         cited, date = CITED_COMMIT.search(text), DATE.search(text)
         _, _, tests = text.partition("## Tests")
-        rows = [(case_id, result.removesuffix(FIRMWARE_FACT)) for case_id, result in CASE_ROW.findall(tests)]
+        rows = [(case_id, result.removesuffix(OLD_FACT_MARK)) for case_id, result in CASE_ROW.findall(tests)]
         return cls(
             path,
             cited and cited[1],
@@ -2490,12 +2523,21 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
 
 
 def render_record(
-    suite_result: SuiteResult, title: str, ha_version: str, devices: list[Device], date: str, source: str
+    suite_result: SuiteResult,
+    title: str,
+    ha_version: str,
+    devices: list[Device],
+    date: str,
+    source: str,
+    facts: FactsFile | None = None,
 ) -> str:
-    """The test record: a key/value table, then the per-test table. deviceside reads its commit and Result."""
+    """The test record: a key/value table, then the per-test table, then a note on the opt-in cases quoting the latest
+    row `facts` (the integration's _facts.md) holds for each. deviceside reads its commit and Result."""
     suite = suite_result.suite
+    cells = [_result_cell(suite, case, details=False) for case in suite_result.cases]
     rows = [
         ("Result", "pass"),
+        ("Ran", f"{cells.count(Outcome.PASS)} passed, {cells.count(Outcome.SKIPPED)} skipped"),
         ("Date", date),
         ("Source", source),
         ("Home Assistant", ha_version),
@@ -2506,16 +2548,15 @@ def render_record(
     lines = [f"# {title} · {suite.name}", "", "| | |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     lines += ["", "## Tests", "", *table(suite_result)]
-    if any(case.outcome is Outcome.NOT_OBSERVED for case in suite_result.cases):
-        lines += ["", "Tests marked `not observed` had nobody watching."]
-    if any(case.outcome is Outcome.PASS and _firmware_fact(suite, case.id) for case in suite_result.cases):
-        lines += ["", "A firmware fact proves how the device behaves, not the adapter's code."]
-    if any(case.outcome is Outcome.SKIPPED and case.detail in OPTED_OUT.values() for case in suite_result.cases):
+    if chosen := [case.id for case in suite_result.cases if opt_in(suite, case.id)]:
         lines += [
             "",
-            f"Observed tests and firmware facts run only when asked ({OPT_IN[OBSERVED]}, {OPT_IN[FACTS]}); "
-            "a `skipped` one was not asked for in this run.",
+            f"Observed tests and firmware facts run only when asked ({OPT_IN[OBSERVED]}, {OPT_IN[FACTS]}), and their "
+            f"results go to [`{FACTS_FILE}`]({FACTS_FILE}), never here:",
+            "",
         ]
+        on_file = facts or FactsFile("")
+        lines += [f"- `{case_id}`: {on_file.latest(case_id) or 'none on file'}" for case_id in chosen]
     return "\n".join(lines) + "\n"
 
 
@@ -2565,7 +2606,9 @@ async def write_records(
             continue
         path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source))
+        facts = FactsFile.read(records(suite.integration) / FACTS_FILE, title)
+        record = render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts)
+        path.write_text(record)
         written.append(path)
     return written, kept
 
@@ -2578,15 +2621,25 @@ def observed_answer(case: CaseResult) -> bool:
     return case.outcome is Outcome.PASS or (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN))
 
 
-def write_observed_case(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
-    """Add what a person answered in one observed case to its integration's _observed.md in `records`, dated now: each
-    row is written once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None
-    for a case nobody answered, or whose devices couldn't be read."""
-    if not observed_answer(case) or not case.devices:
+def fact_kind(suite: Suite, case: CaseResult) -> str | None:
+    """The kind of fact the result is for _facts.md, or None: an observed case a person answered, or a firmware fact
+    that passed or failed."""
+    if case.id.endswith(" observed"):
+        return OBSERVED_KIND if observed_answer(case) else None
+    if _firmware_fact(suite, case.id) and case.outcome in (Outcome.PASS, Outcome.FAIL):
+        return FIRMWARE_FACT
+    return None
+
+
+def write_fact(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
+    """Append what one opt-in case found to its integration's _facts.md in `records`, dated now: each row is written
+    once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None for a result
+    that is no fact (fact_kind), or whose devices couldn't be read."""
+    if (kind := fact_kind(suite, case)) is None or not case.devices:
         return None
-    path = records(suite.integration) / OBSERVED_FILE
-    observed = ObservedFile.read(path, registry.integrations[suite.integration].title)
+    path = records(suite.integration) / FACTS_FILE
+    facts = FactsFile.read(path, registry.integrations[suite.integration].title)
     result = PASS if case.outcome is Outcome.PASS else FAIL
-    observed.add([Observation(date, case.id, "; ".join(map(str, case.devices)), result)])
-    observed.write(path)
+    facts.add([Fact(date, case.id, kind, "; ".join(map(str, case.devices)), result)])
+    facts.write(path)
     return path

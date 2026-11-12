@@ -40,9 +40,9 @@ options:
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
   --observed            also run the observed tests, which ask the person at the rig what they
-                        saw; a default run skips them
-  --facts               also run the firmware facts, which prove how a device behaves; a default
-                        run skips them: a pass stands
+                        saw, for _facts.md
+  --facts               also run the firmware facts, which prove how a device behaves; their
+                        results stand in _facts.md
   --unattended          ask no one: with --observed, the observed tests are reported not observed
   --serial              run every case one at a time, with no lanes: to tell a case that fails in
                         a lane from one that fails

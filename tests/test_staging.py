@@ -21,7 +21,7 @@ def now() -> str:
 def ledger(tmp_path: Path) -> Progress:
     """The `lab` ledger in tmp_path, holding one entry at KEY."""
     progress = Progress.load(tmp_path, "lab")
-    entry = {"integration": KEY[0], "suite": KEY[1], "commit": KEY[2], "cases": [], "touched": now()}
+    entry = {"integration": KEY[0], "suite": KEY[1], "at": KEY[2], "cases": [], "touched": now()}
     progress.entries[KEY] = entry
     progress.changed.add(KEY)
     progress.save()

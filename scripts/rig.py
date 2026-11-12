@@ -161,7 +161,7 @@ from ha_rig.engine import (  # noqa: E402
     report_path,
     run,
     unfinished,
-    write_observed_case,
+    write_fact,
     write_records,
     write_report,
 )
@@ -728,12 +728,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--observed",
         action="store_true",
-        help="also run the observed tests, which ask the person at the rig what they saw; a default run skips them",
+        help="also run the observed tests, which ask the person at the rig what they saw, for _facts.md",
     )
     parser.add_argument(
         "--facts",
         action="store_true",
-        help="also run the firmware facts, which prove how a device behaves; a default run skips them: a pass stands",
+        help="also run the firmware facts, which prove how a device behaves; their results stand in _facts.md",
     )
     parser.add_argument(
         "--unattended",
@@ -1249,6 +1249,11 @@ def run_approved(
     if deploying and not reloads(setup):  # HA is back, and nothing left restarts or reloads it under other runs
         held.share_ha()
     commit = tested_commit(env.get("RIG_STATUS_CMD", ""), deploy, deploying)
+    if commit is None and setup.progress is not None:
+        # The saved cases are keyed by the commit planned at, which isn't what HA runs: saving them would pass them
+        # off as that commit's.
+        print("HA loaded another tree than the one planned (origin moved), so this run saves no progress to resume.")
+        setup.progress = None
     return run_tests(
         run_rig(
             env,
@@ -2134,14 +2139,14 @@ def saving(progress: Progress | None) -> dict:
 
 
 def observing(registry: AdapterRegistry, progress: Progress | None) -> Callable[[Suite, CaseResult], None]:
-    """run's `on_result`: save the case in `progress`, and write what a person answered in an observed case into the
-    checkout's _observed.md, dated now. What a person saw is a fact (ha_rig/observed.py), so it is written as each
-    case ends, however the run does: with no commit, a failed run, or one cut short."""
+    """run's `on_result`: save the case in `progress`, and append what an opt-in case found to the checkout's
+    _facts.md, dated now. A fact stands whatever the code (ha_rig/facts.py), so it is written as each case ends,
+    however the run does: with no commit, a failed run, or one cut short."""
 
     def on_result(suite: Suite, case: CaseResult) -> None:
         if progress is not None:
             progress.record(suite, case)
-        if path := write_observed_case(suite, case, registry, checkout_records, datetime.date.today().isoformat()):
+        if path := write_fact(suite, case, registry, checkout_records, datetime.date.today().isoformat()):
             print(f"Wrote {display(path, REPO)}; review the diff before committing it.")
 
     return on_result

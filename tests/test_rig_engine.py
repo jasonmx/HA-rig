@@ -27,12 +27,14 @@ from ha_rig.engine import (
     rig_facts,
     run,
     table,
-    write_observed_case,
+    write_fact,
     write_records,
     write_report,
 )
+from ha_rig.facts import FAIL, PASS, Fact, FactsFile
+from ha_rig.facts import FIRMWARE_FACT as FIRMWARE_FACT_KIND
+from ha_rig.facts import OBSERVED as OBSERVED_KIND
 from ha_rig.journal import Journal
-from ha_rig.observed import FAIL, PASS, Observation, ObservedFile
 from ha_rig.profile import Profile, RigEntity
 from ha_rig.progress import Progress
 from tests.rig_fakes import (
@@ -403,17 +405,17 @@ async def test_unattended_reports_observed_cases_not_observed_and_records_the_au
     assert not [line for line in printed if line.startswith(("---", "You'll")) or "need" in line]
     assert result.suites[0].recordable  # the automated case proves itself; nobody watched the observed one
     record = render_record(result.suites[0], "Shelly", "2026.10.1", [], "2026-10-25", "test")
-    assert "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | not observed |" in record
+    assert "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | skipped |" in record  # a fact's
 
 
 @pytest.mark.parametrize(("answer", "outcome"), [("", Outcome.PASS), (" Y", Outcome.PASS), ("n", Outcome.FAIL)])
-async def test_observed_asks_and_a_no_fails_the_suite(tmp_path, answer, outcome):
+async def test_observed_asks_and_its_answer_never_holds_the_record_back(tmp_path, answer, outcome):
     asked, ask = answers("", answer)
     ha = FakeHA({"switch.plug": {}}, timer_on)
     result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=ask)
     assert asked[:2] == ["Press Enter to start... ", "    Did it click twice? [Y/n] "]
     assert outcomes(result)[WATCHED][0] is outcome
-    assert result.suites[0].recordable is (outcome is Outcome.PASS)
+    assert result.suites[0].recordable  # what the person saw is a fact for _facts.md, not the record's
 
 
 @pytest.mark.parametrize(("saw", "detail"), [("Red, then  blue ", "; saw: Red, then  blue"), ("", "")])
@@ -1353,6 +1355,7 @@ def planned_result(steps: Suite, inv: Profile) -> RunResult:
             Outcome.SKIPPED if case.skip else Outcome.PASS,
             case.skip or "",
             absent=case.absent,
+            inapplicable=case.inapplicable,
         )
         for case in cases(steps, inv)
     ]
@@ -2840,24 +2843,65 @@ tests:
 """
 
 
-def test_a_record_marks_its_firmware_facts(tmp_path):
+def test_a_record_lists_an_opt_in_case_as_skipped_whatever_it_did_and_quotes_its_latest_fact(tmp_path):
     facts = suite(tmp_path, FIRMWARE_FACT)
     cases = [
         CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS),
         CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS),
     ]
     devices = [engine.Device("Plug", "P1", "1.4.2")]
-    record = render_record(SuiteResult(facts, cases, True), "Shelly", "2026.10.1", devices, "2026-11-08", "t")
+    on_file = FactsFile("Shelly", [Fact("2026-11-12", "wins[switch_plug]", FIRMWARE_FACT_KIND, "Plug", FAIL)])
+    result = SuiteResult(facts, cases, True)
+    record = render_record(result, "Shelly", "2026.10.1", devices, "2026-11-12", "t", on_file)
+    assert "| Ran | 1 passed, 1 skipped |" in record
     assert "| `plain[switch_plug]` | `switch` (switch_plug) | pass |" in record
-    assert "| `wins[switch_plug]` | `switch` (switch_plug) | pass (firmware fact) |" in record
-    assert "A firmware fact proves how the device behaves, not the adapter's code." in record
-    (path := tmp_path / "record.md").write_text(record)
-    assert engine.Record.read(path).passed == {"plain[switch_plug]", "wins[switch_plug]"}  # a fact's pass still counts
+    assert (
+        "| `wins[switch_plug]` | `switch` (switch_plug) | skipped |" in record
+    )  # its pass is a fact, not the record's
+    assert "- `wins[switch_plug]`: last on file 2026-11-12: fail" in record
+    assert "[`_facts.md`](_facts.md)" in record
+    assert "- `wins[switch_plug]`: none on file" in render_record(result, "Shelly", "2026.10.1", devices, "d", "t")
     plain = render_record(SuiteResult(facts, cases[:1], True), "Shelly", "2026.10.1", devices, "d", "t")
-    assert "firmware fact" not in plain
+    assert "_facts.md" not in plain and "| Ran | 1 passed, 0 skipped |" in plain
 
 
-# --- Opt-in cases and _observed.md (ha_rig/observed.py) -----------------------------------------------------------
+def test_an_older_records_firmware_fact_mark_still_reads_as_a_pass(tmp_path):
+    (path := tmp_path / "record.md").write_text(
+        "## Tests\n\n| `wins[switch_plug]` | `switch` | pass (firmware fact) |\n"
+    )
+    assert engine.Record.read(path).passed == {"wins[switch_plug]"}
+
+
+def test_a_firmware_fact_test_cant_also_observe(tmp_path):
+    text = OBSERVED.replace("    observe:", "    firmware_fact: true\n    observe:")
+    with pytest.raises(engine.SchemaError, match="a firmware_fact test can't also observe"):
+        suite(tmp_path, text)
+
+
+@pytest.mark.parametrize(
+    ("cases_", "recordable"),
+    [
+        ([("a", Outcome.PASS, {})], True),
+        ([("a", Outcome.PASS, {}), ("b", Outcome.SKIPPED, {"inapplicable": True})], True),  # doesn't apply here
+        ([("a", Outcome.PASS, {}), ("b", Outcome.SKIPPED, {})], False),  # a default case that applies, skipped
+        ([("a", Outcome.PASS, {}), ("b", Outcome.FAIL, {})], False),
+        ([("b", Outcome.SKIPPED, {"inapplicable": True})], False),  # nothing passed
+        ([("a", Outcome.PASS, {}), ("wins", Outcome.FAIL, {})], True),  # a fact's result is _facts.md's
+        ([("a", Outcome.PASS, {}), ("a observed", Outcome.NOT_OBSERVED, {})], True),
+    ],
+)
+def test_a_record_needs_every_default_case_that_applies_to_pass(tmp_path, cases_, recordable):
+    steps = suite(tmp_path, FIRMWARE_FACT)
+    results = [
+        CaseResult(case_id if " " in case_id else f"{case_id}[switch_plug]", "switch_plug", "switch", outcome, **flags)
+        for case_id, outcome, flags in cases_
+    ]
+    for result in results:
+        result.id = result.id.replace("a observed", "a[switch_plug] observed")
+    assert SuiteResult(steps, results, True).recordable is recordable
+
+
+# --- Opt-in cases and _facts.md (ha_rig/facts.py) ----------------------------------------------------------------
 
 
 async def test_a_default_run_skips_observed_cases_and_firmware_facts_and_its_record_says_how_to_ask(tmp_path):
@@ -2878,6 +2922,8 @@ async def test_a_default_run_skips_observed_cases_and_firmware_facts_and_its_rec
     record = path.read_text()
     assert f"| `{WATCHED}` | switch_plug | skipped |" in record
     assert "run only when asked (--observed, --facts)" in record
+    assert f"- `{WATCHED}`: none on file" in record
+    assert not (tmp_path / "records" / "shelly" / "_facts.md").exists()  # a default run writes no fact
 
 
 @pytest.mark.parametrize(
@@ -2901,10 +2947,30 @@ async def test_an_answered_observed_case_adds_a_dated_row_with_its_devices(tmp_p
     steps = result.suites[0].suite
     [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
     assert watched.devices == (engine.Device("Mini", "S3", "2.0"),)
-    path = write_observed_case(steps, watched, REGISTRY, records, "2026-11-12")
-    assert ObservedFile.read(path, "").rows == [Observation("2026-11-12", WATCHED, "Mini (`S3`), firmware `2.0`", PASS)]
+    path = write_fact(steps, watched, REGISTRY, records, "2026-11-12")
+    assert FactsFile.read(path, "").rows == [
+        Fact("2026-11-12", WATCHED, OBSERVED_KIND, "Mini (`S3`), firmware `2.0`", PASS)
+    ]
     [automated] = [case for case in result.suites[0].cases if case.id == AUTOMATED]
-    assert write_observed_case(steps, automated, REGISTRY, records, "2026-11-12") is None  # nobody watched it
+    assert write_fact(steps, automated, REGISTRY, records, "2026-11-12") is None  # a default case is no fact
+
+
+@pytest.mark.parametrize("outcome", [Outcome.PASS, Outcome.FAIL])
+async def test_a_firmware_fact_that_passed_or_failed_adds_a_row_naming_its_devices(tmp_path, outcome):
+    text = FIRMWARE_FACT.replace(
+        "    firmware_fact: true\n    steps:\n      - wait: 0",
+        "    firmware_fact: true\n    steps:\n"
+        + ("      - wait: 0" if outcome is Outcome.PASS else "      - expect_state: {state: on}"),
+    )
+    ha = FakeHA({"switch.plug": {"state": "off"}}, timer_on)
+    result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug"))
+    [fact] = [case for case in result.suites[0].cases if case.id == "wins[switch_plug]"]
+    assert fact.outcome is outcome
+    path = write_fact(result.suites[0].suite, fact, REGISTRY, under(tmp_path), "2026-11-12")
+    assert FactsFile.read(path, "").rows == [
+        Fact("2026-11-12", "wins[switch_plug]", FIRMWARE_FACT_KIND, "Mini (`S3`), firmware `2.0`", str(outcome))
+    ]
+    assert result.suites[0].recordable  # the fact's result is no part of the record
 
 
 async def test_an_observed_case_nobody_answered_adds_no_row(tmp_path):
@@ -2912,7 +2978,7 @@ async def test_an_observed_case_nobody_answered_adds_no_row(tmp_path):
     result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=None)
     [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
     assert watched.outcome is Outcome.NOT_OBSERVED and watched.devices == ()
-    assert write_observed_case(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12") is None
+    assert write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12") is None
 
 
 async def test_a_seen_failure_adds_a_fail_row(tmp_path):
@@ -2921,8 +2987,8 @@ async def test_a_seen_failure_adds_a_fail_row(tmp_path):
         ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=answers("", "n", "")[1]
     )
     [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
-    path = write_observed_case(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12")
-    assert [row.result for row in ObservedFile.read(path, "").rows] == [FAIL]
+    path = write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12")
+    assert [row.result for row in FactsFile.read(path, "").rows] == [FAIL]
 
 
 def test_a_record_has_no_covers_row(tmp_path):

@@ -8,7 +8,7 @@ what needs testing.
 
 Intent: drop the rig's dependence on deviceside's `deviceside_wire` and `deviceside_scope` events (removed in step 2),
 and every rule the rig kept about what is proven or stale.
-Touches: ha_rig/{client,coverage,engine,observed,progress,runlogs,staging,target}.py, scripts/rig.py, README.md,
+Touches: ha_rig/{client,coverage,engine,observed→facts,progress,runlogs,staging,target}.py, scripts/rig.py, README.md,
 docs/rig.md, pyproject.toml, tests/**
 Tests-with: the deviceside PR for step 2 (runtime), which removes the events.
 
@@ -19,11 +19,13 @@ Tests-with: the deviceside PR for step 2 (runtime), which removes the events.
 2. **Coverage.** `ha_rig/coverage.py` goes: fingerprints, fresh records, observed hints, `check_release.adapter_code`
    and `--coverage`. A run runs the suites it is asked for; a record never leaves one out. `target.test_records_dir`
    reads deviceside's layout directly, so the rig no longer loads `check_release.py`.
-3. **The ledger** (`progress.py`) only resumes an interrupted run: entries keyed by commit and suite, no firmware-fact
-   ledger, no traces or scopes.
+3. **The ledger** (`progress.py`) only resumes an interrupted run: entries keyed by suite, commit and step-file digest
+   (the digest goes once the step files move into deviceside), no firmware-fact ledger, no traces or scopes.
 4. **Opt-in cases.** `--observed` and `--facts` add observed cases and `firmware_fact` tests; a default run skips each
-   with how to ask for it. `_observed.md` holds dated pass and fail rows, with no hashing, lending or blocking.
-5. **Z2M BUSY** windows come from the rig's own call-step times, on the admin connection's Z2M log feed.
+   with how to ask for it. Their results go to an append-only `_facts.md` per integration (owner, 2026-11-12), never
+   into a record, which lists them as skipped and quotes the latest row on file. No hashing, lending or blocking.
+5. **Records** need every default case that applies to pass (owner, 2026-11-12), with a `Ran` row.
+6. **Z2M BUSY** windows come from the rig's own call-step times, on the admin connection's Z2M log feed.
 
 ## Later
 

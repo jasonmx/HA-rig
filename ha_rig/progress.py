@@ -2,10 +2,10 @@
 
 A run saves each case the moment it finishes, and the facts each part of a suite took (HA's version, the devices behind
 its entities), in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir: one file per profile, shared
-by every worktree. Its entries are per suite, keyed by the commit the run planned at, so a rerun at the same commit
-resumes and one at another starts the suite afresh. A later run joins a suite's saved results to its own, so a suite
-finished across runs writes its record. It is execution state only: what a suite needs to prove, and when, is
-deviceside's to say.
+by every worktree. Its entries are per suite, keyed by the commit the run planned at and its step file's digest
+(run_key), so a rerun at the same commit of the same step file resumes, and any other starts the suite afresh. A
+later run joins a suite's saved results to its own, so a suite finished across runs writes its record. It is
+execution state only: what a suite needs to prove, and when, is deviceside's to say.
 
 An entry goes when:
 - HA runs another version than its cases ran on: a record names one;
@@ -21,6 +21,7 @@ it was. It holds household entity IDs, so it stays out of the repo, like the jou
 import contextlib
 import datetime
 import fcntl
+import hashlib
 import json
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
@@ -33,7 +34,7 @@ DIRECTORY = "deviceside-rig-progress"
 PRUNE_DAYS = 30
 
 Done = dict[tuple[str, str, str], CaseResult]  # (integration, suite name, case id): its result
-EntryKey = tuple[str, str, str]  # (integration, suite name, commit)
+EntryKey = tuple[str, str, str]  # (integration, suite name, run_key)
 
 
 def path_for(directory: Path, profile: str) -> Path:
@@ -44,15 +45,22 @@ def _now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def run_key(commit: str, suite: Suite) -> str:
+    """What a suite's saved cases were run at: the commit planned at, and its step file's digest, since the step files
+    live here, outside that commit. The digest can go once the step files move into deviceside (evidence-rules plan,
+    step 3b): the commit then covers them."""
+    return f"{commit}:{hashlib.sha256(suite.file.path.read_bytes()).hexdigest()[:12]}"
+
+
 def _key(entry: dict) -> EntryKey:
-    return entry["integration"], entry["suite"], entry["commit"]
+    return entry["integration"], entry["suite"], entry["at"]
 
 
 def _read(path: Path) -> dict[EntryKey, dict]:
-    """The file's entries; an entry from before entries were keyed by commit is left out, so its suite reruns."""
+    """The file's entries; one from before entries were keyed by run_key is left out, so its suite reruns."""
     try:
         saved = json.loads(path.read_text()) if path.exists() else {}
-        return {_key(entry): entry for entry in saved.get("suites", []) if "commit" in entry}
+        return {_key(entry): entry for entry in saved.get("suites", []) if "at" in entry}
     except ValueError, KeyError, TypeError, AttributeError:
         return {}
 
@@ -76,13 +84,13 @@ def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
 
 
 class Progress:
-    """The profile's ledger, as this run sees it: every entry on disk, and the suites the run `track`s, each at the
-    commit it planned at. Its changes are merged into the file on each save."""
+    """The profile's ledger, as this run sees it: every entry on disk, and the suites the run `track`s, each at its
+    run_key. Its changes are merged into the file on each save."""
 
     def __init__(self, path: Path, entries: dict[EntryKey, dict] | None = None):
         self.path = path
         self.entries: dict[EntryKey, dict] = dict(entries or {})
-        self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): the commit planned at
+        self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): its run_key
         self.ha_version: str | None = None
         self.changed: set[EntryKey] = set()
         self.dropped: set[EntryKey] = set()
@@ -99,16 +107,16 @@ class Progress:
             progress._drop(key)
         return progress
 
-    def track(self, suite: Suite, commit: str) -> None:
-        """Follow `suite` at `commit`: its saved cases there are the run's, and its new ones are saved there."""
-        self.tracked[suite.integration, suite.name] = commit
+    def track(self, suite: Suite, at: str) -> None:
+        """Follow `suite` at `at` (run_key): its saved cases there are the run's, and its new ones are saved there."""
+        self.tracked[suite.integration, suite.name] = at
 
     def resume(
         self, suite: Suite, commit: str, planned: Iterable[Case], *, fresh: bool = False, unattended: bool = False
     ) -> None:
-        """Track `suite` at `commit`, keeping the saved results that still hold for the cases it `planned`. `fresh`
-        (--fresh), or a saved failure, drops the suite's entry, so it runs whole."""
-        self.track(suite, commit)
+        """Track `suite` at `commit` (its run_key), keeping the saved results that still hold for the cases it
+        `planned`. `fresh` (--fresh), or a saved failure, drops the suite's entry, so it runs whole."""
+        self.track(suite, run_key(commit, suite))
         saved = self.saved(suite)
         if fresh or any(result.outcome is Outcome.FAIL for result in saved.values()):
             self.drop(suite)
@@ -124,19 +132,19 @@ class Progress:
         )
 
     def key(self, suite: Suite) -> EntryKey | None:
-        if (commit := self.tracked.get((suite.integration, suite.name))) is None:
+        if (at := self.tracked.get((suite.integration, suite.name))) is None:
             return None
-        return suite.integration, suite.name, commit
+        return suite.integration, suite.name, at
 
     def entry(self, suite: Suite) -> dict | None:
-        """The tracked suite's entry at its commit, if it has one."""
+        """The tracked suite's entry at its run_key, if it has one."""
         return self.entries.get(self.key(suite) or ("", "", ""))
 
     def __bool__(self) -> bool:
         return bool(self.done())
 
     def tracked_keys(self) -> list[EntryKey]:
-        return [(integration, name, commit) for (integration, name), commit in self.tracked.items()]
+        return [(integration, name, at) for (integration, name), at in self.tracked.items()]
 
     def check_ha(self, version: str, out: Callable[[str], None] = print) -> None:
         """Drop each entry whose cases ran on another HA version than `version`, or on one never noted (a run killed
@@ -157,7 +165,7 @@ class Progress:
             {
                 "integration": key[0],
                 "suite": key[1],
-                "commit": key[2],
+                "at": key[2],
                 "ha_version": self.ha_version,
                 "devices": [],
                 "cases": [],
@@ -222,7 +230,7 @@ class Progress:
         return parts
 
     def drop(self, suite: Suite) -> None:
-        """Drop the suite's entry at its commit (--fresh, or its record written), until the next save."""
+        """Drop the suite's entry at its run_key (--fresh, or its record written), until the next save."""
         if (key := self.key(suite)) is not None:
             self._drop(key)
 
@@ -274,7 +282,7 @@ class Progress:
 
 def _saved(result: CaseResult) -> dict:
     case = asdict(result) | {"outcome": str(result.outcome), "entity_ids": list(result.entity_ids)}
-    for transient in ("unreachable", "devices"):  # never saved; an observed case's devices go to _observed.md
+    for transient in ("unreachable", "devices"):  # never saved; a fact's devices go to _facts.md
         case.pop(transient)
     return case
 
@@ -289,4 +297,5 @@ def _result(case: dict) -> CaseResult:
         tuple(case["entity_ids"]),
         case["twin"],
         absent=case.get("absent", False),
+        inapplicable=case.get("inapplicable", case.get("absent", False)),
     )

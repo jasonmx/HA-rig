@@ -15,10 +15,11 @@ from pathlib import Path
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
-from ha_rig import baseline, engine, observed, target
+from ha_rig import baseline, engine, facts, target
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
+from ha_rig.progress import run_key
 from tests import rig_fakes as fakes
 from tests.rig_fakes import records_at, write
 
@@ -1386,6 +1387,46 @@ def test_a_record_in_the_checkout_never_leaves_a_suite_out(tmp_path, monkeypatch
     assert planned(tmp_path, monkeypatch, suites, profile).suites == suites
 
 
+def test_an_edited_step_file_starts_its_suite_afresh(tmp_path, monkeypatch):
+    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
+    assert setup.done
+    profile, suites = resumable(tmp_path)
+    (tmp_path / "steps.yaml").write_text(TWO_SUITES + "# edited\n")  # the run key reads it at the plan
+    assert not planned(tmp_path, monkeypatch, suites, profile).done
+
+
+def test_a_head_that_moved_while_the_run_waited_stops_it(tmp_path, monkeypatch):
+    profile, suites = resumable(tmp_path)
+    setup = planned(tmp_path, monkeypatch, suites, profile)
+    closed = []
+    held = types.SimpleNamespace(claim=types.SimpleNamespace(covers=lambda claim: True), close=lambda: closed.append(1))
+    monkeypatch.setattr(rig.locks, "hold", lambda claim, holder, directory: held)
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt/x")
+    monkeypatch.setattr(rig, "deploy_state", lambda cmd: rig.Deploy("c2", "tree1", "tree1", "tree1", "wt/x"))
+    with pytest.raises(SystemExit, match="HEAD moved while this run waited"):
+        rig.take(types.SimpleNamespace(no_deploy=False, roam_check=False), setup, tmp_path)
+    assert closed == [1]
+
+
+def test_a_run_saves_no_progress_when_ha_loaded_another_tree(tmp_path, monkeypatch, capsys):
+    profile, suites = resumable(tmp_path)
+    setup = planned(tmp_path, monkeypatch, suites, profile)
+    seen = {}
+
+    def run_rig(*args, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda cmd, deploy, deploying: None)
+    monkeypatch.setattr(rig, "run_rig", run_rig)
+    monkeypatch.setattr(rig, "run_tests", lambda coro, aborted=None: seen.update(aborted=aborted) or 0)
+    held = types.SimpleNamespace(share_ha=lambda: None, claim=None)
+    args = types.SimpleNamespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, held, None, True, False) == 0
+    assert seen["progress"] is None and seen["aborted"] is None and seen["pending"] == set()
+    assert "saves no progress" in capsys.readouterr().out
+
+
 def test_another_commit_starts_the_suites_afresh(tmp_path, monkeypatch):
     setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
     assert setup.done
@@ -1630,7 +1671,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     assert session(frozenset({"light.b"})) == (0, ["light.a"])
     assert written == [[]]  # partial: light.b's case skipped as unreachable
     saved = rig.Progress.load(tmp_path, "house")
-    saved.track(suites[0], "c1")
+    saved.track(suites[0], run_key("c1", suites[0]))
     assert set(saved.done()) == {("shelly", "raise_brightness", "t[light_ct]")}  # the skip isn't saved
 
     ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 90}}
@@ -1865,7 +1906,7 @@ def watched(passed: bool) -> engine.CaseResult:
 
 
 def observed_rows(records) -> list[tuple[str, str]]:
-    return [(row.date, row.result) for row in observed.ObservedFile.read(records("shelly") / "_observed.md", "").rows]
+    return [(row.date, row.result) for row in facts.FactsFile.read(records("shelly") / "_facts.md", "").rows]
 
 
 def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_then(tmp_path, monkeypatch, capsys):
@@ -1873,13 +1914,13 @@ def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_th
     today = rig.datetime.date.today().isoformat()
     on_result(suite, watched(False))  # no report, no commit, a run that dies here: the row is there
     assert observed_rows(records) == [(today, "fail")]
-    assert "_observed.md" in capsys.readouterr().out
+    assert "_facts.md" in capsys.readouterr().out
 
 
 def test_a_report_leaves_a_rows_date_alone(tmp_path, monkeypatch):
     on_result, suite, records = observing_run(tmp_path, monkeypatch)
     on_result(suite, watched(True))
-    path = records("shelly") / "_observed.md"
+    path = records("shelly") / "_facts.md"
     path.write_text(path.read_text().replace(rig.datetime.date.today().isoformat(), "2026-01-01"))
     result = engine.RunResult([engine.SuiteResult(suite, [watched(True)], True)])
     asyncio.run(rig.report(result, fakes.OPTION_REGISTRY, None, resumable(tmp_path)[0], None))
