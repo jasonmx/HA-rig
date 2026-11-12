@@ -16,9 +16,9 @@ suite with DeviceSide options, which restart or reload DeviceSide under every ot
 locks. Each run deploys and restarts HA onto its own checkout's tree when HA hasn't loaded it, so a run queued behind
 another tests its own code; it reads the deploy state again once it holds its locks, and takes HA exclusively if it must
 deploy after all. Once its deploy is done and HA is back, a run with no option suites steps HA down to shared. Ctrl-C
-mid-deploy waits for the deploy and HA's restart to finish before releasing the locks. The tests are the step files in
-ha_rig/steps, run by ha_rig/engine.py; a full pass of an adapter stages its test record next to the run's report,
-and only a run that ends cleanly, with a result for every case it planned, writes it to the checkout
+mid-deploy waits for the deploy and HA's restart to finish before releasing the locks. The tests are the checkout's
+step files (tests/rig/steps there), run by ha_rig/engine.py; a full pass of an adapter stages its test record next to
+the run's report, and only a run that ends cleanly, with a result for every case it planned, writes it to the checkout
 (ha_rig/staging.py). Any other end prints the one --promote command that does.
 
 Ctrl-C, SIGTERM and SIGHUP stop a run, putting the devices back; a second one leaves them. What a run changes is
@@ -126,7 +126,7 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo, test_records_dir  # noqa: E402
+from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo, steps_dir, test_records_dir  # noqa: E402
 
 REPO = deviceside_repo()  # the deviceside checkout under test, whose code a run deploys and records
 sys.path.append(str(REPO))
@@ -1472,7 +1472,7 @@ def run_suites(args: argparse.Namespace, profile: Profile, registry: AdapterRegi
         if not profile.roam:
             raise SystemExit(f"--roam-check needs a profile with roam:, and {profile.name} has none")
         return []
-    step_files = load_step_files()
+    step_files = load_step_files(steps_dir(REPO))
     check_options(step_files, registry)
     # No adapter stays, so the dry-run still says `no adapter, will skip`; an option file the adapter lacks goes.
     suites = [

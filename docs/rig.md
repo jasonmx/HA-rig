@@ -1,8 +1,8 @@
 # The rig
 
 The rig runs DeviceSide's actions against a live Home Assistant and its real devices, and writes the test records
-that sign off an integration's changes (deviceside's `docs/evidence.md`). Its tests are YAML step files in
-`ha_rig/steps/`, one per action.
+that sign off an integration's changes (deviceside's `docs/evidence.md`). Its tests are deviceside's YAML step files,
+in `tests/rig/steps/` of the checkout under test, one per action: deviceside owns the test plan, the rig runs it.
 `scripts/rig.py` runs each file against every integration in the profile that has an adapter for the action, after
 an authorization gate (below): the devices change state, so nothing moves until the work is authorized and, at a
 terminal, you say yes. `--dry-run` prints the plan and the decision, and stops.
@@ -173,9 +173,9 @@ bulb's timer that can't be stopped through its bridge, say) is no rig test: it l
 parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). It is
 there only to resume a run: its entries are per suite, keyed by the commit (HEAD when the run plans) and the step file's
 digest, so a rerun at the same commit of the same step file picks up where the last one stopped, and any other starts
-the suite afresh. (The digest goes once the step files move into deviceside, whose commit then covers them.) A saved
-case holds while it planned the same entities (a profile change reruns it), and a `not observed` one only for an
-`--unattended` run. An entry goes when HA runs another version (a record names one), when its suite's record is promoted
+the suite afresh. (The commit covers a committed step file; the digest catches one edited and not yet committed, which
+doesn't block a run.) A saved case holds while it planned the same entities (a profile change reruns it), and a `not
+observed` one only for an `--unattended` run. An entry goes when HA runs another version (a record names one), when its suite's record is promoted
 into the checkout (Test records, below), when the run that saved a failure of one of its default cases ends (the suite
 reruns whole, so a record never covers up a failure; the run's report keeps it; a fact case's failure is a fact, and
 drops nothing), or after 30 days untouched. `--fresh` drops the selected suites' saved cases. `--no-deploy` saves
@@ -196,6 +196,10 @@ saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next
   record, dated the finishing session and citing its commit.
 
 ## Writing a step file
+
+A step file lives in deviceside, `tests/rig/steps/<action>.yaml`, and lands in the deviceside PR that adds or changes
+the action it tests. It names roles, never entities: deviceside is public, and its household check covers the file.
+The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`).
 
 ```yaml
 action: turn_on_for        # the DeviceSide action every test in the file calls
