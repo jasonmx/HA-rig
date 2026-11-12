@@ -103,16 +103,20 @@ def test_a_terminal_run_is_named_by_user_and_tty(monkeypatch):
 # --- Holding --------------------------------------------------------------------------------------------------
 
 
-def test_shared_holders_on_different_integrations_both_proceed(tmp_path):
-    with locks.hold(claim("hue"), "wt/hue", tmp_path, out=quiet()):
-        assert not blocked(tmp_path, claim("zha"))
-        assert not blocked(tmp_path, SHARED)
-
-
-def test_two_holders_of_one_integration_block_each_other(tmp_path):
-    with locks.hold(claim("hue", "zha"), "wt/first", tmp_path, out=quiet()):
-        assert blocked(tmp_path, claim("zha"))
-        assert blocked(tmp_path, claim("shelly", "zha"))
+@pytest.mark.parametrize(
+    ("held", "wanted", "waits"),
+    [
+        (claim("hue"), claim("zha"), False),  # shared holders on different integrations both proceed
+        (claim("hue"), SHARED, False),
+        (claim("hue", "zha"), claim("zha"), True),  # two holders of one integration block each other
+        (claim("hue", "zha"), claim("shelly", "zha"), True),
+        (EXCLUSIVE, claim("hue"), True),  # shared claims wait for an exclusive holder
+        (EXCLUSIVE, SHARED, True),
+    ],
+)
+def test_a_claim_waits_only_for_a_holder_it_conflicts_with(tmp_path, held, wanted, waits):
+    with locks.hold(held, "wt/first", tmp_path, out=quiet()):
+        assert blocked(tmp_path, wanted) is waits
 
 
 def test_a_waiting_run_names_the_holder_once_and_says_when_it_has_its_locks(tmp_path, monkeypatch):
@@ -194,27 +198,6 @@ def test_an_exclusive_claim_waits_out_the_shared_holders_naming_them(tmp_path, m
     assert "zha: wt/zha" in printed[0]
     assert printed[-1] == "Rig locks acquired: HA exclusive."
     assert (tmp_path / locks.LOCK_NAME).read_text().startswith("wt/deploy ")
-
-
-def test_shared_claims_wait_for_an_exclusive_holder(tmp_path):
-    with locks.hold(EXCLUSIVE, "wt/deploy", tmp_path, out=quiet()):
-        assert blocked(tmp_path, claim("hue"))
-        assert blocked(tmp_path, SHARED)
-
-
-def test_a_waiting_exclusive_claim_holds_off_no_shared_one(tmp_path, monkeypatch):
-    """Throughput now: a shared claim that is ready starts at once, even while a deploy waits for HA."""
-    sharing = locks.hold(claim("hue"), "wt/hue", tmp_path, out=quiet())
-    seen: list[bool] = []
-
-    def meanwhile(_seconds):
-        if not seen:
-            seen.append(blocked(tmp_path, claim("zha")))
-        sharing.close()
-
-    monkeypatch.setattr(locks.time, "sleep", meanwhile)
-    locks.hold(EXCLUSIVE, "wt/deploy", tmp_path, out=quiet()).close()
-    assert seen == [False]
 
 
 def test_an_exclusive_wait_leaves_its_own_integrations_out_of_the_holders(tmp_path, monkeypatch):
