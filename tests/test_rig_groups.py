@@ -375,36 +375,29 @@ def skips(tmp_path, offline: set[str], members=("light.a", "light.b"), made: boo
     return {case.role: (case.skip, case.unreachable) for case in cases(Suite(load_step_file(path), "hue"), profile)}
 
 
-def test_nothing_offline_skips_nothing(tmp_path):
-    assert skips(tmp_path, set(), members=()) == {
-        "group": (None, False),
-        "scene": (None, False),
-        "light_ct": (None, False),
-    }
+RUNS, LISTED, SUPPLY_DOWN = (None, False), ("light.a", "light.b"), ("switch.supply unreachable", True)
 
 
-def test_with_listed_members_all_online_a_group_runs_and_fixed_scenes_skip(tmp_path):
-    assert skips(tmp_path, {"light.elsewhere"}) == {
-        "group": (None, False),
-        "scene": ("scene: contents unknown", True),
-        "light_ct": (None, False),
-    }
-
-
-def test_a_member_offline_skips_its_group(tmp_path):
-    assert skips(tmp_path, {"light.b"})["group"] == ("light.b unreachable", True)
-
-
-def test_a_group_whose_members_arent_listed_skips_while_anything_is_offline(tmp_path):
-    assert skips(tmp_path, {"light.elsewhere"}, members=())["group"] == ("group: members not listed", True)
-
-
-def test_a_supply_offline_skips_what_it_powers(tmp_path):
-    found = skips(tmp_path, {"switch.supply"})
-    assert found["light_ct"] == found["group"] == ("switch.supply unreachable", True)  # it powers a member
-
-
-def test_rig_made_groups_and_scenes_stay_in_scope(tmp_path):
-    found = skips(tmp_path, {"light.elsewhere"}, members=GROUP.members, made=True)
-    assert found["group"] == (None, False)
-    assert found["scene"] == (None, False)
+@pytest.mark.parametrize(
+    ("offline", "members", "made", "expected"),
+    [
+        pytest.param(set(), (), False, {"group": RUNS, "scene": RUNS, "light_ct": RUNS}, id="nothing offline"),
+        pytest.param(
+            {"light.elsewhere"},
+            LISTED,
+            False,
+            {"group": RUNS, "scene": ("scene: contents unknown", True), "light_ct": RUNS},
+            id="listed members online: the group runs, fixed scenes skip",
+        ),
+        pytest.param({"light.b"}, LISTED, False, {"group": ("light.b unreachable", True)}, id="a member offline"),
+        pytest.param(
+            {"light.elsewhere"}, (), False, {"group": ("group: members not listed", True)}, id="members not listed"
+        ),
+        # The supply powers light_ct, a member of the group.
+        pytest.param({"switch.supply"}, LISTED, False, {"light_ct": SUPPLY_DOWN, "group": SUPPLY_DOWN}, id="supply"),
+        pytest.param({"light.elsewhere"}, GROUP.members, True, {"group": RUNS, "scene": RUNS}, id="rig-made: in scope"),
+    ],
+)
+def test_what_is_offline_skips(tmp_path, offline, members, made, expected):
+    found = skips(tmp_path, offline, members=members, made=made)
+    assert {role: found[role] for role in expected} == expected

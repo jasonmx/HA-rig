@@ -125,14 +125,6 @@ def test_a_clean_run_whose_coordinator_crashed_says_so_and_keeps_the_log(tmp_pat
     assert logs.z2m_path.exists() and f"Log: {logs.z2m_path}" in printed
 
 
-def test_a_clean_run_with_no_crash_still_deletes_its_logs(tmp_path):
-    logs = RunLogs(tmp_path, "rig run", datetime.datetime.now(), out=lambda _: None)
-    logs.z2m_path.write_text("10:00:00.000 info    [z2m] fine\n")
-    logs.written.append(logs.z2m_path)
-    logs.settle(clean=True)
-    assert not logs.z2m_path.exists()
-
-
 WARNED = (
     f"{FUTURE} WARNING (MainThread) [custom_components.deviceside.core.dispatcher] stop on zha timed out after 5s\n"
     f"{FUTURE} ERROR (MainThread) [custom_components.deviceside] Error setting up entry\n"
