@@ -63,7 +63,7 @@ async def vanishing(request: web.Request, end: str) -> web.WebSocketResponse:
     await ws.receive_json()
     if end == "garbage":
         await ws.send_str("not json")
-        await asyncio.sleep(1)
+        await ws.receive()  # until the client, failing on the frame, closes
     await ws.close()
     return ws
 
