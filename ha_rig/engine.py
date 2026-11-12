@@ -251,6 +251,12 @@ class StepFile:
     name: str | None = None
     # The integrations whose own step files (tests/integrations/<x>/rig/) added tests to it, each only on its own.
     owned_by: frozenset[str] = frozenset()
+    # Those files' expected_log, by integration: they apply only to a suite on it (expected_on).
+    owned_log: tuple[tuple[str, re.Pattern[str]], ...] = ()
+
+    def expected_on(self, integration: str) -> tuple[re.Pattern[str], ...]:
+        """The patterns its suite on `integration` expects: the shared ones, and that integration's own."""
+        return self.expected_log + tuple(pattern for owner, pattern in self.owned_log if owner == integration)
 
     @property
     def roles(self) -> tuple[str, ...]:
@@ -658,12 +664,14 @@ def owned_step_file(step_file: StepFile, integration: str) -> StepFile:
         if others := sorted(named - mine):
             raise SchemaError(f"{where}: {test.name} names {', '.join(others)}, but the file is {integration}'s own")
         tests.append(replace(test, only=mine))
-    return replace(step_file, tests=tuple(tests), owned_by=mine)
+    owned_log = tuple((integration, pattern) for pattern in step_file.expected_log)
+    return replace(step_file, tests=tuple(tests), owned_by=mine, expected_log=(), owned_log=owned_log)
 
 
 def merge_owned(shared: list[StepFile], owned: list[StepFile]) -> list[StepFile]:
     """The shared files with each integration's own merged into the plain file for its action (no options, no record
-    name): its tests join that suite, its record and its duration estimate. One with no shared file stands alone.
+    name): its tests join that suite, its record and its duration estimate, and its expected_log that suite's on its
+    integration alone. One with no shared file stands alone.
     Raises SchemaError for a test name the action's file already has."""
     files = list(shared)
     for own in owned:
@@ -679,7 +687,7 @@ def merge_owned(shared: list[StepFile], owned: list[StepFile]) -> list[StepFile]
             base,
             tests=base.tests + own.tests,
             rig_seconds=base.rig_seconds + own.rig_seconds,
-            expected_log=base.expected_log + own.expected_log,
+            owned_log=base.owned_log + own.owned_log,
             owned_by=base.owned_by | own.owned_by,
         )
     return files

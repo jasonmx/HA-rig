@@ -180,6 +180,32 @@ async def test_a_warning_a_step_file_expects_is_counted_and_fails_nothing(tmp_pa
     assert logs(tmp_path) == {}
 
 
+def own_expects(tmp_path: Path, owner: str) -> engine.StepFile:
+    """RESTORED_MIDWAY, shared, merged with `owner`'s own file, whose expected_log forgives the zha timeout."""
+    (shared := tmp_path / "shared").mkdir()
+    (shared / "raise_brightness.yaml").write_text(fakes.RESTORED_MIDWAY)
+    (own := tmp_path / owner / "rig").mkdir(parents=True)
+    own_file = fakes.RESTORED_MIDWAY.replace("name: t", "name: own").replace(
+        "rig_seconds: 5", "rig_seconds: 5\nexpected_log: ['stop on zha timed out']"
+    )
+    (own / "raise_brightness.yaml").write_text(own_file)
+    return engine.load_step_files(shared, {owner: own})[0]
+
+
+@pytest.mark.parametrize(("owner", "code"), [("zigbee2mqtt", 0), ("hue", 1)])
+async def test_an_integrations_own_expected_log_forgives_its_suites_warning_alone(
+    tmp_path, monkeypatch, ha, capsys, owner, code
+):
+    """On another integration the same warning is unexpected, and fails the run."""
+    phases(monkeypatch, ha)
+    ha.ha_log = WARNED.splitlines(keepends=True)[0]
+    suites = [rig.Suite(own_expects(tmp_path, owner), "zigbee2mqtt")]
+    profile = fakes.profile("zigbee2mqtt")
+    assert await rig.run_rig({"HA_ADMIN_TOKEN": "a"}, suites, profile, None, None, True, None) == code
+    unexpected = "HA's log has 1 DeviceSide warning or error no step file expects:"
+    assert (unexpected in capsys.readouterr().out) is (code == 1)
+
+
 def test_a_log_with_nothing_from_the_start_on_has_no_run_lines():
     assert since("2000-01-01 00:00:00.000 INFO old\n", datetime.datetime.now()) is None
 
