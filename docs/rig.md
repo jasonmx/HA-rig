@@ -158,8 +158,11 @@ A run runs the suites it is asked for: every one the profile has an adapter for,
 `--action` and `-k`. What needs testing is deviceside's to say, not the rig's: the rig keeps no record of what is
 proven or stale, and a test record in the checkout never leaves a suite out.
 
-TODO: deviceside's `check_release.py --signoffs` (evidence-rules plan, step 4) is to list the integrations that need a
-sign-off in a machine-readable form; a later rig change takes that list as its selection.
+**`--signoffs`** runs what deviceside says needs a sign-off: the integrations its `scripts/check_release.py --signoffs
+--json` lists, run in the checkout with the interpreter the rig imports it with, in place of `--integration`. Those the
+profile has no entities for are named as needing a manual sign-off (`_manual.md`), and the run goes on with the rest;
+when the list is empty, or the profile has none of it, the run says so and exits 0 before touching HA. A check that
+fails (any exit but 0 or 1) or prints no JSON list stops the run, before anything moves.
 
 **Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`), or any case of a
 `firmware_fact: true` test, its watched one included (Writing a step file, below). It finds a fact, which stands once
