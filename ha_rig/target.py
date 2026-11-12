@@ -100,14 +100,15 @@ def committed_step_sources(repo: Path, commit: str) -> dict[str, bytes]:
     return sources
 
 
-def signoffs_needed(repo: Path, python: str = sys.executable) -> list[str]:
-    """The integrations `repo`'s release check lists as still needing a sign-off (SIGNOFFS), run with `python`, the
-    interpreter the rig already imports the checkout's code with. The check exits 1 when the list has any and 0 when
-    it is empty, so both are an answer; any other exit, or output that is no JSON list of names, raises SystemExit
-    with what the check said."""
+def signoffs_needed(repo: Path) -> list[str]:
+    """The integrations `repo`'s release check lists as still needing a sign-off (SIGNOFFS), run with the interpreter
+    the rig already imports the checkout's code with. Exit 0 and 1 both carry the list: the exit code says whether the
+    release gate fails, not whether the list is empty, so 0 can list some (an Untested fix caveat passes the gate) and
+    1 with nothing listed means an error that is no missing sign-off, which raises SystemExit quoting the check's
+    stderr. Any other exit, or output that is no JSON list of names, raises SystemExit with what the check said."""
     command = " ".join(SIGNOFFS)
     try:
-        done = subprocess.run([python, *SIGNOFFS], cwd=repo, capture_output=True, text=True)
+        done = subprocess.run([sys.executable, *SIGNOFFS], cwd=repo, capture_output=True, text=True)
     except OSError as err:
         raise SystemExit(f"Could not run deviceside's {command}: {err}") from err
     said = (done.stderr.strip() or done.stdout.strip() or "no output").splitlines()[-1]
@@ -119,6 +120,8 @@ def signoffs_needed(repo: Path, python: str = sys.executable) -> list[str]:
         listed = None
     if not isinstance(listed, list) or not all(isinstance(name, str) for name in listed):
         raise SystemExit(f"deviceside's {command} printed no JSON list of integrations: {said}")
+    if done.returncode == 1 and not listed:
+        raise SystemExit(f"deviceside's check failed with nothing listed: {done.stderr.strip() or 'no output'}")
     return listed
 
 
