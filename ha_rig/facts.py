@@ -1,12 +1,13 @@
 """The facts the fact cases found, kept per integration in `_facts.md`: dated, append-only.
 
 A fact case (engine.Case.fact: the watched case of a test with `observe:`, or any case of a `firmware_fact` test) runs
-only with --facts. Each that finds something appends one row as it ends: the date, the case, its kind, which says how
-the fact was seen (`automated` for a firmware fact's automated case that passed or failed, `observed` for a watched case
-a person answered), the devices it ran on with their firmware, and `pass` or `fail`. A row is a fact written down: it
-stands until evidence contradicts it (deviceside's docs/evidence.md, Verify, then trust). The file is only ever appended
-to, never rewritten, so no run erases a fact and a line the rig can't read stays as it is. A test record lists fact
-cases as skipped and points here, quoting the latest row on file for each; the rig decides nothing from the rows.
+only with --facts. Each that finds something appends one row as it ends: the date, the suite, the case, its kind, which
+says how the fact was seen (`automated` for a firmware fact's automated case that passed or failed, `observed` for a
+watched case a person answered), the devices it ran on with their firmware, and `pass` or `fail`. A row is a fact
+written down: it stands until evidence contradicts it (deviceside's docs/evidence.md, Verify, then trust). The file is
+only ever appended to, never rewritten, so no run erases a fact and a line the rig can't read stays as it is. A test
+record lists fact cases as skipped and points here, quoting the latest row on file for each; the rig decides nothing
+from the rows.
 
 Pure: no HA, no files but the one it reads and appends to.
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 FILE = "_facts.md"  # deviceside's record readers take only <action>(-<option>).md, so they skip this
 PASS, FAIL = "pass", "fail"
 AUTOMATED, OBSERVED = "automated", "observed"  # how a fact was seen
-HEADER = "| Date | Test | Kind | Devices | Result |"
+HEADER = "| Date | Suite | Test | Kind | Devices | Result |"
 ROW = re.compile(r"^\|(.*)\|$")
 
 
@@ -27,6 +28,7 @@ class Fact:
     """One row of `_facts.md`."""
 
     date: str  # ISO
+    suite: str  # the suite's name (`set_auto_off`, `stop-predicted_state`): case ids repeat across suites
     test: str  # the case's id
     kind: str  # how it was seen: AUTOMATED or OBSERVED
     devices: str  # the devices it ran on, as a record's Device row names them
@@ -36,7 +38,7 @@ class Fact:
         return f"last on file {self.date}, on {self.devices}: {self.result}"
 
     def row(self) -> str:
-        cells = [self.date, f"`{self.test}`", self.kind, self.devices, self.result]
+        cells = [self.date, f"`{self.suite}`", f"`{self.test}`", self.kind, self.devices, self.result]
         return "| " + " | ".join(cell.replace("|", "\\|") for cell in cells) + " |"
 
 
@@ -45,7 +47,7 @@ def heading(title: str) -> str:
     return (
         f"# {title} · facts\n\n"
         "What the rig's fact cases found, dated. Rows are only ever added: each is a fact, which stands until evidence "
-        f"contradicts it.\n\n{HEADER}\n|---|---|---|---|---|\n"
+        f"contradicts it.\n\n{HEADER}\n|---|---|---|---|---|---|\n"
     )
 
 
@@ -70,16 +72,16 @@ class FactsFile:
 
     @classmethod
     def read(cls, path: Path) -> FactsFile:
-        """The file at `path`, empty when there is none; a line that isn't a five-cell row is left out."""
+        """The file at `path`, empty when there is none; a line that isn't a six-cell row is left out."""
         if not path.is_file():
             return cls()
         rows = []
         for line in path.read_text().splitlines():
-            if ROW.match(line) and line != HEADER and not line.startswith("|---") and len(cells := _cells(line)) == 5:
-                date, test, kind, devices, result = cells
-                rows.append(Fact(date, test.strip("`"), kind, devices, result))
+            if ROW.match(line) and line != HEADER and not line.startswith("|---") and len(cells := _cells(line)) == 6:
+                date, suite, test, kind, devices, result = cells
+                rows.append(Fact(date, suite.strip("`"), test.strip("`"), kind, devices, result))
         return cls(tuple(rows))
 
-    def latest(self, test: str) -> Fact | None:
-        """The last row on file for the case `test`."""
-        return next((row for row in reversed(self.rows) if row.test == test), None)
+    def latest(self, suite: str, test: str) -> Fact | None:
+        """The last row on file for the case `test` of the suite named `suite`."""
+        return next((row for row in reversed(self.rows) if (row.suite, row.test) == (suite, test)), None)
