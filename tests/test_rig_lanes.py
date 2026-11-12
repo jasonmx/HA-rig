@@ -104,7 +104,10 @@ async def test_lanes_save_the_options_once_before_they_start(tmp_path):
 
     await run_two(ha, suites, profile, lanes=True)
 
-    assert ha.saved == [{"opt": False, "other": False}, {"opt": True, "other": False}]  # set, then put back
+    assert ha.saved == [
+        {"opt": False, "other": False, "experimental_features": True},
+        {"opt": True, "other": False, "experimental_features": True},
+    ]  # set, then put back
     assert ha.saves_seen == [1, 1]  # no reload while a lane runs
 
 

@@ -291,6 +291,12 @@ record is `<action>-<name>.md`, with an `Options` row. The rig's own options are
 save reloads the entry, so a run pins each set of options once: the suites that share a set run together, rather
 than each `<action>` file and its `<action>-<name>` twin in turn.
 
+Every run with `HA_ADMIN_TOKEN` also turns DeviceSide's Experimental features on, through the same flow and put back
+the same way, so a flagged item's case tests its call rather than the `experimental_off` refusal; the option never
+changes how an unflagged item behaves. A run holding HA shared can't save it, so it stops before its first case unless
+the option is already on. A pass on a flagged item means the deviceside PR landing the record lifts the flag; a known
+failure gets `only:` or leaves the profile.
+
 A test that means to make DeviceSide warn lists the line under `expected_log:` at the top of its file: regular
 expressions, each searched for in the whole log line, logger included. A matched line is counted in the summary and
 fails nothing. Keep a pattern as narrow as the warning it expects.
