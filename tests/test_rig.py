@@ -1322,6 +1322,7 @@ def run_args(**kwargs) -> types.SimpleNamespace:
         "dry_run": False,
     }
     defaults |= {"observed": False, "facts": False, "fresh": False, "no_deploy": False, "roam_check": False}
+    defaults |= {"signoffs": False}
     return types.SimpleNamespace(**(defaults | kwargs))
 
 
@@ -2066,3 +2067,83 @@ def test_each_answer_appends_a_row_even_the_same_one_again(tmp_path, monkeypatch
     on_result(suite, watched(True))
     on_result(suite, watched(True))  # each case ends once: another row is another answer
     assert [result for _, result in observed_rows(records)] == ["fail", "pass", "pass"]
+
+
+def signoffs_prepare(monkeypatch, needed: list[str], profile: Profile) -> types.SimpleNamespace:
+    """prepare() under --signoffs with deviceside listing `needed`, up to choosing the suites: the arguments
+    run_suites was given. The rest of the run is not reached."""
+    monkeypatch.setattr(target, "signoffs_needed", lambda repo: needed)
+    monkeypatch.setattr(rig, "load_env", dict)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: None)
+    monkeypatch.setattr(rig.Profile, "load", lambda path: profile)
+    monkeypatch.setattr(engine, "load_checkout_steps", lambda repo: ([], "c1", True))
+    seen = types.SimpleNamespace()
+
+    def chosen(args, profile, registry, step_files):
+        seen.integration = args.integration
+        raise SystemExit("suites chosen")
+
+    monkeypatch.setattr(rig, "run_suites", chosen)
+    with pytest.raises(SystemExit, match="suites chosen"):
+        rig.prepare(run_args(signoffs=True, check=True, profile=None))
+    return seen
+
+
+def two_integration_profile() -> Profile:
+    entities = [RigEntity("light.a", frozenset({"light_dimmable"}))]
+    return Profile({"hue": entities, "zha": entities}, {}, name="house")
+
+
+def test_signoffs_selects_the_integrations_deviceside_lists(monkeypatch, capsys):
+    assert signoffs_prepare(monkeypatch, ["zha"], two_integration_profile()).integration == ["zha"]
+    assert "Needs a sign-off: zha" in capsys.readouterr().out
+
+
+def test_signoffs_names_those_the_profile_cant_reach_for_a_manual_signoff_and_runs_the_rest(monkeypatch, capsys):
+    seen = signoffs_prepare(monkeypatch, ["hue", "shelly", "zha"], two_integration_profile())
+    assert seen.integration == ["hue", "zha"]
+    assert "Needs a manual sign-off (_manual.md), out of profile house's reach: shelly" in capsys.readouterr().out
+
+
+def test_signoffs_with_none_in_the_profiles_reach_stops_with_success(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        rig.signoff_selection(["shelly"], two_integration_profile())
+    assert stopped.value.code == 0
+    out = capsys.readouterr().out
+    assert "manual sign-off (_manual.md), out of profile house's reach: shelly" in out
+    assert "nothing to run" in out
+
+
+def test_signoffs_with_an_empty_list_stops_with_success_before_reading_the_profile(monkeypatch, capsys):
+    monkeypatch.setattr(target, "signoffs_needed", lambda repo: [])
+    monkeypatch.setattr(rig, "load_env", lambda: pytest.fail("read .env.rig with nothing to run"))
+    with pytest.raises(SystemExit) as stopped:
+        rig.prepare(run_args(signoffs=True, check=False, profile=None))
+    assert stopped.value.code == 0
+    assert "No integration needs a sign-off" in capsys.readouterr().out
+
+
+def test_a_failed_signoffs_check_stops_the_run_before_anything_else(monkeypatch):
+    def failed(repo):
+        raise SystemExit("deviceside's scripts/check_release.py --signoffs --json failed (exit 2): boom")
+
+    monkeypatch.setattr(target, "signoffs_needed", failed)
+    monkeypatch.setattr(rig, "load_env", lambda: pytest.fail("read .env.rig after the check failed"))
+    with pytest.raises(SystemExit, match=r"failed \(exit 2\): boom"):
+        rig.prepare(run_args(signoffs=True, check=False, profile=None))
+
+
+@pytest.mark.parametrize(
+    ("extra", "error"),
+    [
+        (["--integration", "hue"], "--signoffs is for a test run or --check"),
+        (["--roam-check"], "--signoffs is for a test run or --check"),
+        (["--recover"], "--signoffs is for a test run or --check"),
+        (["--wait-free"], "--signoffs is for a test run or --check"),
+        (["--deploy-only"], "--deploy-only takes only --dry-run"),
+    ],
+)
+def test_signoffs_picks_the_integrations_itself_so_it_takes_no_other_selection_or_mode(extra, error, capsys):
+    with pytest.raises(SystemExit):
+        rig.main(["--signoffs", *extra])
+    assert error in capsys.readouterr().err

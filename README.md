@@ -19,10 +19,11 @@ cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 <!-- rig-help -->
 ```text
 usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--no-deploy]
-              [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
-              [--facts] [--unattended] [--serial] [--debug-logs] [--deploy-only] [--for DURATION]
-              [--fresh] [--ignore-unreachables] [--recover] [--promote DIR] [--roam-check]
-              [--wait-free] [--hold INTEGRATION] [--exclusive] [--visual {none,profile}]
+              [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--signoffs] [--action ACTION]
+              [-k KEYWORD] [--facts] [--unattended] [--serial] [--debug-logs] [--deploy-only]
+              [--for DURATION] [--fresh] [--ignore-unreachables] [--recover] [--promote DIR]
+              [--roam-check] [--wait-free] [--hold INTEGRATION] [--exclusive]
+              [--visual {none,profile}]
 
 Run the rig tests against the live HA, behind an authorization gate.
 
@@ -36,6 +37,9 @@ options:
   --no-deploy           test whatever HA already runs
   --integration {hue,matter,shelly,zha,zigbee2mqtt}
                         limit to an integration key (repeatable); with --wait-free, wait for it
+  --signoffs            run the integrations deviceside's check_release.py --signoffs --json lists
+                        as needing a sign-off, of those the profile has; names the rest for a
+                        manual sign-off, and stops when none needs one
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
   --facts               also run the fact cases a default run skips, firmware facts and watched

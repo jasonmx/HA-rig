@@ -10,12 +10,16 @@ Its step files, the test plan, live in `tests/rig/steps/` (STEPS, shared) and `t
 integration's own, integration_steps_dirs), and its test records in
 `docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out.
 
-Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
+What needs testing is deviceside's to say: `signoffs_needed` asks its release check (SIGNOFFS) for the integrations
+still needing a sign-off, the run selection of --signoffs.
+
+Pure reading, of files, git and that check: the household check and the runner's preflight load it before anything mutates.
 """
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 RIG_HOME = Path(__file__).resolve().parents[1]
@@ -24,6 +28,7 @@ STEPS = "tests/rig/steps"  # deviceside's shared step files, one per action
 INTEGRATIONS = "tests/integrations"  # deviceside's integration test packages: each one's own step files are in its rig/
 RECORDS = "docs/integrations/{integration}/test-records"  # deviceside's test records directory, per integration
 SIBLINGS = ("deviceside", "device-side")
+SIGNOFFS = ("scripts/check_release.py", "--signoffs", "--json")  # deviceside's list of integrations needing a sign-off
 UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner
 
 
@@ -92,6 +97,28 @@ def committed_step_sources(repo: Path, commit: str) -> dict[str, bytes]:
     except OSError, subprocess.CalledProcessError:
         return {}
     return sources
+
+
+def signoffs_needed(repo: Path, python: str = sys.executable) -> list[str]:
+    """The integrations `repo`'s release check lists as still needing a sign-off (SIGNOFFS), run with `python`, the
+    interpreter the rig already imports the checkout's code with. The check exits 1 when the list has any and 0 when
+    it is empty, so both are an answer; any other exit, or output that is no JSON list of names, raises SystemExit
+    with what the check said."""
+    command = " ".join(SIGNOFFS)
+    try:
+        done = subprocess.run([python, *SIGNOFFS], cwd=repo, capture_output=True, text=True)
+    except OSError as err:
+        raise SystemExit(f"Could not run deviceside's {command}: {err}") from err
+    said = (done.stderr.strip() or done.stdout.strip() or "no output").splitlines()[-1]
+    if done.returncode not in (0, 1):
+        raise SystemExit(f"deviceside's {command} failed (exit {done.returncode}): {said}")
+    try:
+        listed = json.loads(done.stdout)
+    except ValueError:
+        listed = None
+    if not isinstance(listed, list) or not all(isinstance(name, str) for name in listed):
+        raise SystemExit(f"deviceside's {command} printed no JSON list of integrations: {said}")
+    return listed
 
 
 def test_records_dir(repo: Path, integration: str, root: Path | None = None) -> Path:
