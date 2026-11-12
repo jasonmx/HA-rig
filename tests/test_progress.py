@@ -7,9 +7,9 @@ from pathlib import Path
 from ha_rig import progress as progress_module
 from ha_rig.engine import Case, CaseResult, Device, Outcome, Suite, load_step_file, load_step_files, merge
 from ha_rig.progress import Progress, holds, path_for
-from tests.rig_fakes import Roster, profile
+from tests.rig_fakes import STEPS, Roster, profile
 
-SUITE = Suite(next(f for f in load_step_files() if f.action == "turn_on_for" and not f.options), "shelly")
+SUITE = Suite(next(f for f in load_step_files(STEPS) if f.action == "turn_on_for" and not f.options), "shelly")
 HUE = Suite(SUITE.file, "hue")
 PASSED = CaseResult("a[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
 FAILED = CaseResult("b[switch_plug]", "switch_plug", "switch", Outcome.FAIL, "too slow", ("switch.plug",))

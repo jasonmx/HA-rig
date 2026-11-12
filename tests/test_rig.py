@@ -20,7 +20,8 @@ from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
 from tests import rig_fakes as fakes
-from tests.rig_fakes import records_at, write
+from tests.conftest import REAL_STEPS_DIR
+from tests.rig_fakes import STEPS, records_at, write
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("rig", RIG_HOME / "scripts" / "rig.py")
@@ -151,7 +152,9 @@ def test_load_env_reads_command_vars(tmp_path, monkeypatch):
 
 
 def test_select_plan_lines_and_estimate(profile):
-    step_files = [step_file for step_file in load_step_files() if step_file.action in ("turn_off_for", "turn_on_for")]
+    step_files = [
+        step_file for step_file in load_step_files(STEPS) if step_file.action in ("turn_off_for", "turn_on_for")
+    ]
     suites = rig.select(step_files, profile, None)
     assert [(suite.integration, suite.action) for suite in suites] == [
         ("shelly", "turn_off_for"),
@@ -596,7 +599,7 @@ def test_main_checkout_falls_back_outside_a_repo(tmp_path, monkeypatch):
 
 def test_check_tokens_stops_a_zha_run_without_an_admin_token():
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files() if f.action == "turn_on_for")
+    step_file = next(f for f in load_step_files(STEPS) if f.action == "turn_on_for")
     zha, shelly = rig.Suite(step_file, "zha"), rig.Suite(step_file, "shelly")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok"}
     with pytest.raises(SystemExit, match="HA_URL and HA_TOKEN"):
@@ -694,7 +697,7 @@ def test_check_tokens_stops_a_hue_bridge_step_without_the_bridge_settings(tmp_pa
 def test_check_tokens_stops_a_run_of_an_adapter_with_options_without_an_admin_token():
     # Its options are pinned through DeviceSide's options flow, which is admin only.
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files() if f.action == "raise_brightness")
+    step_file = next(f for f in load_step_files(STEPS) if f.action == "raise_brightness")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok", "HUE_BRIDGE_HOST": "bridge", "HUE_APP_KEY": "key"}
     with pytest.raises(SystemExit, match="hue needs HA_ADMIN_TOKEN"):
         rig.check_tokens(env, [rig.Suite(step_file, "hue")], registry)
@@ -942,7 +945,7 @@ async def test_recover_without_an_admin_token_leaves_the_entry_disabled_in_the_j
 
 def test_check_tokens_stops_a_run_with_entry_steps_without_an_admin_token():
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files() if f.name == "lifecycle")
+    step_file = next(f for f in load_step_files(STEPS) if f.name == "lifecycle")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok"}
     with pytest.raises(SystemExit, match="shelly needs HA_ADMIN_TOKEN"):
         rig.check_tokens(env, [rig.Suite(step_file, "shelly")], registry)
@@ -950,7 +953,7 @@ def test_check_tokens_stops_a_run_with_entry_steps_without_an_admin_token():
 
 
 def test_action_picks_a_named_file_by_its_name_not_its_action():
-    step_files = load_step_files()
+    step_files = load_step_files(STEPS)
     profile = fakes.profile("hue", light_color="light.lamp")
     assert {suite.name for suite in rig.select(step_files, profile, None, ["lifecycle"])} == {"lifecycle"}
     assert {suite.name for suite in rig.select(step_files, profile, None, ["get_attributes"])} == {"get_attributes"}
@@ -958,7 +961,7 @@ def test_action_picks_a_named_file_by_its_name_not_its_action():
 
 def test_a_file_with_no_test_for_an_integration_is_not_selected_there(profile, tmp_path, monkeypatch):
     """lifecycle's tests are both `only: [hue]`: shelly has no cases, so no suite."""
-    step_files = load_step_files()
+    step_files = load_step_files(STEPS)
     suites = rig.select(step_files, profile, None, ["lifecycle"])
     assert [(suite.integration, suite.name) for suite in suites] == [("hue", "lifecycle")]
     assert rig.select(step_files, profile, ["shelly"], ["lifecycle"]) == []
@@ -1386,49 +1389,120 @@ def test_a_record_in_the_checkout_never_leaves_a_suite_out(tmp_path, monkeypatch
     assert planned(tmp_path, monkeypatch, suites, profile).suites == suites
 
 
-def test_uncommitted_step_files_withhold_records(tmp_path, monkeypatch, capsys):
-    """The run goes ahead, but reads and saves no ledger and writes no record: a pass saved at the commit, made before
-    the edit, doesn't resume, and none made with the edit is saved to resume once it is reverted."""
+def withheld_run(tmp_path, monkeypatch, loaded_at: str, committed: bool, deploy_commit: str) -> tuple[rig.Setup, dict]:
+    """prepare() and run_approved() with a pass saved at c1, after step files loaded at `loaded_at`, HEAD's or not
+    (`committed`), and the deploy state read at `deploy_commit`: what the run was given."""
     resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})  # saved at c1
     profile, suites = resumable(tmp_path)
-    monkeypatch.setattr(rig, "uncommitted_steps", lambda: True)
+    monkeypatch.setattr(engine, "load_checkout_steps", lambda repo: ([suites[0].file], loaded_at, committed))
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "choose_profile", lambda name, env: None)
     monkeypatch.setattr(rig.Profile, "load", lambda path: profile)
-    monkeypatch.setattr(rig, "run_suites", lambda args, profile, registry: suites)
-    monkeypatch.setattr(rig, "deploy_state", lambda cmd: rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x"))
+    monkeypatch.setattr(rig, "run_suites", lambda args, profile, registry, step_files: suites)
+    deploy = rig.Deploy(deploy_commit, "tree1", "tree1", "tree1", "wt/x")
+    monkeypatch.setattr(rig, "deploy_state", lambda cmd: deploy)
     monkeypatch.setattr(rig, "check_tokens", lambda *args: None)
     setup = rig.prepare(run_args(check=False, profile=None), tmp_path)
-    assert setup.progress is None and setup.suites == suites
-    assert "Uncommitted changes under tests/rig/steps: this run writes no test record" in capsys.readouterr().out
-    seen = {}
+    seen = {"suites": setup.suites}
     monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
-    monkeypatch.setattr(rig, "tested_commit", lambda cmd, deploy, deploying: "c1")
+    monkeypatch.setattr(rig, "tested_commit", lambda cmd, deploy, deploying: deploy.commit)
     monkeypatch.setattr(
-        rig, "run_rig", lambda *args, **kwargs: seen.update(commit=args[6], progress=kwargs["progress"])
+        rig,
+        "run_rig",
+        lambda *args, **kwargs: seen.update(commit=args[6], progress=kwargs["progress"], facts=kwargs["facts"]),
     )
     monkeypatch.setattr(rig, "run_tests", lambda coro, aborted=None: 0)
     held = types.SimpleNamespace(share_ha=lambda: None, claim=None)
     args = types.SimpleNamespace(budget=None, keyword=None, unattended=True, debug_logs=False)
     assert rig.run_approved(args, setup, held, None, False, False) == 0
-    assert seen == {"commit": None, "progress": None}  # no commit to cite: no record
+    return setup, seen
+
+
+def test_committed_step_files_write_records(tmp_path, monkeypatch, capsys):
+    setup, seen = withheld_run(tmp_path, monkeypatch, "c1", True, "c1")
+    assert seen["commit"] == "c1" and seen["progress"] is not None and seen["facts"]
+    assert len(seen["suites"]) == 2 and setup.done  # the saved pass resumes
+    assert "Uncommitted step files" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("loaded_at", "committed", "deploy_commit"),
+    [("c1", False, "c1"), ("c0", True, "c1")],
+    ids=["uncommitted", "head_moved_between_the_load_and_the_deploy_read"],
+)
+def test_uncommitted_step_files_withhold_records(tmp_path, monkeypatch, capsys, loaded_at, committed, deploy_commit):
+    """The run goes ahead, but reads and saves no ledger and writes no record or fact row: a pass saved at the commit,
+    made before the edit, doesn't resume, and none made with the edit is saved to resume once it is reverted."""
+    setup, seen = withheld_run(tmp_path, monkeypatch, loaded_at, committed, deploy_commit)
+    assert setup.withholds and not setup.done and seen["suites"] == resumable(tmp_path)[1]
+    assert seen == seen | {"commit": None, "progress": None, "facts": False}
+    out = capsys.readouterr().out
+    assert "this run writes no test record or fact row and saves no progress" in out
+    assert "--dry-run" not in out
+
+
+def test_head_moving_while_the_run_waited_withholds_records(tmp_path, monkeypatch, capsys):
+    """take() reads the deploy state again; HEAD moved since the load, so the files that ran have no commit."""
+    setup, _ = withheld_run(tmp_path, monkeypatch, "c1", True, "c1")
+    assert not setup.withholds
+    setup.deploy = rig.Deploy("c2", "tree1", "tree1", "tree1", "wt/x")
+    assert setup.withholds
+
+
+REAL_LOAD_CHECKOUT_STEPS = engine.load_checkout_steps  # as imported, before the autouse fixture swaps it
+
+
+def steps_checkout(tmp_path: Path, monkeypatch) -> Path:
+    """A git checkout in tmp_path with one committed step file; its steps directory."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(target, "steps_dir", REAL_STEPS_DIR)
+    (steps := tmp_path / target.STEPS).mkdir(parents=True)
+    (steps / "stop.yaml").write_text((STEPS / "stop.yaml").read_text())
+    run_git("init", "-q", str(tmp_path))
+    run_git("-C", str(tmp_path), "add", ".")
+    run_git("-C", str(tmp_path), "commit", "-q", "-m", "steps")
+    return steps
+
+
+def test_step_files_as_committed_are_heads(tmp_path, monkeypatch):
+    steps_checkout(tmp_path, monkeypatch)
+    files, head, committed = REAL_LOAD_CHECKOUT_STEPS(tmp_path)
+    assert committed and head == target.head_commit(tmp_path) and [f.action for f in files] == ["stop"]
+
+
+@pytest.mark.parametrize("hidden", ["", "status.showUntrackedFiles=no", "excluded"])
+def test_an_untracked_step_file_isnt_heads(tmp_path, monkeypatch, hidden):
+    """git status may not show it, but the loader reads it."""
+    steps = steps_checkout(tmp_path, monkeypatch)
+    if hidden == "excluded":
+        (tmp_path / ".git" / "info").mkdir(exist_ok=True)
+        (tmp_path / ".git" / "info" / "exclude").write_text("turn_on_for.yaml\n")
+    elif hidden:
+        run_git("-C", str(tmp_path), "config", *hidden.split("="))
+    (steps / "turn_on_for.yaml").write_text((STEPS / "turn_on_for.yaml").read_text())
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+
+
+@pytest.mark.parametrize("hidden", ["", "--assume-unchanged", "--skip-worktree"])
+def test_a_modified_or_removed_step_file_isnt_heads(tmp_path, monkeypatch, hidden):
+    steps = steps_checkout(tmp_path, monkeypatch)
+    if hidden:
+        run_git("-C", str(tmp_path), "update-index", hidden, f"{target.STEPS}/stop.yaml")
+    (steps / "stop.yaml").write_text((steps / "stop.yaml").read_text() + "# edited\n")
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+    (steps / "stop.yaml").unlink()
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
 
 
 def test_committing_the_step_files_moves_the_ledger_key(tmp_path, monkeypatch):
     """Committing an edit moves HEAD, the ledger's key, so a pass saved before it never resumes into a record."""
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    monkeypatch.setattr(rig, "REPO", tmp_path)
-    (steps := target.steps_dir(tmp_path)).mkdir(parents=True)
-    (steps / "stop.yaml").write_text("action: stop\n")
-    run_git("init", "-q", str(tmp_path))
-    run_git("-C", str(tmp_path), "add", ".")
-    run_git("-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "steps")
-    before = rig.git("rev-parse", "HEAD")
-    assert not rig.uncommitted_steps()
-    (steps / "stop.yaml").write_text("action: stop\n# edited\n")
-    assert rig.uncommitted_steps()
-    run_git("-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "edit")
-    assert not rig.uncommitted_steps() and rig.git("rev-parse", "HEAD") != before
+    steps = steps_checkout(tmp_path, monkeypatch)
+    before = target.head_commit(tmp_path)
+    (steps / "stop.yaml").write_text((steps / "stop.yaml").read_text() + "# edited\n")
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+    run_git("-C", str(tmp_path), "commit", "-q", "-am", "edit")
+    _, head, committed = REAL_LOAD_CHECKOUT_STEPS(tmp_path)
+    assert committed and head != before
     # A suite saved at the old HEAD starts afresh at the new one (test_another_commit_starts_the_suites_afresh).
 
 

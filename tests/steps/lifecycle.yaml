@@ -1,0 +1,22 @@
+action: get_attributes
+name: lifecycle
+rig_seconds: 15
+tests:
+  - name: works_after_a_reload
+    roles: [light_ct]
+    only: [hue]
+    steps:
+      - entry: reload
+      - call: {}
+      - expect_response: {}
+
+  - name: refuses_while_disabled
+    roles: [light_ct]
+    only: [hue]
+    steps:
+      - entry: disable
+      - call: {}
+      - expect_error: {key: not_loaded}
+      - entry: enable
+      - call: {}
+      - expect_response: {}

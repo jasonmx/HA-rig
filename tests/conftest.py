@@ -9,12 +9,13 @@ import pytest
 
 from ha_rig import engine, locks, roam, target, terms
 from ha_rig.target import deviceside_repo
-from tests.rig_fakes import PENDING
+from tests.rig_fakes import PENDING, STEPS
 
 # The rig imports deviceside's registry and actions; appended, so this repo's own `tests` package wins.
 sys.path.append(str(deviceside_repo()))
 
 REAL_WORKSPACE_COLOR = locks.workspace_color  # the autouse fixture swaps the module's for a recorder
+REAL_STEPS_DIR = target.steps_dir  # the autouse fixture points it at the fixture step files
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -31,6 +32,14 @@ def workspace_colors(monkeypatch) -> list[str | None]:
     colors: list[str | None] = []
     monkeypatch.setattr(locks, "workspace_color", colors.append)
     return colors
+
+
+@pytest.fixture(autouse=True)
+def fixture_steps(monkeypatch) -> None:
+    """The rig's own fixture step files (rig_fakes.STEPS) in place of the checkout's, as committed at no commit in
+    particular, so no test depends on deviceside's test plan or on its checkout's state."""
+    monkeypatch.setattr(target, "steps_dir", lambda repo: STEPS)
+    monkeypatch.setattr(engine, "load_checkout_steps", lambda repo: (engine.load_step_files(STEPS), None, True))
 
 
 @pytest.fixture(autouse=True)

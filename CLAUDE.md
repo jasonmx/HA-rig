@@ -17,8 +17,10 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 - `scripts/rig.py`: the runner; `scripts/deploy.sh`: its deploy, through `.env.rig`'s commands
 - `ha_rig/`: the engine, HA and Hue clients, locks, journal, baseline, roaming, run logs, profiles, the target
   checkout (`target.py`) and the household terms for deviceside's check (`terms.py`)
-- `tests/`: the rig's own tests, with fakes; they import deviceside's registry and actions from the target checkout; the
-  engine tests take adapters from a declared roster over that registry (`tests/rig_fakes.py`, `Roster`)
+- `tests/`: the rig's own tests, with fakes and fixture step files (`tests/steps/`); they import deviceside's registry
+  and actions and read its step files from the target checkout, the step files only to check they parse
+  (`tests/test_rig_steps.py`); the engine tests take adapters from a declared roster over that registry
+  (`tests/rig_fakes.py`, `Roster`)
 
 ## Changes
 
@@ -35,6 +37,7 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 - The step files are deviceside's (`tests/rig/steps/` there), landed in the deviceside PR for the action they test;
   a rig PR is needed only for an engine change. When one pairs with a deviceside PR (a step file using a new step
   kind, say), the rig PR's plan names it in Coordination, `Tests-with: DeviceSide/DeviceSide#N`, so CI tests the
-  pair together (`scripts/ci_deviceside.sh`). Nothing reruns it when that PR moves or merges, and `ci-green` counts
-  every run at the head: before merging, `gh run rerun` the PR's Tests runs, which read both afresh.
+  pair together (`scripts/ci_deviceside.sh`); merge the rig PR first, as deviceside's own test can't parse a new step
+  kind. Nothing reruns it when that PR moves or merges, and `ci-green` counts every run at the head: before merging,
+  `gh run rerun` the PR's Tests runs, which read both afresh.
 - Async throughout; American English, matching HA.

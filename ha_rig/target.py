@@ -50,6 +50,34 @@ def steps_dir(repo: Path) -> Path:
     return repo / STEPS
 
 
+def head_commit(repo: Path) -> str | None:
+    """`repo`'s HEAD commit; None outside a checkout or without git."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except OSError, subprocess.CalledProcessError:
+        return None
+
+
+def committed_step_sources(repo: Path, commit: str) -> dict[str, bytes]:
+    """The `*.yaml` files directly in STEPS at `commit`, by name, as committed; none where git can't say."""
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
+
+    sources = {}
+    try:
+        for entry in filter(None, git("ls-tree", "-z", commit, "--", f"{STEPS}/").split(b"\0")):
+            meta, _, path = entry.partition(b"\t")
+            name = Path(path.decode()).name
+            if meta.split()[1] == b"blob" and name.endswith(".yaml"):
+                sources[name] = git("cat-file", "blob", f"{commit}:{STEPS}/{name}")
+    except OSError, subprocess.CalledProcessError:
+        return {}
+    return sources
+
+
 def test_records_dir(repo: Path, integration: str, root: Path | None = None) -> Path:
     """The integration's test records directory in `repo`, laid out under `root` instead when given (a run's staging
     mirrors the checkout)."""

@@ -1,4 +1,4 @@
-"""Step files parse, and a broken one fails at load naming the file, the test and the step."""
+"""deviceside's step files parse, and a broken one fails at load naming the file, the test and the step."""
 
 from pathlib import Path
 
@@ -8,60 +8,29 @@ from custom_components.deviceside.core.registry import AdapterRegistry
 from ha_rig.engine import Expr, Observe, SchemaError, load_step_file, load_step_files
 from ha_rig.target import deviceside_repo, steps_dir
 
+# deviceside's step files, the only ones a rig test reads, and only to check they parse: what they test is deviceside's.
+SHIPPED = steps_dir(deviceside_repo())
 
-@pytest.mark.parametrize("path", sorted(steps_dir(deviceside_repo()).rglob("*.yaml")), ids=lambda path: path.name)
+
+@pytest.mark.parametrize("path", sorted(SHIPPED.glob("*.yaml")), ids=lambda path: path.name)
 def test_every_shipped_step_file_parses(path):
     assert load_step_file(path).tests
 
 
 def test_every_step_file_has_an_action():
-    actions = {step_file.action for step_file in load_step_files()}
-    assert actions == {
-        "clear_auto_off",
-        "clear_auto_on",
-        "get_attributes",
-        "lower_brightness",
-        "lower_hue",
-        "lower_saturation",
-        "raise_brightness",
-        "raise_hue",
-        "raise_saturation",
-        "set_attributes",
-        "set_auto_off",
-        "set_auto_on",
-        "set_scene",
-        "stop",
-        "turn_on_for",
-        "turn_off_for",
-    }
-    assert actions <= set(AdapterRegistry.discover().actions)
+    step_files = load_step_files(SHIPPED)
+    assert step_files
+    assert {step_file.action for step_file in step_files} <= set(AdapterRegistry.discover().actions)
 
 
 def test_every_only_names_an_integration():
     """A misspelled key would silently drop the test, or its observed run, from every suite."""
     known = set(AdapterRegistry.discover().integrations)
-    for step_file in load_step_files():
+    for step_file in load_step_files(SHIPPED):
         for test in step_file.tests:
             named = (test.only or frozenset()) | ((test.observe and test.observe.only) or frozenset())
             named |= {key for step in (*test.setup, *test.steps) for key in step.only or ()}
             assert named <= known, f"{step_file.action} {test.name}: {sorted(named - known)}"
-
-
-def test_the_step_files_keep_their_roles():
-    by_action = {step_file.action: step_file for step_file in load_step_files()}
-    assert by_action["turn_on_for"].roles == (
-        "switch_plug",
-        "light_wrapped",
-        "light_onoff",
-        "light_dimmable",
-        "light_ct",
-        "light_color",
-        "group",
-    )
-    assert by_action["turn_off_for"].roles == ("switch_plug", "light_dimmable")
-    for action in ("set_auto_off", "set_auto_on", "clear_auto_off", "clear_auto_on"):
-        assert by_action[action].roles == ("switch_plug",)
-        assert all(test.only == frozenset({"shelly"}) for test in by_action[action].tests)
 
 
 HEADER = "action: turn_on_for\nrig_seconds: 5\ntests:\n  - name: broken\n    roles: [switch_plug]\n    steps:\n"
