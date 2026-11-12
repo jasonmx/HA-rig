@@ -2094,15 +2094,13 @@ def two_integration_profile() -> Profile:
     return Profile({"hue": entities, "zha": entities}, {}, name="house")
 
 
-def test_signoffs_selects_the_integrations_deviceside_lists(monkeypatch, capsys):
-    assert signoffs_prepare(monkeypatch, ["zha"], two_integration_profile()).integration == ["zha"]
-    assert "Needs a sign-off: zha" in capsys.readouterr().out
-
-
 def test_signoffs_names_those_the_profile_cant_reach_for_a_manual_signoff_and_runs_the_rest(monkeypatch, capsys):
     seen = signoffs_prepare(monkeypatch, ["hue", "shelly", "zha"], two_integration_profile())
     assert seen.integration == ["hue", "zha"]
-    assert "Needs a manual sign-off (_manual.md), out of profile house's reach: shelly" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Needs a manual sign-off (_manual.md), out of profile house's reach: shelly" in out
+    assert "Needs a sign-off: hue, zha" in out
+    assert "Why each needs one: scripts/check_release.py --signoffs in " in out
 
 
 def test_signoffs_with_none_in_the_profiles_reach_stops_with_success(capsys):
@@ -2136,7 +2134,9 @@ def test_a_failed_signoffs_check_stops_the_run_before_anything_else(monkeypatch)
 @pytest.mark.parametrize(
     ("extra", "error"),
     [
-        (["--integration", "hue"], "--signoffs is for a test run or --check"),
+        (["--integration", "hue"], "picks the integrations itself and runs them whole"),
+        (["--action", "turn_on_for"], "picks the integrations itself and runs them whole"),
+        (["-k", "dimmable"], "picks the integrations itself and runs them whole"),
         (["--roam-check"], "--signoffs is for a test run or --check"),
         (["--recover"], "--signoffs is for a test run or --check"),
         (["--wait-free"], "--signoffs is for a test run or --check"),

@@ -180,6 +180,23 @@ def test_a_release_check_that_crashes_stops_the_run_with_what_it_said(tmp_path):
         target.signoffs_needed(repo)
 
 
+def test_a_release_check_failing_with_nothing_listed_stops_the_run_with_its_stderr(tmp_path):
+    repo = release_check(tmp_path, "print('[]'); print('error: zha: failed to import', file=sys.stderr); sys.exit(1)")
+    with pytest.raises(SystemExit, match="failed with nothing listed: error: zha: failed to import"):
+        target.signoffs_needed(repo)
+
+
+def test_the_target_checkouts_release_check_answers_with_a_list_of_names(monkeypatch):
+    """The contract with the real check: it takes --signoffs --json and prints a list of names."""
+    try:
+        repo = target.deviceside_repo()
+    except SystemExit:
+        pytest.skip("no deviceside checkout to test")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    listed = target.signoffs_needed(repo)
+    assert isinstance(listed, list) and all(isinstance(name, str) for name in listed)
+
+
 @pytest.mark.parametrize("output", ["Since v0.0.1:", "{}", "[1, 2]", ""])
 def test_a_release_check_that_prints_no_list_of_names_stops_the_run(tmp_path, output):
     repo = release_check(tmp_path, f"print({output!r}); sys.exit(1)")

@@ -72,8 +72,9 @@ device left unpowered stops the run only when its phase comes, after the bulbs h
 those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
 A run runs the suites it is asked for; what needs testing is deviceside's to say. --signoffs takes deviceside's list of
-the integrations still needing a sign-off (target.signoffs_needed) as the selection, naming those the profile lacks for
-a manual sign-off, and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
+the integrations still needing a sign-off (target.signoffs_needed) as the selection and runs each whole, as a sign-off
+is one whole passing run at one commit (so no --action or -k), naming those the profile lacks for a manual sign-off,
+and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
 fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
 automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
 (ha_rig/progress.py), keyed by the suite and the commit, so one that stops part way, on a signal, the restricted sensor
@@ -92,10 +93,10 @@ DeviceSide and the run's integrations, and Z2M, to debug for the run, keeps the 
 baseline, so --recover too).
 
 Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] [--serial] [--debug-logs]
-                      [--integration KEY ... | --signoffs] [--action NAME ...] [-k TEXT] [--facts]
+                      [[--integration KEY ...] [--action NAME ...] [-k TEXT] | --signoffs] [--facts]
                       [--for DURATION] [--fresh] [--ignore-unreachables]
-       scripts/rig.py [--profile NAME] --check [--ignore-unreachables] [--integration KEY ... | --signoffs]
-                      [--action NAME ...] [-k TEXT] [--facts]
+       scripts/rig.py [--profile NAME] --check [--ignore-unreachables]
+                      [[--integration KEY ...] [--action NAME ...] [-k TEXT] | --signoffs] [--facts]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
@@ -124,7 +125,7 @@ import urllib.request
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import aiohttp
 
@@ -190,7 +191,6 @@ from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa:
 from ha_rig.staging import Staging, display  # noqa: E402
 
 SERVICE = ("deviceside", "turn_on_for")
-NO_SIGNOFFS = "No integration needs a sign-off (deviceside's check_release.py --signoffs --json): nothing to run."
 
 
 def checkout_records(integration: str) -> Path:
@@ -746,8 +746,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--signoffs",
         action="store_true",
-        help="run the integrations deviceside's check_release.py --signoffs --json lists as needing a sign-off, of "
-        "those the profile has; names the rest for a manual sign-off, and stops when none needs one",
+        help="run, whole, the integrations deviceside's check_release.py --signoffs --json lists as needing a "
+        "sign-off, of those the profile has; names the rest for a manual sign-off, and stops when none needs one",
     )
     parser.add_argument("--action", action="append", help="limit to an action's step files (repeatable)")
     parser.add_argument("-k", dest="keyword", help="run only test cases whose id contains this text")
@@ -850,8 +850,13 @@ def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, 
     """Stop, through argparse, on flags that don't go together."""
     if args.promote and any(value for name, value in vars(args).items() if name != "promote"):  # command included
         parser.error("--promote takes only the staged directory")
-    if args.signoffs and (args.integration or args.roam_check or args.recover or args.wait_free or command):
-        parser.error("--signoffs is for a test run or --check, and picks the integrations itself: no --integration")
+    if args.signoffs and (
+        args.integration or args.action or args.keyword or args.roam_check or args.recover or args.wait_free or command
+    ):
+        parser.error(
+            "--signoffs is for a test run or --check; it picks the integrations itself and runs them whole: no "
+            "--integration, --action or -k"
+        )
     refuse_mode_conflicts(parser, args, command)
 
 
@@ -1002,8 +1007,7 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     its tokens. --signoffs asks deviceside first, and stops, exit 0, when it lists nothing for the profile."""
     needed = target.signoffs_needed(REPO) if args.signoffs else None
     if needed == []:
-        print(NO_SIGNOFFS)
-        raise SystemExit(0)  # a success: nothing to sign off, and HA untouched
+        nothing_to_run("No integration needs a sign-off (deviceside's check_release.py --signoffs --json)")
     env = load_env()
     try:
         profile = Profile.load(choose_profile(args.profile, env))
@@ -1041,13 +1045,22 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
 def signoff_selection(needed: list[str], profile: Profile) -> list[str]:
     """--signoffs: of the integrations deviceside lists as needing a sign-off, those the profile has; the rest are
     named for a manual sign-off. Stops, exit 0, when the profile has none of them."""
-    if manual := [integration for integration in needed if integration not in profile.integrations]:
+    print(f"Why each needs one: scripts/check_release.py --signoffs in {REPO}")
+    reachable, manual = [], []
+    for integration in needed:
+        (reachable if integration in profile.integrations else manual).append(integration)
+    if manual:
         print(f"Needs a manual sign-off (_manual.md), out of profile {profile.name}'s reach: {', '.join(manual)}")
-    if not (reachable := [integration for integration in needed if integration in profile.integrations]):
-        print(f"No integration needing a sign-off is in profile {profile.name}: nothing to run.")
-        raise SystemExit(0)
+    if not reachable:
+        nothing_to_run(f"No integration needing a sign-off is in profile {profile.name}")
     print(f"Needs a sign-off: {', '.join(reachable)}")
     return reachable
+
+
+def nothing_to_run(why: str) -> NoReturn:
+    """Stop --signoffs with success: nothing to sign off here, and HA untouched."""
+    print(f"{why}: nothing to run.")
+    raise SystemExit(0)
 
 
 def plan_resume(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
