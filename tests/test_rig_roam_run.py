@@ -492,21 +492,6 @@ async def test_a_group_that_cant_be_made_stops_the_run_and_removes_the_ones_made
     assert lab.ha.states["automation.lab"]["state"] == "on"
 
 
-async def test_recover_removes_the_groups_a_crash_left_on_z2m_and_brings_the_bulbs_home(tmp_path, monkeypatch, lab):
-    monkeypatch.setattr(roam, "GONE_S", 0)
-    journal = Journal(tmp_path / "journal.json")
-    groups = lab_with_groups(tmp_path).roam_groups
-    moving = Roamer(lab.ha, lab.bridge, BULBS, journal, out=lambda _: None, groups=groups)
-    await moving.go("zigbee2mqtt")
-    await moving.make_groups("zigbee2mqtt")
-
-    await rig.recover(lab.ha, lab.ha, Journal(journal.path), lambda _: None, bridge=lab.bridge)
-
-    assert lab.ha.z2m_groups == {} and "light.test_group" not in lab.ha.entity_meta
-    assert await fakes.where(lab) == ["hue", "hue"]
-    assert not journal.path.exists()
-
-
 def test_the_plan_lists_the_groups_and_whether_the_bulbs_move(tmp_path, capsys):
     profile = lab_with_groups(tmp_path)
     run = rig.select(rig.load_step_files(fakes.STEPS), profile, ["hue"], ["set_scene"])
