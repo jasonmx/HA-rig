@@ -34,8 +34,9 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
   fix it now unless it is genuinely out of scope, and then say where it is tracked.
 - A PR that changes `scripts/rig.py`'s options regenerates README's `--help` block (`COLUMNS=100 scripts/rig.py
   --help`); `tests/test_rig.py` fails until it does.
-- The step files are deviceside's (`tests/rig/steps/` there), landed in the deviceside PR for the action they test;
-  a rig PR is needed only for an engine change. When one pairs with a deviceside PR (a step file using a new step
+- The step files are deviceside's (shared in `tests/rig/steps/` there, an integration's own in
+  `tests/integrations/<x>/rig/`, run on `<x>` alone, merged into the action's suite: `docs/rig.md`, Writing a step
+  file), landed in the deviceside PR for the action they test; a rig PR is needed only for an engine change. When one pairs with a deviceside PR (a step file using a new step
   kind, say), the rig PR's plan names it in Coordination, `Tests-with: DeviceSide/DeviceSide#N`, so CI tests the
   pair together (`scripts/ci_deviceside.sh`); merge the rig PR first, as the rig can't run a step kind its engine
   lacks. Nothing reruns it when that PR moves or merges, and `ci-green` counts every run at the head: before merging,

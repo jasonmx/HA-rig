@@ -156,6 +156,7 @@ from ha_rig.engine import (  # noqa: E402
     applies,
     cases,
     check_options,
+    check_owned,
     in_head,
     load_step_files,
     merge,
@@ -1503,8 +1504,10 @@ def run_suites(
         if not profile.roam:
             raise SystemExit(f"--roam-check needs a profile with roam:, and {profile.name} has none")
         return []
-    step_files = load_step_files(target.steps_dir(REPO)) if step_files is None else step_files
+    if step_files is None:
+        step_files = load_step_files(target.steps_dir(REPO), target.integration_steps_dirs(REPO))
     check_options(step_files, registry)
+    check_owned(step_files, registry)
     # No adapter stays, so the dry-run still says `no adapter, will skip`; an option file the adapter lacks goes.
     suites = [
         suite
