@@ -34,7 +34,7 @@ entity IDs and IEEEs and `.env.rig`'s HA and Hue bridge hosts, tokens, Hue app k
 `python -m ha_rig.terms` does it by hand after editing a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in deviceside's main checkout, where the
 rig kept them before it moved: move them here.
 
-Keep DeviceSide's Experimental features option on in the rig's HA. Every run needs it on (Shared state), and a run
+Keep DeviceSide's Experimental features option on in the rig's HA. Every run needs it on (Writing a step file), and a run
 holding HA shared can't turn it on itself. It only lets flagged actions be called; unflagged ones behave the same.
 
 ## Before a run
