@@ -1,12 +1,12 @@
-"""The facts the fact tests found, kept per integration in `_facts.md`: dated, append-only.
+"""The facts the fact cases found, kept per integration in `_facts.md`: dated, append-only.
 
-A fact test (engine.RigTest.fact: a firmware fact, or a test a person watches, or both) runs only with --facts. Each of
-its cases that finds something appends one row as it ends: the date, the case, its kind, which says how the fact was
-seen (`automated` for an automated part that passed or failed, `observed` for a watched part a person answered), the
-devices it ran on with their firmware, and `pass` or `fail`. A row is a fact written down: it stands until evidence
-contradicts it (deviceside's docs/evidence.md, Verify, then trust). The file is only ever appended to, never rewritten,
-so no run erases a fact and a line the rig can't read stays as it is. A test record lists a fact test's cases as skipped
-and points here, quoting the latest row on file for each; the rig decides nothing from the rows.
+A fact case (engine.Case.fact: the watched case of a test with `observe:`, or any case of a `firmware_fact` test) runs
+only with --facts. Each that finds something appends one row as it ends: the date, the case, its kind, which says how
+the fact was seen (`automated` for a firmware fact's automated case that passed or failed, `observed` for a watched case
+a person answered), the devices it ran on with their firmware, and `pass` or `fail`. A row is a fact written down: it
+stands until evidence contradicts it (deviceside's docs/evidence.md, Verify, then trust). The file is only ever appended
+to, never rewritten, so no run erases a fact and a line the rig can't read stays as it is. A test record lists fact
+cases as skipped and points here, quoting the latest row on file for each; the rig decides nothing from the rows.
 
 Pure: no HA, no files but the one it reads and appends to.
 """
@@ -44,7 +44,7 @@ def heading(title: str) -> str:
     """What a new file starts with: its title, a sentence and the table's header."""
     return (
         f"# {title} · facts\n\n"
-        "What the rig's fact tests found, dated. Rows are only ever added: each is a fact, which stands until evidence "
+        "What the rig's fact cases found, dated. Rows are only ever added: each is a fact, which stands until evidence "
         f"contradicts it.\n\n{HEADER}\n|---|---|---|---|---|\n"
     )
 

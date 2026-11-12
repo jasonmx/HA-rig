@@ -401,7 +401,7 @@ async def test_unattended_reports_observed_cases_not_observed_and_runs_the_autom
     assert outcomes(result) == {AUTOMATED: (Outcome.PASS, ""), WATCHED: (Outcome.NOT_OBSERVED, "")}
     assert len([call for call in ha.calls if call[0] == "deviceside"]) == 1
     assert not [line for line in printed if line.startswith(("---", "You'll")) or "need" in line]
-    assert not result.suites[0].recordable  # both parts are a fact test's: no default case for a record
+    assert result.suites[0].recordable  # the automated twin is a default case; nobody watched the fact case
     record = render_record(result.suites[0], "Shelly", "2026.10.1", [], "2026-10-25", "test")
     assert "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | skipped |" in record  # a fact's
 
@@ -413,7 +413,7 @@ async def test_observed_asks_and_its_answer_is_a_fact_not_a_record(tmp_path, ans
     result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=ask)
     assert asked[:2] == ["Press Enter to start... ", "    Did it click twice? [Y/n] "]
     assert outcomes(result)[WATCHED][0] is outcome
-    assert not result.suites[0].recordable  # what the person saw is a fact for _facts.md: no default case here
+    assert result.suites[0].recordable  # what the person saw is a fact for _facts.md, never holding the record back
 
 
 @pytest.mark.parametrize(("saw", "detail"), [("Red, then  blue ", "; saw: Red, then  blue"), ("", "")])
@@ -2881,7 +2881,7 @@ tests:
 """
 
 
-def test_a_record_lists_a_fact_tests_case_as_skipped_whatever_it_did_and_quotes_its_latest_fact(tmp_path):
+def test_a_record_lists_a_fact_case_as_skipped_whatever_it_did_and_quotes_its_latest_fact(tmp_path):
     steps = suite(tmp_path, FIRMWARE_FACT)
     cases = [
         CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS),
@@ -2896,7 +2896,7 @@ def test_a_record_lists_a_fact_tests_case_as_skipped_whatever_it_did_and_quotes_
     assert "| `plain[switch_plug]` | `switch` (switch_plug) | pass |" in record
     assert "| `wins[switch_plug]` | `switch` (switch_plug) | skipped |" in record  # its pass is a fact's
     assert "- `wins[switch_plug]`: last on file 2026-11-12, on Plug (`P1`), firmware `1.4.2`: fail" in record
-    assert "Fact tests run only when asked (--facts)" in record and "[`_facts.md`](_facts.md)" in record
+    assert "Fact cases run only when asked (--facts)" in record and "[`_facts.md`](_facts.md)" in record
     assert "- `wins[switch_plug]`: none on file" in render_record(result, "Shelly", "2026.10.1", devices, "d", "t")
     plain = render_record(SuiteResult(steps, cases[:1], True), "Shelly", "2026.10.1", devices, "d", "t")
     assert "_facts.md" not in plain and "| Ran | 1 passed, 0 skipped |" in plain
@@ -2935,40 +2935,53 @@ def test_a_record_needs_every_default_case_that_applies_to_pass(tmp_path, cases_
 BOTH = OBSERVED.replace("    observe:", "    firmware_fact: true\n    observe:")
 
 
-async def test_a_default_run_skips_every_part_of_a_fact_test_and_its_record_says_how_to_ask(tmp_path):
+async def test_a_default_run_runs_an_observed_tests_automated_twin_and_skips_only_its_fact_cases(tmp_path):
     steps = suite(tmp_path, OBSERVED + FIRMWARE_FACT.partition("tests:\n")[2], facts=False)
     asked, ask = answers()
     ha = FakeHA({"switch.plug": {}}, timer_on)
     result = await run_one(ha, steps, profile(switch_plug="switch.plug"), ask=ask)
     assert outcomes(result) == {
-        AUTOMATED: (Outcome.SKIPPED, engine.OPTED_OUT),  # an observed test's automated part is a fact test's too
+        AUTOMATED: (Outcome.PASS, ""),  # an ordinary check of a shipped call
         WATCHED: (Outcome.SKIPPED, engine.OPTED_OUT),
         "plain[switch_plug]": (Outcome.PASS, ""),
-        "wins[switch_plug]": (Outcome.SKIPPED, engine.OPTED_OUT),
+        "wins[switch_plug]": (Outcome.SKIPPED, engine.OPTED_OUT),  # a firmware fact's automated case is a fact
     }
-    assert asked == [] and engine.OPTED_OUT == "fact test: runs with --facts"
+    assert asked == [] and engine.OPTED_OUT == "fact case: runs with --facts"
     assert result.suites[0].recordable
     [path], _ = await write_records(result, REGISTRY, under(tmp_path / "records"), "2026-11-12", "rig run")
     record = path.read_text()
+    assert f"| `{AUTOMATED}` | `switch` (switch_plug) | pass |" in record
     assert f"| `{WATCHED}` | switch_plug | skipped |" in record
-    assert "| Ran | 1 passed, 3 skipped |" in record
-    assert f"- `{WATCHED}`: none on file" in record
+    assert "| Ran | 2 passed, 2 skipped |" in record
+    assert f"- `{WATCHED}`: none on file" in record and f"- `{AUTOMATED}`" not in record
     assert not (tmp_path / "records" / "shelly" / "_facts.md").exists()  # a default run writes no fact
 
 
-def test_a_fact_test_is_a_firmware_fact_or_a_watched_one_or_both(tmp_path):
-    assert [test.fact for test in suite(tmp_path, OBSERVED + FIRMWARE_FACT.partition("tests:\n")[2]).file.tests] == [
-        True,
-        False,
-        True,
-    ]
-    both = suite(tmp_path, BOTH).file.tests[0]
-    assert both.fact and both.firmware_fact and both.observe is not None
+def test_a_fact_case_is_a_watched_one_or_any_of_a_firmware_fact(tmp_path):
+    planned = cases(suite(tmp_path, OBSERVED + FIRMWARE_FACT.partition("tests:\n")[2]), profile(switch_plug="s.p"))
+    assert {case.id: case.fact for case in planned} == {
+        AUTOMATED: False,
+        WATCHED: True,
+        "plain[switch_plug]": False,
+        "wins[switch_plug]": True,
+    }
+    assert {case.id: case.fact for case in cases(suite(tmp_path, BOTH), profile(switch_plug="s.p"))} == {
+        AUTOMATED: True,  # a firmware fact's: both its cases
+        WATCHED: True,
+    }
 
 
-@pytest.mark.parametrize(("facts", "ran"), [(False, set()), (True, {AUTOMATED, WATCHED})])
-def test_facts_runs_a_fact_test_whole(tmp_path, facts, ran):
-    planned = cases(suite(tmp_path, BOTH, facts=facts), profile(switch_plug="switch.plug"))
+@pytest.mark.parametrize(
+    ("text", "facts", "ran"),
+    [
+        (BOTH, False, set()),
+        (BOTH, True, {AUTOMATED, WATCHED}),
+        (OBSERVED, False, {AUTOMATED}),
+        (OBSERVED, True, {AUTOMATED, WATCHED}),
+    ],
+)
+def test_facts_adds_the_fact_cases(tmp_path, text, facts, ran):
+    planned = cases(suite(tmp_path, text, facts=facts), profile(switch_plug="switch.plug"))
     assert {case.id for case in planned if not case.skip} == ran
 
 
@@ -2984,7 +2997,7 @@ async def test_a_fact_test_with_both_parts_writes_a_row_for_each(tmp_path):
         (AUTOMATED, AUTOMATED_KIND, PASS),
         (WATCHED, OBSERVED_KIND, PASS),
     ]
-    assert not result.suites[0].recordable  # nothing but fact tests: no default case passed
+    assert not result.suites[0].recordable  # a firmware fact's cases are all fact cases: no default one passed
 
 
 async def test_facts_unattended_runs_the_automated_part_and_leaves_the_watched_one_not_observed(tmp_path):

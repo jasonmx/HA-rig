@@ -38,10 +38,9 @@ options:
                         limit to an integration key (repeatable); with --wait-free, wait for it
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
-  --facts               also run the fact tests, automated and watched parts, which a default run
-                        skips; their results go to _facts.md
-  --unattended          ask no one: with --facts, the watched parts are reported not observed, and
-                        the automated ones run
+  --facts               also run the fact cases a default run skips, firmware facts and watched
+                        cases, for _facts.md
+  --unattended          ask no one: with --facts, the watched cases are reported not observed
   --serial              run every case one at a time, with no lanes: to tell a case that fails in
                         a lane from one that fails
   --debug-logs          run HA's DeviceSide and the run's integrations, and Z2M, at debug, and

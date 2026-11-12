@@ -11,7 +11,7 @@ An entry goes when:
 - HA runs another version than its cases ran on: a record names one;
 - its suite's record is promoted into the checkout (ha_rig/staging.py);
 - the run that saved a failure of one of its default cases ends: the suite reruns whole, so a record never covers up a
-  failure. A fact test's failure is a fact (ha_rig/facts.py), not the suite's, so it drops nothing;
+  failure. A fact case's failure is a fact (ha_rig/facts.py), not the suite's, so it drops nothing;
 - nothing has touched it for PRUNE_DAYS.
 
 Two runs on different integrations may save at once, so each save re-reads the file under a lock and merges this run's
@@ -91,7 +91,7 @@ class Progress:
         self.path = path
         self.entries: dict[EntryKey, dict] = dict(entries or {})
         self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): its run_key
-        self.suites: dict[tuple[str, str], Suite] = {}  # the tracked suites, for which of their cases are fact tests'
+        self.suites: dict[tuple[str, str], Suite] = {}  # the tracked suites, for which of their cases are fact cases
         self.ha_version: str | None = None
         self.changed: set[EntryKey] = set()
         self.dropped: set[EntryKey] = set()
@@ -284,7 +284,7 @@ class Progress:
 
 
 def _failed(suite: Suite, results: Iterable[CaseResult]) -> bool:
-    """Whether a default case failed: a fact test's failure is a fact, not the suite's."""
+    """Whether a default case failed: a fact case's failure is a fact, not the suite's."""
     return any(result.outcome is Outcome.FAIL and not opt_in(suite, result.id) for result in results)
 
 
