@@ -176,7 +176,7 @@ async def test_z2m_close_is_sent_again_while_joining_stays_open(quick_z2m, monke
 
 
 async def test_z2m_close_that_always_fails_stops_after_its_tries(quick_z2m, monkeypatch):
-    monkeypatch.setattr("ha_rig.client.Z2M_REQUEST_TIMEOUT_S", 1)
+    monkeypatch.setattr("ha_rig.client.Z2M_REQUEST_TIMEOUT_S", 0.15)
     monkeypatch.setattr("ha_rig.client.Z2M_CLOSE_RETRY_S", 0.02)
     ha = FakeHA({})
     await ha.z2m_permit_join(120)

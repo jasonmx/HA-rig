@@ -14,7 +14,7 @@ from tests.rig_fakes import FakeHA, Roster, ShellyAuto, profile
 
 REGISTRY = Roster({"shelly": {"clear_auto_off", "get_attributes", "set_auto_off", "set_auto_on"}})
 TOLERANCE = {"shelly": 0.2}
-DEADLINE_S = 0.5
+DEADLINE_S = 0.15
 PLUG = "switch.plug"
 
 
