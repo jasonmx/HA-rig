@@ -52,9 +52,11 @@ def quick_prime(monkeypatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_settle(monkeypatch) -> None:
-    """No settle wait before a run's first case or after it puts a device back; a test that needs one sets its own."""
+    """No settle wait before a run's first case or after it puts a device back, and no lag after a Z2M call before
+    its busy check; a test that needs one sets its own."""
     monkeypatch.setattr(engine, "SETUP_SETTLE_S", 0)
     monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
+    monkeypatch.setattr(engine, "BUSY_LAG_S", 0)
 
 
 @pytest.fixture(autouse=True)
