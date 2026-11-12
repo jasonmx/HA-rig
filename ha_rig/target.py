@@ -13,7 +13,8 @@ integration's own, integration_steps_dirs), and its test records in
 What needs testing is deviceside's to say: `signoffs_needed` asks its release check (SIGNOFFS) for the integrations
 still needing a sign-off, the run selection of --signoffs.
 
-Pure reading, of files, git and that check: the household check and the runner's preflight load it before anything mutates.
+Pure reading, of files, git and that check: the household check and the runner's preflight load it before anything
+mutates.
 """
 
 import json
