@@ -1864,7 +1864,7 @@ async def run_rig(
     results: list[SuiteResult] = []  # each phase's, as it finishes: a failed move keeps the phases before it
     started = datetime.datetime.now()
     stamp = started.strftime("%Y-%m-%d %H:%M:%S")
-    expected = dict.fromkeys(pattern for suite in suites for pattern in suite.file.expected_log)
+    expected = dict.fromkeys(pattern for suite in suites for pattern in suite.file.expected_on(suite.integration))
     logs = RunLogs(logs_dir or REPORT_DIR, f"rig run {stamp}", started, keep=debug_logs, expected=expected)
     levels = DebugLevels(Baseline.of(admin or ha, journal, "debug")) if debug_logs else None
     staging = staging_for(stamp, profile, progress)

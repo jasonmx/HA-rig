@@ -211,7 +211,8 @@ the action it tests. It names roles, never entities: deviceside is public, and i
 
 An integration's own step file, `tests/integrations/<x>/rig/<action>.yaml`, belongs to that integration's maintainers.
 Its tests join the shared file for the action (the one with no `options` or `name`), as if each said `only: [<x>]`:
-the same suite, record and estimate, run on `<x>` alone. One with no shared file for its action stands as its own. It
+the same suite, record and estimate, run on `<x>` alone; its `expected_log` applies only to the suite on `<x>`. One
+with no shared file for its action stands as its own. It
 takes no `options` or `name`; an `only:` naming another integration, a test name the shared file already has, or an
 action with no adapter on `<x>` fails at load. A repo maintainer may adopt its cases into the shared file.
 The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`). A run while one is
