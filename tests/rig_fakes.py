@@ -12,10 +12,12 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
+from aiohttp import web
+
 from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
 from ha_rig.client import HAClient, HAError, device_ieee
 from ha_rig.profile import Profile, RigEntity, colon_ieee, hex_ieee
-from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
+from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb, Roamer
 from ha_rig.target import deviceside_repo, test_records_dir
 
 
@@ -150,6 +152,9 @@ class FakeHA(HAClient):
         self.z2m_restart_s = 0.01
         self._z2m_responses: list[asyncio.Queue[str]] = []  # live bridge/response/device/remove subscriptions
         self._z2m_device_topics: dict[str, asyncio.Queue[str]] = {}  # live zigbee2mqtt/<name> subscriptions
+
+    async def close(self) -> None:
+        """Nothing to close: a fake opens no connection."""
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
@@ -539,6 +544,36 @@ STEPS = Path(__file__).parent / "steps"  # fixture step files, in place of the c
 
 LAB_OPTIONS = {"hue_native_control": True}
 LAB_BULBS = [Bulb(LAB_A[2:], "light.lab_a", LAB_OPTIONS), Bulb(LAB_B[2:], "light.lab_b")]
+
+
+def lab_on_hue(ha: FakeHA | None = None) -> Lab:
+    """The lab's two bulbs, on Hue under their fixed entity IDs, with `ha` (an empty FakeHA unless given)."""
+    return Lab(FakeHA({}) if ha is None else ha, FakeBridge(), {LAB_A: "light.lab_a", LAB_B: "light.lab_b"})
+
+
+async def where(lab: Lab) -> list[str | None]:
+    """The network each of the lab's bulbs is on."""
+    found = Roamer(lab.ha, lab.bridge, LAB_BULBS, out=lambda _: None)
+    return [await found.locate(bulb) for bulb in LAB_BULBS]
+
+
+def connected(ha: FakeHA) -> Callable:
+    """A stand-in for rig.connect: `ha` as both the user and the admin connection."""
+
+    async def connect(env):
+        return ha, ha
+
+    return connect
+
+
+async def ws_handshake(request: web.Request) -> web.WebSocketResponse:
+    """HA's WebSocket auth on a stub: auth_ok for the token "token", auth_invalid for any other."""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    await ws.send_json({"type": "auth_required"})
+    auth = await ws.receive_json()
+    await ws.send_json({"type": "auth_ok" if auth["access_token"] == "token" else "auth_invalid"})
+    return ws
 
 
 def lab_profile(directory: Path, extra: str = "", networks: str = "hue, zha, zigbee2mqtt") -> Path:
