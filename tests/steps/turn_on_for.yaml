@@ -1,0 +1,206 @@
+action: turn_on_for
+rig_seconds: 90
+tests:
+  - name: on_then_off
+    roles: [switch_plug]
+    steps:
+      - set: {state: off}
+      - call: {duration: 6}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: drops_brightness_on_a_wrapper
+    roles: [light_wrapped]
+    steps:
+      - set: {state: off}
+      - call: {duration: 6, brightness: 50}
+      - expect_response: {status: expected, integration: self, detail: fields_dropped}
+      - expect_state: {state: on, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: drops_brightness_on_a_relay_light
+    roles: [light_onoff]
+    only: [shelly]
+    steps:
+      - set: {state: off}
+      - call: {duration: 6, brightness: 50}
+      - expect_response: {status: expected, integration: self, detail: fields_dropped}
+      - expect_state: {state: on, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: bulb_on_then_off
+    roles: [light_dimmable]
+    steps:
+      - set: {state: off}
+      - wait: 2  # ZHA ignores a light's "on" report for 1.5 s after light.turn_off
+        only: [zha]
+      - call: {duration: 6}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: bulb_brightness_then_off
+    roles: [light_dimmable]
+    only: [zha]  # bulb_transition_then_off covers brightness on Shelly and Zigbee2MQTT
+    steps:
+      - set: {state: off}
+      - wait: 2  # ZHA ignores a light's "on" report for 1.5 s after light.turn_off
+      - call: {duration: 6, brightness: 50}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, brightness: {min: 120, max: 136}, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: bulb_color_temp_then_off
+    roles: [light_ct]
+    only: [shelly, zha, zigbee2mqtt]
+    steps:
+      - z2m_option: {hue_native_control: false}
+      - set: {state: off}
+      - wait: 2  # ZHA ignores a light's "on" report for 1.5 s after light.turn_off
+        only: [zha]
+      - call: {duration: 6, color_temp_kelvin: 4000}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_temp_kelvin: {min: 3900, max: 4100}, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
+
+  - name: bulb_transition_then_off
+    roles: [light_dimmable]
+    only: [shelly, zigbee2mqtt]  # ZHA's scope has no transition
+    steps:
+      - set: {state: off}
+      - call: {duration: 6, brightness: 50, transition: 2}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, brightness: {min: 120, max: 136}, within: tol + 2}
+      - wait: duration - tol - 2
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol + 2}
+
+  - name: rgbcct_bulb_rgb_then_off
+    roles: [light_color]
+    only: [shelly]
+    setup:
+      - set: {state: on, color_temp_kelvin: 2700}
+      - set: {state: off}
+    steps:
+      - call: {duration: 6, rgb_color: [255, 0, 0]}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_mode: rgb, rgb_color: [255, 0, 0], within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: rgbcct_bulb_hs_then_off
+    roles: [light_color]
+    only: [shelly]
+    setup:
+      - set: {state: on, color_temp_kelvin: 2700}
+      - set: {state: off}
+    steps:
+      - call: {duration: 6, hs_color: [120, 100]}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_mode: rgb, rgb_color: [0, 255, 0], within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: rgbcct_bulb_xy_then_off
+    roles: [light_color]
+    only: [shelly]
+    setup:
+      - set: {state: on, rgb_color: [255, 0, 0]}
+      - set: {state: off}
+    steps:
+      - call: {duration: 6, xy_color: [0.15, 0.06]}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_mode: rgb, rgb_color: [57, 53, 255], within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: bulb_rgb_then_off
+    roles: [light_color]
+    only: [zigbee2mqtt]
+    setup:
+      - z2m_option: {hue_native_control: false}
+      - set: {state: on, color_temp_kelvin: 2700}
+      - set: {state: off}
+    steps:
+      - call: {duration: 6, rgb_color: [255, 0, 0]}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_mode: xy, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
+
+  - name: bulb_hs_then_off
+    roles: [light_color]
+    only: [zigbee2mqtt]
+    setup:
+      - z2m_option: {hue_native_control: false}
+      - set: {state: on, color_temp_kelvin: 2700}
+      - set: {state: off}
+    steps:
+      - call: {duration: 6, hs_color: [120, 100]}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_mode: xy, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
+
+  - name: bulb_xy_then_off
+    roles: [light_color]
+    only: [zigbee2mqtt]
+    setup:
+      - z2m_option: {hue_native_control: false}
+      - set: {state: on, color_temp_kelvin: 2700}
+      - set: {state: off}
+    steps:
+      - call: {duration: 6, xy_color: [0.15, 0.06]}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, color_mode: xy, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+      - expect_z2m_option: {hue_native_control: false}  # set for the turn_on only, then put back
+
+  - name: group_on_then_off
+    roles: [group]
+    only: [zha, zigbee2mqtt]
+    setup:
+      - set: {state: off}
+      - wait: 2
+    steps:
+      - call: {duration: 6}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}
+
+  - name: group_brightness_then_off
+    roles: [group]
+    only: [zha]
+    setup:
+      - set: {state: off}
+      - wait: 2  # ZHA ignores a light's "on" report for 1.5 s after light.turn_off
+    steps:
+      - call: {duration: 6, brightness: 50}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, brightness: {min: 120, max: 136}, within: tol}
+      - wait: duration - tol
+      - expect_state: {state: on}
+      - expect_state: {state: off, within: 2 * tol}

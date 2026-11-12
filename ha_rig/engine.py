@@ -24,6 +24,7 @@ from typing import Any
 
 import yaml
 
+from . import target as checkout
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
 from .client import HAClient, HAError, device_ieee
@@ -32,8 +33,6 @@ from .facts import FILE as FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
 from .profile import ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile
-from .target import deviceside_repo
-from .target import steps_dir as steps_dir_of
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -573,9 +572,10 @@ def _parse_phases(raw: dict) -> tuple[tuple[Step, ...], tuple[Step, ...], Observ
     return steps, setup, observe
 
 
-def load_step_file(path: Path) -> StepFile:
+def load_step_file(path: Path, text: str | None = None) -> StepFile:
+    """The step file at `path`, parsed from `text` when given (what the caller read, and compared)."""
     try:
-        raw = yaml.safe_load(path.read_text())
+        raw = yaml.safe_load(path.read_text() if text is None else text)
         if not isinstance(raw, dict):
             raise ValueError("expected a mapping with action, rig_seconds and tests")
         if unknown := sorted(set(raw) - {"action", "name", "rig_seconds", "options", "expected_log", "tests"}):
@@ -627,8 +627,23 @@ def _named(step_file: StepFile, name: Any) -> StepFile:
 
 def load_step_files(steps_dir: Path | None = None) -> list[StepFile]:
     """Every `<action>.yaml` directly in steps_dir, by default the checkout under test's (target.steps_dir)."""
-    steps_dir = steps_dir_of(deviceside_repo()) if steps_dir is None else steps_dir
+    steps_dir = checkout.steps_dir(checkout.deviceside_repo()) if steps_dir is None else steps_dir
     return [load_step_file(path) for path in sorted(steps_dir.glob("*.yaml"))]
+
+
+def load_checkout_steps(repo: Path) -> tuple[list[StepFile], str | None, bool]:
+    """`repo`'s step files, parsed from the bytes read here; HEAD, read before them; and whether they are HEAD's:
+    each file's bytes as committed there, and no file more or less. Git's own view (status) would miss an untracked file
+    it hides, an ignored one and an assume-unchanged or skip-worktree edit, which the loader reads all the same.
+
+    A record cites the commit, so a run whose files aren't HEAD's writes none, and no fact row, and keeps no ledger: a
+    pass saved with an edit, then reverted, would otherwise resume into a record at that commit. Committing moves HEAD,
+    so nothing saved before a commit resumes after it."""
+    head = checkout.head_commit(repo)
+    directory = checkout.steps_dir(repo)
+    sources = {path.name: path.read_bytes() for path in sorted(directory.glob("*.yaml"))}
+    files = [load_step_file(directory / name, source.decode()) for name, source in sources.items()]
+    return files, head, head is not None and sources == checkout.committed_step_sources(repo, head)
 
 
 # --- Planning ------------------------------------------------------------------------------------------------

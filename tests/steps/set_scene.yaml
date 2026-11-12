@@ -1,0 +1,23 @@
+action: set_scene
+rig_seconds: 80
+tests:
+  - name: sets_while_off
+    roles: [scene]
+    setup:
+      - set: {target: group, state: on, color_temp_kelvin: 6500}
+      - set: {target: group, state: off}
+    steps:
+      - call: {}
+      - expect_response: {status: expected, integration: self}
+      - wait: 1
+      - expect_state: {target: group, state: off}
+      - set: {target: group, state: on}
+
+  - name: applies_while_on
+    roles: [scene]
+    setup:
+      - set: {target: group, state: on, brightness_pct: 100, color_temp_kelvin: 6500}
+    steps:
+      - call: {}
+      - expect_state: {target: group, state: on, within: tol}
+      - expect_state: {target: light_ct, state: on, brightness: {min: 90, max: 114}, color_temp_kelvin: {min: 2600, max: 2850}, within: 5}

@@ -1,5 +1,6 @@
 """Fakes shared by the rig's tests: a fake HAClient (and its admin twin, with DeviceSide's options flow), a
-registry whose adapters all take options, and the step files that tests/test_rig.py reuses."""
+registry whose adapters all take options, and the step files that tests/test_rig.py reuses. STEPS holds the rig's
+own fixture step files: the tests never depend on deviceside's test plan, only tests/test_rig_steps.py reads it."""
 
 import asyncio
 import contextlib
@@ -534,6 +535,8 @@ class FakeBridge(HueBridge):
 
 # The lab's two roaming bulbs, as a Roamer and as a profile file.
 LAB_A, LAB_B = "0x001788010abcdef0", "0x001788010abcdef1"
+STEPS = Path(__file__).parent / "steps"  # fixture step files, in place of the checkout's tests/rig/steps
+
 LAB_OPTIONS = {"hue_native_control": True}
 LAB_BULBS = [Bulb(LAB_A[2:], "light.lab_a", LAB_OPTIONS), Bulb(LAB_B[2:], "light.lab_b")]
 

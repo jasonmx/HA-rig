@@ -286,7 +286,7 @@ def test_main_dry_runs_roam_check_with_the_moves_and_no_deploy(tmp_path, monkeyp
 def test_the_plan_lists_each_phase_and_the_moves(tmp_path, capsys):
     profile = lab_with_pause(tmp_path)
     registry = AdapterRegistry.discover()
-    run = rig.select(rig.load_step_files(), profile, None, ["turn_on_for"])
+    run = rig.select(rig.load_step_files(fakes.STEPS), profile, None, ["turn_on_for"])
     rig.print_phases(profile, run, registry, None, rig.roams(profile, run))
     out = capsys.readouterr().out
     assert out.index("Adapters on Hue:") < out.index("Adapters on ZHA:") < out.index("Adapters on Z2M:")
@@ -524,7 +524,7 @@ async def test_recover_removes_the_groups_a_crash_left_on_z2m_and_brings_the_bul
 
 def test_the_plan_lists_the_groups_and_whether_the_bulbs_move(tmp_path, capsys):
     profile = lab_with_groups(tmp_path)
-    run = rig.select(rig.load_step_files(), profile, ["hue"], ["set_scene"])
+    run = rig.select(rig.load_step_files(fakes.STEPS), profile, ["hue"], ["set_scene"])
     rig.print_phases(profile, run, AdapterRegistry.discover(), None, False, True)
     out = capsys.readouterr().out
     assert "Roaming: none, as no ZHA or Z2M suite runs; the bulbs stay on Hue." in out

@@ -182,11 +182,14 @@ cases. `--no-deploy` saves nothing, as it writes no record, and neither does a r
 than the one planned (origin moved). A run whose every selected case is saved says so and stops; one whose HEAD moved
 while it waited for its locks stops too, to be run again.
 
-**Uncommitted step files.** A record cites the commit, so it must hold the step files that ran. A run with uncommitted
-changes under the checkout's `tests/rig/steps/` still goes ahead, so a step file can be iterated on, but it says so at
-the start, writes no test record and neither reads nor saves the ledger: a pass made with an edit that is then
-reverted would otherwise resume into a record at that commit. Commit the step files for a record; committing moves
-HEAD, so nothing saved before the commit resumes after it.
+**Uncommitted step files.** A record cites the commit, so it must hold the step files that ran. The rig reads HEAD,
+then the checkout's `tests/rig/steps/*.yaml`, and parses each from the bytes it compares with HEAD's copy: a file
+edited, added (tracked or not, ignored or not) or removed, or an edit git is told not to see (assume-unchanged,
+skip-worktree), makes them uncommitted, and so does HEAD moving before the deploy state is read. Such a run still goes
+ahead, so a step file can be iterated on, but it says so, writes no test record or `_facts.md` row and neither reads
+nor saves the ledger: a pass made with an edit that is then reverted would otherwise resume into a record at that
+commit. Commit the step files for a record; committing moves HEAD, so nothing saved before the commit resumes after
+it.
 
 A run that stops part way puts everything back as always and exits 75; rerun it and it picks up at the cases with no
 saved result, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
@@ -205,7 +208,8 @@ saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next
 A step file lives in deviceside, `tests/rig/steps/<action>.yaml`, and lands in the deviceside PR that adds or changes
 the action it tests. It names roles, never entities: deviceside is public, and its household check covers the file.
 The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`). A run while one is
-uncommitted writes no record (The ledger, above).
+uncommitted writes no record (Uncommitted step files, above). The rig's own tests use fixture copies in its
+`tests/steps/`, so its CI doesn't depend on deviceside's test plan.
 
 ```yaml
 action: turn_on_for        # the DeviceSide action every test in the file calls
@@ -393,6 +397,6 @@ firmware fact's automated case that passed or failed, and per watched case a per
 across suites), the case, its kind, which says how the fact was seen (`automated` or `observed`), the devices it ran on
 with their firmware (a group's members included, as a record's Device row names them) and the result. The file is only
 ever appended to, a row as each case ends, straight into the checkout, whether or not a record is written and however
-the run ends: a fact stands whatever the code, until evidence contradicts it, and a line the rig can't read stays as it
+the run ends, except while the step files are uncommitted (The ledger, above): a fact stands whatever the code, until evidence contradicts it, and a line the rig can't read stays as it
 is. Nothing reruns a fact case by itself, and the rig decides nothing from the rows. Review the diff before committing
 it.

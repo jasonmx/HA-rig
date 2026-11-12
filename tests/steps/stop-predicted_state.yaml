@@ -1,0 +1,29 @@
+action: stop
+rig_seconds: 120
+options: [predicted_state]
+tests:
+  - name: shows_the_halt
+    roles: [light_ct, group]
+    setup:
+      - set: {state: on, brightness_pct: 10}
+    steps:
+      - call: {action: raise_brightness, sweep_time: 10}
+      - wait: 3
+      - call: {}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, brightness: {min: 84, max: 122}, within: tol}
+      - wait: 7  # past where the raise would have ended
+      - expect_state: {state: on, brightness: {min: 84, max: 122}}
+
+  - name: shows_the_halt_of_a_lower_to_off  # the cut: HA stays on throughout
+    roles: [light_ct, group]
+    setup:
+      - set: {state: on, brightness_pct: 100}
+    steps:
+      - call: {action: lower_brightness, sweep_time: 10}
+      - wait: 3
+      - call: {}
+      - expect_response: {status: expected, integration: self}
+      - expect_state: {state: on, brightness: {min: 150, max: 200}, within: tol}
+      - wait: 8
+      - expect_state: {state: on, brightness: {min: 150, max: 200}}

@@ -35,6 +35,6 @@ Tests-with: the deviceside PR for step 2 (runtime), which removes the events.
 - Deviceside's `check_release.py --signoffs` (step 4) is to list the integrations needing a sign-off in a
   machine-readable form; a later rig change takes it as the selection (TODO in docs/rig.md).
 - The step files move to deviceside in a separate step. Landed as step 3b: they live in deviceside's
-  `tests/rig/steps/`, the rig reads them from the checkout under test (`target.steps_dir`), and a run with uncommitted
-  step files goes ahead but writes no record and neither reads nor saves the ledger, so a record always cites the step
-  files that ran.
+  `tests/rig/steps/`, the rig reads them from the checkout under test (`target.steps_dir`), and a run whose step files
+  aren't HEAD's (compared byte for byte) goes ahead but writes no record or fact row and neither reads nor saves the
+  ledger, so a record cites the step files that ran.
