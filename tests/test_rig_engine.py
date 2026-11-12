@@ -364,7 +364,7 @@ tests:
     setup:
       - set: {state: off}
     steps:
-      - call: {duration: 0.6}
+      - call: {duration: 0.2}
       - expect_response: {status: expected, integration: self}
       - expect_state: {state: on, within: tol}
       - wait: duration - tol
