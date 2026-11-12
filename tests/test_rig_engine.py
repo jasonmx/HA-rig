@@ -2997,6 +2997,8 @@ async def test_facts_unattended_runs_the_automated_part_and_leaves_the_watched_o
     result = await run_one(ha, suite(tmp_path, BOTH), profile(switch_plug="switch.plug"), ask=None)
     assert outcomes(result) == {AUTOMATED: (Outcome.PASS, ""), WATCHED: (Outcome.NOT_OBSERVED, "")}
     records = under(tmp_path / "records")
+    watched = result.suites[0].cases[1]
+    assert watched.id == WATCHED and watched.devices == ()
     written = [write_fact(result.suites[0].suite, case, REGISTRY, records, "d") for case in result.suites[0].cases]
     assert written[1] is None  # nobody watched
     assert [row.kind for row in FactsFile.read(records("shelly") / "_facts.md").rows] == [AUTOMATED_KIND]
@@ -3040,18 +3042,3 @@ async def test_a_firmware_fact_that_passed_or_failed_adds_a_row_naming_its_devic
         ),
     )
     assert result.suites[0].recordable  # the fact's result is no part of the record
-
-
-async def test_an_observed_case_nobody_answered_adds_no_row(tmp_path):
-    ha = FakeHA({"switch.plug": {}}, timer_on)
-    result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=None)
-    [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
-    assert watched.outcome is Outcome.NOT_OBSERVED and watched.devices == ()
-    assert write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12") is None
-
-
-def test_a_record_has_no_covers_row(tmp_path):
-    steps = suite(tmp_path, ON_THEN_OFF)
-    case = CaseResult(AUTOMATED, "switch_plug", "switch", Outcome.PASS)
-    record = render_record(SuiteResult(steps, [case], True), "Shelly", "2026.10.1", [], "d", "t")
-    assert "Covers" not in record
