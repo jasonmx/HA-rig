@@ -1,24 +1,17 @@
-"""The ledger: each suite's finished cases, on disk, so its coverage builds up over any number of runs.
+"""The ledger: each suite's finished cases, on disk, so a run that stops part way picks up where it stopped.
 
 A run saves each case the moment it finishes, and the facts each part of a suite took (HA's version, the devices behind
 its entities), in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir: one file per profile, shared
-by every worktree. Its entries are per suite, keyed by the suite's fingerprint (ha_rig/coverage.py), so a suite's saved
-cases hold only while the code they prove is unchanged, and runs of different code sit side by side. A later run joins
-a suite's saved results to its own, so a suite finished across runs writes its record.
+by every worktree. Its entries are per suite, keyed by the commit the run planned at, so a rerun at the same commit
+resumes and one at another starts the suite afresh. A later run joins a suite's saved results to its own, so a suite
+finished across runs writes its record. It is execution state only: what a suite needs to prove, and when, is
+deviceside's to say.
 
 An entry goes when:
 - HA runs another version than its cases ran on: a record names one;
-- its suite's record is promoted into the checkout (ha_rig/staging.py), which carries its coverage from then on;
+- its suite's record is promoted into the checkout (ha_rig/staging.py);
 - the run that saved a failure of one of its cases ends: the suite reruns whole, so a record never covers up a failure;
 - nothing has touched it for PRUNE_DAYS.
-
-**Firmware facts.** A case whose test is a `firmware_fact` proves a device behavior, not the adapter's code, so its
-pass is also kept apart from the entries, keyed by suite and case alone, with the devices its suite's part ran on. It
-holds across code changes and HA versions, and outlives its suite's record, while the test is as written then and no
-device of the same model now shows another firmware: coverage lends it to the suite's entry at its fingerprint now,
-devices and all, so the next record carries it and names their firmware. It goes when the case fails or runs again,
-its test changes, the profile moves it to other entities, or a later part of its suite shows that model at another
-firmware; never for its age.
 
 Two runs on different integrations may save at once, so each save re-reads the file under a lock and merges this run's
 changes into it. Nothing is written until the run saves, so a dry run, or a run that never starts, leaves the file as
@@ -33,16 +26,14 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 
-from .engine import CaseResult, Device, Outcome, Suite, SuiteResult
+from .engine import Case, CaseResult, Device, Outcome, Suite, SuiteResult
 from .journal import write_whole
-from .observed import Trace
 
 DIRECTORY = "deviceside-rig-progress"
 PRUNE_DAYS = 30
 
 Done = dict[tuple[str, str, str], CaseResult]  # (integration, suite name, case id): its result
-EntryKey = tuple[str, str, str]  # (integration, suite name, fingerprint)
-FactKey = tuple[str, str, str]  # (integration, suite name, case id): a firmware fact's pass
+EntryKey = tuple[str, str, str]  # (integration, suite name, commit)
 
 
 def path_for(directory: Path, profile: str) -> Path:
@@ -54,30 +45,16 @@ def _now() -> str:
 
 
 def _key(entry: dict) -> EntryKey:
-    return entry["integration"], entry["suite"], entry["fingerprint"]
+    return entry["integration"], entry["suite"], entry["commit"]
 
 
-def _fact_key(fact: dict) -> FactKey:
-    return fact["integration"], fact["suite"], fact["case"]["id"]
-
-
-def _read(path: Path) -> tuple[dict[EntryKey, dict], dict[FactKey, dict]]:
+def _read(path: Path) -> dict[EntryKey, dict]:
+    """The file's entries; an entry from before entries were keyed by commit is left out, so its suite reruns."""
     try:
         saved = json.loads(path.read_text()) if path.exists() else {}
-        entries = {_key(entry): entry for entry in saved.get("suites", [])}
-        return entries, {_fact_key(fact): fact for fact in saved.get("firmware", [])}
+        return {_key(entry): entry for entry in saved.get("suites", []) if "commit" in entry}
     except ValueError, KeyError, TypeError, AttributeError:
-        return {}, {}
-
-
-def _moved(saved: Iterable[dict], now: Iterable[Device]) -> bool:
-    """Whether a device of a model the fact ran on now shows another firmware, and none of that model its own."""
-    now = [asdict(device) for device in now]
-    for device in saved:
-        same_model = [d for d in now if (d["model"], d["model_id"]) == (device["model"], device["model_id"])]
-        if same_model and device not in same_model:
-            return True
-    return False
+        return {}
 
 
 def _old(entry: dict, now: datetime.datetime) -> bool:
@@ -88,19 +65,24 @@ def _old(entry: dict, now: datetime.datetime) -> bool:
     return now - touched > datetime.timedelta(days=PRUNE_DAYS)
 
 
-class Progress:
-    """The profile's ledger, as this run sees it: every entry on disk, and the suites the run `track`s, each at its
-    fingerprint now. Its changes are merged into the file on each save."""
+def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
+    """Whether a saved result still stands for `case` on resume: the profile skips it for the same reason, or it moved
+    the entities the case plans now. A `not observed` stands only for an unattended run."""
+    if case.skip and not case.unreachable:  # an unreachable skip is for now: what it saved before still stands
+        return result.outcome is Outcome.SKIPPED and result.detail == case.skip
+    if result.outcome is Outcome.NOT_OBSERVED:
+        return unattended
+    return result.outcome is not Outcome.SKIPPED and result.entity_ids == tuple(case.entities.values())
 
-    def __init__(
-        self, path: Path, entries: dict[EntryKey, dict] | None = None, facts: dict[FactKey, dict] | None = None
-    ):
+
+class Progress:
+    """The profile's ledger, as this run sees it: every entry on disk, and the suites the run `track`s, each at the
+    commit it planned at. Its changes are merged into the file on each save."""
+
+    def __init__(self, path: Path, entries: dict[EntryKey, dict] | None = None):
         self.path = path
         self.entries: dict[EntryKey, dict] = dict(entries or {})
-        self.firmware: dict[FactKey, dict] = dict(facts or {})  # Firmware facts, in the module docstring
-        self.facts_changed: set[FactKey] = set()
-        self.facts_dropped: set[FactKey] = set()
-        self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): its fingerprint now
+        self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): the commit planned at
         self.ha_version: str | None = None
         self.changed: set[EntryKey] = set()
         self.dropped: set[EntryKey] = set()
@@ -109,32 +91,52 @@ class Progress:
     def load(cls, directory: Path, profile: str) -> Progress:
         """The ledger on disk, its entries untouched for PRUNE_DAYS dropped (from the file at the next save)."""
         path = path_for(directory, profile)
-        progress = cls(path, *_read(path))
-        if path.exists() and not (progress.entries or progress.firmware) and path.read_text().strip():
-            print(f"The ledger {path} is unreadable, so every saved case reruns; the next save replaces it.")
+        progress = cls(path, _read(path))
+        if path.exists() and not progress.entries and path.read_text().strip() not in ("", "{}"):
+            print(f"The ledger {path} is unreadable or from an older rig, so every saved case reruns.")
         now = datetime.datetime.now()
         for key in [key for key, entry in progress.entries.items() if _old(entry, now)]:
             progress._drop(key)
         return progress
 
-    def track(self, suite: Suite, fingerprint: str) -> None:
-        """Follow `suite` at `fingerprint`: its saved cases there are the run's, and its new ones are saved there."""
-        self.tracked[suite.integration, suite.name] = fingerprint
+    def track(self, suite: Suite, commit: str) -> None:
+        """Follow `suite` at `commit`: its saved cases there are the run's, and its new ones are saved there."""
+        self.tracked[suite.integration, suite.name] = commit
+
+    def resume(
+        self, suite: Suite, commit: str, planned: Iterable[Case], *, fresh: bool = False, unattended: bool = False
+    ) -> None:
+        """Track `suite` at `commit`, keeping the saved results that still hold for the cases it `planned`. `fresh`
+        (--fresh), or a saved failure, drops the suite's entry, so it runs whole."""
+        self.track(suite, commit)
+        saved = self.saved(suite)
+        if fresh or any(result.outcome is Outcome.FAIL for result in saved.values()):
+            self.drop(suite)
+            return
+        by_id = {case.id: case for case in planned}
+        self.forget(
+            suite,
+            [
+                case_id
+                for case_id, result in saved.items()
+                if case_id not in by_id or not holds(by_id[case_id], result, unattended)
+            ],
+        )
 
     def key(self, suite: Suite) -> EntryKey | None:
-        if (fingerprint := self.tracked.get((suite.integration, suite.name))) is None:
+        if (commit := self.tracked.get((suite.integration, suite.name))) is None:
             return None
-        return suite.integration, suite.name, fingerprint
+        return suite.integration, suite.name, commit
 
     def entry(self, suite: Suite) -> dict | None:
-        """The tracked suite's entry at its fingerprint now, if it has one."""
+        """The tracked suite's entry at its commit, if it has one."""
         return self.entries.get(self.key(suite) or ("", "", ""))
 
     def __bool__(self) -> bool:
         return bool(self.done())
 
     def tracked_keys(self) -> list[EntryKey]:
-        return [(integration, name, fingerprint) for (integration, name), fingerprint in self.tracked.items()]
+        return [(integration, name, commit) for (integration, name), commit in self.tracked.items()]
 
     def check_ha(self, version: str, out: Callable[[str], None] = print) -> None:
         """Drop each entry whose cases ran on another HA version than `version`, or on one never noted (a run killed
@@ -155,7 +157,7 @@ class Progress:
             {
                 "integration": key[0],
                 "suite": key[1],
-                "fingerprint": key[2],
+                "commit": key[2],
                 "ha_version": self.ha_version,
                 "devices": [],
                 "cases": [],
@@ -173,79 +175,17 @@ class Progress:
         if result.unreachable or result.outcome is Outcome.NOT_RUN:
             return
         entry = self._entry(suite)
-        case = _saved(result)
-        entry["cases"] = [saved for saved in entry["cases"] if saved["id"] != result.id] + [case]
-        if (test := suite.test(result.id)) is not None and test.firmware_fact:
-            self._drop_fact((suite.integration, suite.name, result.id))
-            if result.outcome is Outcome.PASS:
-                # Its devices come with the part's facts; until then it lends nothing (fact_results).
-                fact = {"integration": suite.integration, "suite": suite.name, "case": case, "test": test.digest}
-                self._set_fact(fact | {"devices": None})
+        entry["cases"] = [saved for saved in entry["cases"] if saved["id"] != result.id] + [_saved(result)]
         self.save()
 
     def facts(self, suite: Suite, ha_version: str | None, devices: Iterable[Device]) -> None:
         """Save the facts a part of `suite` took, joined to those of its earlier parts."""
         entry = self._entry(suite)
         entry["ha_version"] = entry["ha_version"] or ha_version
-        devices = list(devices)
         for device in map(asdict, devices):
             if device not in entry["devices"]:
                 entry["devices"].append(device)
-        for key, fact in list(self.firmware.items()):
-            if key[:2] != (suite.integration, suite.name):
-                continue
-            if fact["devices"] is None:
-                if devices:  # a failed lookup names none: the fact stays pending, lending nothing
-                    self._set_fact(fact | {"devices": [asdict(device) for device in devices]})
-            elif _moved(fact["devices"], devices):
-                self._drop_fact(key)
-                # Not run this run (that would have left it pending), so the entry holds it lent, at the old
-                # firmware, which the record would name: it reruns instead.
-                now = [asdict(device) for device in devices]
-                entry["cases"] = [case for case in entry["cases"] if case["id"] != key[2]]
-                entry["devices"] = [d for d in entry["devices"] if d in now or d not in fact["devices"]]
         self.save()
-
-    def fact_results(self, suite: Suite) -> dict[str, tuple[CaseResult, list[Device]]]:
-        """The tracked suite's firmware facts that its tests still hold as written, by case id: each pass, with the
-        devices it ran on."""
-        found = {}
-        for (integration, name, case_id), fact in self.firmware.items():
-            test = suite.test(case_id)
-            if (integration, name) != (suite.integration, suite.name) or fact["devices"] is None:
-                continue
-            if test is not None and test.firmware_fact and fact["test"] == test.digest:
-                found[case_id] = (_result(fact["case"]), [Device(**device) for device in fact["devices"]])
-        return found
-
-    def lend(self, suite: Suite, results: Iterable[tuple[CaseResult, list[Device]]]) -> None:
-        """Put firmware facts' passes, with their devices, into the tracked suite's entry at its fingerprint now, as
-        if run there: its record carries them. Written at the next save."""
-        results = list(results)
-        if not results:
-            return
-        entry = self._entry(suite)
-        lent = {result.id for result, _ in results}
-        entry["cases"] = [case for case in entry["cases"] if case["id"] not in lent]
-        for result, devices in results:
-            entry["cases"].append(_saved(result))
-            entry["devices"] += [d for d in map(asdict, devices) if d not in entry["devices"]]
-
-    def forget_facts(self, suite: Suite, case_ids: Iterable[str]) -> None:
-        """Drop the suite's firmware facts that no longer hold (their entities changed), until the next save."""
-        for case_id in case_ids:
-            self._drop_fact((suite.integration, suite.name, case_id))
-
-    def _set_fact(self, fact: dict) -> None:
-        key = _fact_key(fact)
-        self.firmware[key] = fact | {"touched": _now()}
-        self.facts_changed.add(key)
-        self.facts_dropped.discard(key)
-
-    def _drop_fact(self, key: FactKey) -> None:
-        self.firmware.pop(key, None)
-        self.facts_dropped.add(key)
-        self.facts_changed.discard(key)
 
     def forget(self, suite: Suite, case_ids: Iterable[str]) -> None:
         """Drop saved cases that no longer hold (their entities changed), until the next save writes it."""
@@ -260,18 +200,6 @@ class Progress:
         """The tracked suite's saved results by case id."""
         entry = self.entry(suite)
         return {case["id"]: _result(case) for case in entry["cases"]} if entry else {}
-
-    def traces(self, suite: Suite) -> dict[str, Trace]:
-        """The latest trace saved for each of the suite's cases, at any fingerprint: what its calls were when it last
-        ran, for --coverage to say whether an observed pass would cover them."""
-        found: dict[str, tuple[str, Trace]] = {}
-        for (integration, name, _), entry in self.entries.items():
-            if (integration, name) != (suite.integration, suite.name):
-                continue
-            for case in entry["cases"]:
-                if case.get("trace") and (case["id"] not in found or found[case["id"]][0] < entry["touched"]):
-                    found[case["id"]] = (entry["touched"], Trace.from_json(case["trace"]))
-        return {case_id: trace for case_id, (_, trace) in found.items()}
 
     def done(self) -> Done:
         """The tracked suites' saved results."""
@@ -294,7 +222,7 @@ class Progress:
         return parts
 
     def drop(self, suite: Suite) -> None:
-        """Drop the suite's entry at its fingerprint now (--fresh, or its record written), until the next save."""
+        """Drop the suite's entry at its commit (--fresh, or its record written), until the next save."""
         if (key := self.key(suite)) is not None:
             self._drop(key)
 
@@ -321,24 +249,18 @@ class Progress:
 
     def save(self) -> None:
         """Merge this run's changes into the file, under its lock: another run may have saved meanwhile."""
-        if not (self.changed or self.dropped or self.facts_changed or self.facts_dropped):
+        if not (self.changed or self.dropped):
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._locked():
-            merged, facts = _read(self.path)
+            merged = _read(self.path)
             for key in self.dropped:
                 merged.pop(key, None)
             for key in self.changed:
                 merged[key] = self.entries[key]
-            for key in self.facts_dropped:
-                facts.pop(key, None)
-            for key in self.facts_changed:
-                facts[key] = self.firmware[key]
-            saved = {"suites": list(merged.values())} if merged else {}
-            write_whole(self.path, saved | ({"firmware": list(facts.values())} if facts else {}))
-        self.entries, self.firmware = merged, facts
+            write_whole(self.path, {"suites": list(merged.values())} if merged else {})
+        self.entries = merged
         self.changed, self.dropped = set(), set()
-        self.facts_changed, self.facts_dropped = set(), set()
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -352,9 +274,8 @@ class Progress:
 
 def _saved(result: CaseResult) -> dict:
     case = asdict(result) | {"outcome": str(result.outcome), "entity_ids": list(result.entity_ids)}
-    case["trace"] = result.trace.to_json() if result.trace else None
-    case["scope"] = [[*row[:4], list(row[4])] for row in result.scope]
-    case.pop("unreachable")
+    for transient in ("unreachable", "devices"):  # never saved; an observed case's devices go to _observed.md
+        case.pop(transient)
     return case
 
 
@@ -368,7 +289,4 @@ def _result(case: dict) -> CaseResult:
         tuple(case["entity_ids"]),
         case["twin"],
         absent=case.get("absent", False),
-        trace=Trace.from_json(case["trace"]) if case.get("trace") else None,
-        lent=case.get("lent"),
-        scope=tuple((a, i, d, c, tuple(f)) for a, i, d, c, f in case.get("scope", [])),
     )

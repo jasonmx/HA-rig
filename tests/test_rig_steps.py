@@ -238,13 +238,10 @@ def test_a_step_takes_only_beside_its_kind(tmp_path: Path):
     ]
 
 
-def test_firmware_fact_marks_the_test_and_its_digest_follows_the_test(tmp_path: Path):
+def test_firmware_fact_marks_the_test(tmp_path: Path):
     path = tmp_path / "fact.yaml"
     path.write_text(HEADER.replace("    steps:\n", "    firmware_fact: true\n    steps:\n") + "      - wait: 1\n")
     (fact,) = load_step_file(path).tests
     path.write_text(HEADER + "      - wait: 1\n")
     (plain,) = load_step_file(path).tests
     assert (fact.firmware_fact, plain.firmware_fact) == (True, False)
-    assert fact.digest and fact.digest != plain.digest
-    path.write_text("# a comment moves nothing\n" + HEADER + "      - wait: 1\n")
-    assert load_step_file(path).tests[0].digest == plain.digest

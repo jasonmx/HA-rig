@@ -162,6 +162,25 @@ async def test_a_busy_before_the_call_is_not_the_calls(tmp_path):
     assert ha.calls_seen == 1
 
 
+@pytest.mark.parametrize(("after_s", "runs"), [(0.0, 2), (0.3, 1)], ids=["within_the_lag", "after_it"])
+async def test_the_busy_window_is_the_call_steps_own_send_to_its_answer(tmp_path, after_s, runs):
+    """Catches the window's source: the rig's own times for the call step, with no DeviceSide trace. A BUSY logged
+    within BUSY_LAG_S of the answer is the call's; one later belongs to something else."""
+    ha = Room()
+    answer = ha.answer
+
+    def answered_then_busy(_ha, action, data):
+        reply = answer(_ha, action, data)
+        if ha.calls_seen == 1:
+            asyncio.get_running_loop().call_later(after_s, ha.z2m_logging.put_nowait, BUSY_LINE)
+        return reply
+
+    ha.respond = answered_then_busy
+    _, got = await run_room(tmp_path, ha, CALL + "      - wait: 0.5\n")
+    assert got["t[group]"] == (Outcome.PASS, "")
+    assert ha.calls_seen == runs
+
+
 def test_a_case_not_run_is_never_saved_and_leaves_the_suite_incomplete(tmp_path):
     from tests.test_progress import SUITE  # noqa: PLC0415
 
