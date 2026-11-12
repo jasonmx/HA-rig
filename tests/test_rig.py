@@ -19,7 +19,6 @@ from ha_rig import baseline, engine, facts, target
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
-from ha_rig.progress import run_key
 from tests import rig_fakes as fakes
 from tests.rig_fakes import records_at, write
 
@@ -1387,15 +1386,50 @@ def test_a_record_in_the_checkout_never_leaves_a_suite_out(tmp_path, monkeypatch
     assert planned(tmp_path, monkeypatch, suites, profile).suites == suites
 
 
-def test_an_edited_step_file_starts_its_suite_afresh(tmp_path, monkeypatch):
-    """At the same commit: an uncommitted edit to deviceside's step file doesn't block a run (progress.run_key)."""
-    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
-    assert setup.done
+def test_uncommitted_step_files_withhold_records(tmp_path, monkeypatch, capsys):
+    """The run goes ahead, but reads and saves no ledger and writes no record: a pass saved at the commit, made before
+    the edit, doesn't resume, and none made with the edit is saved to resume once it is reverted."""
+    resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})  # saved at c1
     profile, suites = resumable(tmp_path)
-    assert planned(tmp_path, monkeypatch, suites, profile).done  # the same file: it resumes
-    edited = load_step_file(write(tmp_path, "steps.yaml", TWO_SUITES + "# edited\n"))  # its digest, taken at load
-    suites = [rig.Suite(edited, suite.integration) for suite in suites]
-    assert not planned(tmp_path, monkeypatch, suites, profile).done
+    monkeypatch.setattr(rig, "uncommitted_steps", lambda: True)
+    monkeypatch.setattr(rig, "load_env", dict)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: None)
+    monkeypatch.setattr(rig.Profile, "load", lambda path: profile)
+    monkeypatch.setattr(rig, "run_suites", lambda args, profile, registry: suites)
+    monkeypatch.setattr(rig, "deploy_state", lambda cmd: rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x"))
+    monkeypatch.setattr(rig, "check_tokens", lambda *args: None)
+    setup = rig.prepare(run_args(check=False, profile=None), tmp_path)
+    assert setup.progress is None and setup.suites == suites
+    assert "Uncommitted changes under tests/rig/steps: this run writes no test record" in capsys.readouterr().out
+    seen = {}
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda cmd, deploy, deploying: "c1")
+    monkeypatch.setattr(
+        rig, "run_rig", lambda *args, **kwargs: seen.update(commit=args[6], progress=kwargs["progress"])
+    )
+    monkeypatch.setattr(rig, "run_tests", lambda coro, aborted=None: 0)
+    held = types.SimpleNamespace(share_ha=lambda: None, claim=None)
+    args = types.SimpleNamespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, held, None, False, False) == 0
+    assert seen == {"commit": None, "progress": None}  # no commit to cite: no record
+
+
+def test_committing_the_step_files_moves_the_ledger_key(tmp_path, monkeypatch):
+    """Committing an edit moves HEAD, the ledger's key, so a pass saved before it never resumes into a record."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(rig, "REPO", tmp_path)
+    (steps := target.steps_dir(tmp_path)).mkdir(parents=True)
+    (steps / "stop.yaml").write_text("action: stop\n")
+    run_git("init", "-q", str(tmp_path))
+    run_git("-C", str(tmp_path), "add", ".")
+    run_git("-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "steps")
+    before = rig.git("rev-parse", "HEAD")
+    assert not rig.uncommitted_steps()
+    (steps / "stop.yaml").write_text("action: stop\n# edited\n")
+    assert rig.uncommitted_steps()
+    run_git("-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "edit")
+    assert not rig.uncommitted_steps() and rig.git("rev-parse", "HEAD") != before
+    # A suite saved at the old HEAD starts afresh at the new one (test_another_commit_starts_the_suites_afresh).
 
 
 def test_a_head_that_moved_while_the_run_waited_stops_it(tmp_path, monkeypatch):
@@ -1674,7 +1708,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     assert session(frozenset({"light.b"})) == (0, ["light.a"])
     assert written == [[]]  # partial: light.b's case skipped as unreachable
     saved = rig.Progress.load(tmp_path, "house")
-    saved.track(suites[0], run_key("c1", suites[0]))
+    saved.track(suites[0], "c1")
     assert set(saved.done()) == {("shelly", "raise_brightness", "t[light_ct]")}  # the skip isn't saved
 
     ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 90}}

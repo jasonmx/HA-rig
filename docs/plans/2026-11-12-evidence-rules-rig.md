@@ -19,8 +19,9 @@ Tests-with: the deviceside PR for step 2 (runtime), which removes the events.
 2. **Coverage.** `ha_rig/coverage.py` goes: fingerprints, fresh records, observed hints, `check_release.adapter_code`
    and `--coverage`. A run runs the suites it is asked for; a record never leaves one out. `target.test_records_dir`
    reads deviceside's layout directly, so the rig no longer loads `check_release.py`.
-3. **The ledger** (`progress.py`) only resumes an interrupted run: entries keyed by suite, commit and step-file digest
-   (the digest goes once the step files move into deviceside), no firmware-fact ledger, no traces or scopes.
+3. **The ledger** (`progress.py`) only resumes an interrupted run: entries keyed by suite and commit, no firmware-fact
+   ledger, no traces or scopes. (Landed with step 3b: the step-file digest went once the step files moved into
+   deviceside, whose commit covers them.)
 4. **Fact cases** (owner, 2026-11-12): the watched case of a test with `observe:`, and every case of a
    `firmware_fact: true` test. A default run skips them, saying how to ask, and runs an observed test's automated
    case like any other; `--facts` adds them. Their results go to an append-only `_facts.md` per integration, kind `automated` or `observed`, never into a record,
@@ -33,4 +34,7 @@ Tests-with: the deviceside PR for step 2 (runtime), which removes the events.
 
 - Deviceside's `check_release.py --signoffs` (step 4) is to list the integrations needing a sign-off in a
   machine-readable form; a later rig change takes it as the selection (TODO in docs/rig.md).
-- The step files move to deviceside in a separate step.
+- The step files move to deviceside in a separate step. Landed as step 3b: they live in deviceside's
+  `tests/rig/steps/`, the rig reads them from the checkout under test (`target.steps_dir`), and a run with uncommitted
+  step files goes ahead but writes no record and neither reads nor saves the ledger, so a record always cites the step
+  files that ran.
