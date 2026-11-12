@@ -171,17 +171,22 @@ bulb's timer that can't be stopped through its bridge, say) is no rig test: it l
 
 **The ledger.** A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's
 parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). It is
-there only to resume a run: its entries are per suite, keyed by the commit (HEAD when the run plans) and the step file's
-digest, so a rerun at the same commit of the same step file picks up where the last one stopped, and any other starts
-the suite afresh. (The commit covers a committed step file; the digest catches one edited and not yet committed, which
-doesn't block a run.) A saved case holds while it planned the same entities (a profile change reruns it), and a `not
-observed` one only for an `--unattended` run. An entry goes when HA runs another version (a record names one), when its suite's record is promoted
-into the checkout (Test records, below), when the run that saved a failure of one of its default cases ends (the suite
-reruns whole, so a record never covers up a failure; the run's report keeps it; a fact case's failure is a fact, and
-drops nothing), or after 30 days untouched. `--fresh` drops the selected suites' saved cases. `--no-deploy` saves
-nothing, as it writes no record, and neither does a run whose deploy left HA on another tree than the one planned
-(origin moved). A run whose every selected case is saved says so and stops; one whose HEAD moved while it waited for its
-locks stops too, to be run again.
+there only to resume a run: its entries are per suite, keyed by the commit (HEAD when the run plans), so a rerun at the
+same commit picks up where the last one stopped, and any other starts the suite afresh. The commit covers the step
+files, as deviceside's. A saved case holds while it planned the same entities (a profile change reruns it), and a `not
+observed` one only for an `--unattended` run. An entry goes when HA runs another version (a record names one), when
+its suite's record is promoted into the checkout (Test records, below), when the run that saved a failure of one of its
+default cases ends (the suite reruns whole, so a record never covers up a failure; the run's report keeps it; a fact
+case's failure is a fact, and drops nothing), or after 30 days untouched. `--fresh` drops the selected suites' saved
+cases. `--no-deploy` saves nothing, as it writes no record, and neither does a run whose deploy left HA on another tree
+than the one planned (origin moved). A run whose every selected case is saved says so and stops; one whose HEAD moved
+while it waited for its locks stops too, to be run again.
+
+**Uncommitted step files.** A record cites the commit, so it must hold the step files that ran. A run with uncommitted
+changes under the checkout's `tests/rig/steps/` still goes ahead, so a step file can be iterated on, but it says so at
+the start, writes no test record and neither reads nor saves the ledger: a pass made with an edit that is then
+reverted would otherwise resume into a record at that commit. Commit the step files for a record; committing moves
+HEAD, so nothing saved before the commit resumes after it.
 
 A run that stops part way puts everything back as always and exits 75; rerun it and it picks up at the cases with no
 saved result, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
@@ -199,7 +204,8 @@ saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next
 
 A step file lives in deviceside, `tests/rig/steps/<action>.yaml`, and lands in the deviceside PR that adds or changes
 the action it tests. It names roles, never entities: deviceside is public, and its household check covers the file.
-The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`).
+The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`). A run while one is
+uncommitted writes no record (The ledger, above).
 
 ```yaml
 action: turn_on_for        # the DeviceSide action every test in the file calls

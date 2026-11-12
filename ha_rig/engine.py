@@ -11,7 +11,6 @@ import ast
 import asyncio
 import contextlib
 import datetime
-import hashlib
 import logging
 import operator
 import re
@@ -251,8 +250,6 @@ class StepFile:
     expected_log: tuple[re.Pattern[str], ...] = ()
     # The name its record takes in place of the action's, for a file that tests something else through it (lifecycle).
     name: str | None = None
-    # A hash of the file as read, for the ledger's key (progress.run_key).
-    digest: str = ""
 
     @property
     def roles(self) -> tuple[str, ...]:
@@ -596,8 +593,7 @@ def load_step_file(path: Path) -> StepFile:
         tests = tuple(_parse_test(test) for test in raw_tests)
         if duplicates := sorted({t.name for t in tests if [u.name for u in tests].count(t.name) > 1}):
             raise ValueError(f"duplicate test name(s) {', '.join(duplicates)}")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
-        step_file = StepFile(path, action, seconds, tests, frozenset(options), expected_log, digest=digest)
+        step_file = StepFile(path, action, seconds, tests, frozenset(options), expected_log)
         step_file = _named(step_file, raw.get("name"))
     except (ValueError, yaml.YAMLError) as err:
         raise SchemaError(f"{path.name}: {err}") from None

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ha_rig import progress as progress_module
 from ha_rig.engine import Case, CaseResult, Device, Outcome, Suite, load_step_file, load_step_files, merge
-from ha_rig.progress import Progress, holds, path_for, run_key
+from ha_rig.progress import Progress, holds, path_for
 from tests.rig_fakes import Roster, profile
 
 SUITE = Suite(next(f for f in load_step_files() if f.action == "turn_on_for" and not f.options), "shelly")
@@ -18,7 +18,7 @@ FAILED = CaseResult("b[switch_plug]", "switch_plug", "switch", Outcome.FAIL, "to
 def loaded(tmp_path: Path, commit: str = "fp1", version: str = "2026.10.1", *suites: Suite) -> Progress:
     progress = Progress.load(tmp_path, "lab")
     for suite in suites or (SUITE,):
-        progress.track(suite, run_key(commit, suite))
+        progress.track(suite, commit)
     progress.check_ha(version, lambda _: None)
     return progress
 
@@ -78,11 +78,11 @@ def test_another_ha_version_drops_the_entries_it_ran_on(tmp_path):
     started(tmp_path)
     said = []
     same = Progress.load(tmp_path, "lab")
-    same.track(SUITE, run_key("fp1", SUITE))
+    same.track(SUITE, "fp1")
     same.check_ha("2026.10.1", said.append)
     assert same and said == []
     newer = Progress.load(tmp_path, "lab")
-    newer.track(SUITE, run_key("fp1", SUITE))
+    newer.track(SUITE, "fp1")
     newer.check_ha("2026.11.0", said.append)
     assert not newer and "HA 2026.10.1, and HA is 2026.11.0" in said[0]
     assert loaded(tmp_path)  # dropped from the file only by a save
@@ -101,7 +101,7 @@ def test_an_unreachable_skip_is_never_saved(tmp_path):
 
 def test_a_failed_suite_is_dropped_at_the_runs_end_and_others_stay(tmp_path):
     progress = started(tmp_path)
-    progress.track(HUE, run_key("fp1", HUE))
+    progress.track(HUE, "fp1")
     progress.record(HUE, PASSED)
     assert progress.drop_failed() == [("shelly", SUITE.name)]
     again = loaded(tmp_path, "fp1", "2026.10.1", SUITE, HUE)
@@ -228,16 +228,6 @@ def test_a_saved_skip_holds_only_for_the_same_reason_and_not_observed_only_unatt
     assert not holds(planned(), skipped, False)  # asked for now: it runs
     unwatched = ran(planned(), Outcome.NOT_OBSERVED)
     assert holds(planned(), unwatched, True) and not holds(planned(), unwatched, False)
-
-
-def test_the_run_key_is_the_commit_and_the_step_files_digest_taken_at_load(tmp_path):
-    path = tmp_path / "steps.yaml"
-    path.write_text(SUITE.file.path.read_text())
-    copy = Suite(load_step_file(path), "shelly")
-    assert run_key("c1", copy) == run_key("c1", SUITE) == f"c1:{SUITE.file.digest}"
-    path.write_text(path.read_text() + "# edited\n")
-    assert run_key("c1", copy) == run_key("c1", SUITE)  # as loaded: a run's key holds while it runs
-    assert run_key("c1", Suite(load_step_file(path), "shelly")) != run_key("c1", SUITE)
 
 
 FACT_FILE = """

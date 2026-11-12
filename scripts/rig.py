@@ -74,9 +74,11 @@ those on fixed groups whose members the profile doesn't list and on fixed scenes
 A run runs the suites it is asked for; what needs testing is deviceside's to say. Fact cases (every case of a firmware
 fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
 automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
-(ha_rig/progress.py), keyed by the commit, the suite and its step file's digest (progress.run_key), so one that stops
-part way, on a signal, the restricted sensor or --for's budget, exits 75 and, rerun at the same commit with the same
-step files, picks up where it stopped; a suite finished across runs still writes its record. --for DURATION (30m, 1h15m)
+(ha_rig/progress.py), keyed by the suite and the commit, so one that stops part way, on a signal, the restricted
+sensor or --for's budget, exits 75 and, rerun at the same commit, picks up where it stopped; a suite finished across
+runs still writes its record. A record cites the commit, so it must hold the step files that ran: a run with
+uncommitted changes under the checkout's tests/rig/steps goes ahead, but reads and saves no ledger and writes no
+record (uncommitted_steps). --for DURATION (30m, 1h15m)
 starts no case once spent, letting in-flight ones finish; it counts from approval, the deploy included. A move starts
 only with MOVE_LEAD_S left and always runs its first case. A suite with a failed default case, or saved on another HA
 version, reruns whole; --fresh drops the selected suites' saved cases.
@@ -126,7 +128,7 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ha_rig.target import COMPONENT, RIG_HOME, deviceside_repo, steps_dir, test_records_dir  # noqa: E402
+from ha_rig.target import COMPONENT, RIG_HOME, STEPS, deviceside_repo, steps_dir, test_records_dir  # noqa: E402
 
 REPO = deviceside_repo()  # the deviceside checkout under test, whose code a run deploys and records
 sys.path.append(str(REPO))
@@ -206,6 +208,10 @@ CLEAR_POLL_S = 15
 BLOCKED = ("on", "unknown", "unavailable")  # restricted-sensor states that revoke a run; an unread one doesn't
 # Run reports go where the OS clears old files: they are for reviewing a run, not for keeping.
 REPORT_DIR = Path(tempfile.gettempdir()) / "deviceside-rig"
+UNCOMMITTED_STEPS = (
+    f"Uncommitted changes under {STEPS}: this run writes no test record and saves no progress, as a record cites the "
+    "commit, which must hold the step files that ran. Commit them for a record, or run with --dry-run to see the plan."
+)
 RESUMABLE = 75  # EX_TEMPFAIL: the run stopped with cases left, saved to resume from
 
 
@@ -688,7 +694,9 @@ class Setup:
     roaming: bool
     grouping: bool
     deploy: Deploy | None = None  # None for --check, which deploys nothing
-    progress: Progress | None = None  # None where no record is possible: --no-deploy, --roam-check, --check
+    # None where no record is possible: --no-deploy, --roam-check, --check, uncommitted step files
+    progress: Progress | None = None
+    uncommitted_steps: bool = False  # the step files differ from HEAD's (uncommitted_steps), read once they loaded
     selected: list[Suite] = field(default_factory=list)  # every suite selected; `suites` are those with cases left
     planned_commit: str | None = None  # the commit the ledger was read at
 
@@ -977,6 +985,7 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
         raise SystemExit(f"Fix the profile: {err}") from err
     registry = AdapterRegistry.discover()
     suites = run_suites(args, profile, registry)
+    uncommitted = uncommitted_steps()  # after the load: a file edited since reads as uncommitted, never the reverse
     setup = Setup(
         env,
         profile,
@@ -985,11 +994,14 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
         roams(profile, suites, args.roam_check),
         makes_groups(profile, suites, args.roam_check),
         selected=suites,
+        uncommitted_steps=uncommitted,
     )
     if args.check:
         return setup
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
-    if directory is not None and not args.no_deploy and not args.roam_check:
+    if setup.uncommitted_steps:
+        print(UNCOMMITTED_STEPS)
+    elif directory is not None and not args.no_deploy and not args.roam_check:
         plan_resume(args, setup, directory)
     if not args.dry_run:
         check_tokens(env, setup.suites, registry, setup.roaming or setup.grouping)
@@ -1241,7 +1253,7 @@ def run_approved(
     deploy_and_wait(env, deploy.branch if deploying else None)
     if deploying and not reloads(setup):  # HA is back, and nothing left restarts or reloads it under other runs
         held.share_ha()
-    commit = tested_commit(env.get("RIG_STATUS_CMD", ""), deploy, deploying)
+    commit = None if setup.uncommitted_steps else tested_commit(env.get("RIG_STATUS_CMD", ""), deploy, deploying)
     if commit is None and setup.progress is not None:
         # The saved cases are keyed by the commit planned at, which isn't what HA runs: saving them would pass them
         # off as that commit's.
@@ -1505,6 +1517,13 @@ def choose_profile(
     if len(paths) > 1:
         raise SystemExit(f"Choose a profile with --profile: {', '.join(paths)}")
     return next(iter(paths.values()))
+
+
+def uncommitted_steps() -> bool:
+    """Whether the checkout's step files differ from HEAD's. A record cites the commit, so a run with them writes none,
+    and keeps no ledger: a pass saved with an edit, then reverted, would otherwise resume into a record at that commit.
+    Committing moves HEAD, so nothing saved before a commit resumes after it."""
+    return bool(git("status", "--porcelain", "--", STEPS, check=False))
 
 
 def tested_commit(status_cmd: str, deploy: Deploy, deploying: bool) -> str | None:
@@ -2185,7 +2204,10 @@ async def report(
             print(f"{suite_result.suite.integration} / {suite_result.suite.name}: {partial}")
     print(f"\nReport: {write_report(result, REPORT_DIR, f'rig run {stamp}')}")
     if commit is None:
-        print("No test records: no commit names the tree HA ran (--no-deploy, or origin moved before the deploy).")
+        print(
+            "No test records: no commit names the tree HA ran and the step files that ran (--no-deploy, origin moved "
+            "before the deploy, or uncommitted step files)."
+        )
         return
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
     if touched is not None:
