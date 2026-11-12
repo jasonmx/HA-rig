@@ -1388,6 +1388,7 @@ def test_a_record_in_the_checkout_never_leaves_a_suite_out(tmp_path, monkeypatch
 
 
 def test_an_edited_step_file_starts_its_suite_afresh(tmp_path, monkeypatch):
+    """At the same commit: an uncommitted edit to deviceside's step file doesn't block a run (progress.run_key)."""
     setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
     assert setup.done
     profile, suites = resumable(tmp_path)

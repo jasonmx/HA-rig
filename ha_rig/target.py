@@ -6,7 +6,8 @@ this one named deviceside (the repo's name) or device-side (so the rig's own tes
 and baseline live in the target's git common dir, shared by every worktree of it; the profiles and .env.rig live in
 this rig's main checkout.
 
-Its test records live in `docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out.
+Its step files, the test plan, live in `tests/rig/steps/` (STEPS), and its test records in
+`docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out.
 
 Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
 """
@@ -18,6 +19,7 @@ from pathlib import Path
 
 RIG_HOME = Path(__file__).resolve().parents[1]
 COMPONENT = "custom_components/deviceside"
+STEPS = "tests/rig/steps"  # deviceside's step files, one per action
 RECORDS = "docs/integrations/{integration}/test-records"  # deviceside's test records directory, per integration
 SIBLINGS = ("deviceside", "device-side")
 UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner
@@ -41,6 +43,11 @@ def main_checkout(repo: Path) -> Path:
     """The main checkout of `repo`, which holds the gitignored files every linked worktree shares; else `repo`."""
     common = git_path(repo, "--git-common-dir")
     return common.parent if common else repo
+
+
+def steps_dir(repo: Path) -> Path:
+    """The step files' directory in `repo`."""
+    return repo / STEPS
 
 
 def test_records_dir(repo: Path, integration: str, root: Path | None = None) -> Path:

@@ -37,6 +37,7 @@ from ha_rig.facts import OBSERVED as OBSERVED_KIND
 from ha_rig.journal import Journal
 from ha_rig.profile import Profile, RigEntity
 from ha_rig.progress import Progress
+from ha_rig.target import deviceside_repo, steps_dir
 from tests.rig_fakes import (
     OPTION_REGISTRY,
     PENDING,
@@ -2338,7 +2339,7 @@ def test_entry_steps_and_names_are_checked_when_the_file_loads(tmp_path, text, e
 
 
 def test_the_lifecycle_step_file_loads():
-    step_file = load_step_file(engine.STEPS_DIR / "lifecycle.yaml")
+    step_file = load_step_file(steps_dir(deviceside_repo()) / "lifecycle.yaml")
     assert (step_file.name, step_file.action, step_file.moves_entry) == ("lifecycle", "get_attributes", True)
 
 

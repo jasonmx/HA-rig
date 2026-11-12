@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
-from ha_rig.engine import STEPS_DIR, Expr, Observe, SchemaError, load_step_file, load_step_files
+from ha_rig.engine import Expr, Observe, SchemaError, load_step_file, load_step_files
+from ha_rig.target import deviceside_repo, steps_dir
 
 
-@pytest.mark.parametrize("path", sorted(STEPS_DIR.rglob("*.yaml")), ids=lambda path: path.name)
+@pytest.mark.parametrize("path", sorted(steps_dir(deviceside_repo()).rglob("*.yaml")), ids=lambda path: path.name)
 def test_every_shipped_step_file_parses(path):
     assert load_step_file(path).tests
 

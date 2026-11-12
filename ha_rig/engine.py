@@ -1,9 +1,9 @@
-"""Runs the rig's YAML step files against the live HA and renders test records from the results.
+"""Runs deviceside's YAML step files against the live HA and renders test records from the results.
 
-One file per action (`steps/<action>.yaml`) runs on every integration in the profile that has that action's adapter; a
-file with `options` (`steps/<action>-<option>.yaml`) runs it again with those DeviceSide options on, only on adapters
-whose scope declares them. The registry supplies what differs per integration: the expected status, the tolerance,
-and the options in scope.
+The step files are the checkout under test's (`tests/rig/steps/`, target.steps_dir). One file per action
+(`<action>.yaml`) runs on every integration in the profile that has that action's adapter; a file with `options`
+(`<action>-<option>.yaml`) runs it again with those DeviceSide options on, only on adapters whose scope declares them.
+The registry supplies what differs per integration: the expected status, the tolerance, and the options in scope.
 No pytest here: scripts/rig.py calls run().
 """
 
@@ -32,11 +32,11 @@ from .facts import AUTOMATED, FAIL, PASS, Fact, FactsFile, append
 from .facts import FILE as FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
-from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
+from .profile import ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile
+from .target import deviceside_repo
+from .target import steps_dir as steps_dir_of
 
 _LOGGER = logging.getLogger(__name__)
-
-STEPS_DIR = RIG_DIR / "steps"
 
 # Light attributes a restore puts back, in the order light.turn_on would accept one color at a time.
 _RESTORE_COLOR = ("color_temp_kelvin", "hs_color", "xy_color", "rgb_color")
@@ -629,8 +629,9 @@ def _named(step_file: StepFile, name: Any) -> StepFile:
     return replace(step_file, name=name)
 
 
-def load_step_files(steps_dir: Path = STEPS_DIR) -> list[StepFile]:
-    """Every `<action>.yaml` directly in steps_dir."""
+def load_step_files(steps_dir: Path | None = None) -> list[StepFile]:
+    """Every `<action>.yaml` directly in steps_dir, by default the checkout under test's (target.steps_dir)."""
+    steps_dir = steps_dir_of(deviceside_repo()) if steps_dir is None else steps_dir
     return [load_step_file(path) for path in sorted(steps_dir.glob("*.yaml"))]
 
 

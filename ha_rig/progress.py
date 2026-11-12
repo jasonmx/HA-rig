@@ -47,8 +47,9 @@ def _now() -> str:
 
 def run_key(commit: str, suite: Suite) -> str:
     """What a suite's saved cases were run at: the commit planned at, and its step file's digest (StepFile.digest, taken
-    as it was loaded), since the step files live here, outside that commit. The digest can go once the step files move
-    into deviceside (evidence-rules plan, step 3b): the commit then covers them."""
+    as it was loaded). The step files are deviceside's, so the commit covers them once committed, but a run reads them
+    from the working tree, and only uncommitted changes under the integration block it (scripts/rig.py, deploy_state):
+    without the digest, an edited step file not yet committed would resume the passes saved before the edit."""
     return f"{commit}:{suite.file.digest}"
 
 
