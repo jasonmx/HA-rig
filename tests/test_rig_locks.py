@@ -992,81 +992,54 @@ def at_a_terminal(monkeypatch, answer: str) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
 
 
-def test_an_agents_probe_is_refused_while_the_sensor_is_on(probe, monkeypatch, capsys):
-    clear_states(monkeypatch, "on")
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    out = capsys.readouterr().out
-    assert f"Restricted, and {PROBE_SENSOR} is on. Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)" in out
-    assert "Proceed" not in out  # an agent is never asked
-    assert ProbeHA.calls == []
+ON = f"Restricted, and {PROBE_SENSOR} is on."
+NO_KEY = "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig."
+ASKED = f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]"
+NOT_PRE = "--visual profile needs a pre-authorized profile, and lab isn't"
+NONE, PROFILE = ("--visual", "none"), ("--visual", "profile")
+
+
+@pytest.mark.parametrize(
+    ("reads", "given", "visual", "code", "armed", "says"),
+    [
+        pytest.param(
+            ("on",), "", (), 1, [], f"{ON} Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)", id="on: refused"
+        ),
+        pytest.param((), "no key", (), 1, [], NO_KEY, id="no key: refused"),
+        pytest.param(("off", "on"), "", (), 1, [], "", id="checked again once it holds its locks"),
+        pytest.param(("off", "off"), "", (), 0, [True], "", id="clear: runs watched and unasked"),
+        pytest.param(("on",), "y at a terminal", (), 0, [True], ASKED, id="let past: watched, not asked again"),
+        pytest.param(("on",), "approved", (), 0, [True], "", id="approved: goes while on, watched"),
+        pytest.param((), "", NONE, 0, [False], "", id="non-visual: reads no sensor, not watched"),
+        pytest.param((), "", PROFILE, SystemExit, [], NOT_PRE, id="visual profile: not pre-authorized"),
+        pytest.param((), "pre-authorized", PROFILE, 0, [False], "", id="visual profile: pre-authorized"),
+        pytest.param(("on",), "pre-authorized", (), 1, [], ON, id="undeclared on a pre-authorized profile"),
+    ],
+)
+def test_the_probe_gate(probe, monkeypatch, capsys, reads, given, visual, code, armed, says):
+    """The sensor reads each of `reads` in turn (one more fails the test); an agent's probe is never asked."""
+    seen = clear_states(monkeypatch, *reads, key=given != "no key")
+    if given == "y at a terminal":
+        at_a_terminal(monkeypatch, "y\n")
+    if given == "approved":
+        monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    if given == "pre-authorized":
+        with (probe / "lab.yaml").open("a") as profile:
+            profile.write("pre_authorized: true\n")
+    monkeypatch.setattr(rig, "run_command", lambda command: 0 if code == 0 else pytest.fail("ran"))
+    argv = ["--hold", "hue", *visual, "--", "true"]
+    if code is SystemExit:
+        with pytest.raises(SystemExit, match=says):
+            rig.main(argv)
+    else:
+        assert rig.main(argv) == code
+        out = capsys.readouterr().out
+        assert says in out
+        assert ("Proceed" in out) is (given == "y at a terminal")
+    assert seen == armed
+    if code:
+        assert ProbeHA.calls == []
     assert not blocked(probe, claim("hue", ha="exclusive"))
-
-
-def test_an_agents_probe_without_the_key_is_refused(probe, monkeypatch, capsys):
-    clear_states(monkeypatch, key=False)
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig." in capsys.readouterr().out
-
-
-def test_a_probe_is_checked_again_once_it_holds_its_locks(probe, monkeypatch):
-    clear_states(monkeypatch, "off", "on")
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert ProbeHA.calls == []
-
-
-def test_a_clear_probe_runs_watched_and_unasked(probe, monkeypatch, capsys):
-    armed = clear_states(monkeypatch, "off", "off")
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert armed == [True]
-    assert "Proceed" not in capsys.readouterr().out
-
-
-def test_a_probe_a_human_let_past_is_watched_and_not_asked_again(probe, monkeypatch, capsys):
-    armed = clear_states(monkeypatch, "on")  # one read: a second would fail the test
-    at_a_terminal(monkeypatch, "y\n")
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert armed == [True]
-    assert f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]" in capsys.readouterr().out
-
-
-def test_an_approved_probe_goes_while_the_sensor_is_on_and_is_watched(probe, monkeypatch):
-    armed = clear_states(monkeypatch, "on")
-    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert armed == [True]
-
-
-def test_a_non_visual_probe_reads_no_sensor_and_is_not_watched(probe, monkeypatch):
-    armed = clear_states(monkeypatch)  # no reply: reading the sensor would fail
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
-    assert armed == [False]
-
-
-def test_a_visual_profile_probe_needs_a_pre_authorized_profile(probe, monkeypatch):
-    armed = clear_states(monkeypatch)
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    with pytest.raises(SystemExit, match="--visual profile needs a pre-authorized profile, and lab isn't"):
-        rig.main(["--hold", "hue", "--visual", "profile", "--", "true"])
-    with (probe / "lab.yaml").open("a") as profile:
-        profile.write("pre_authorized: true\n")
-    assert rig.main(["--hold", "hue", "--visual", "profile", "--", "true"]) == 0
-    assert armed == [False]
-
-
-def test_an_undeclared_probe_on_a_pre_authorized_profile_is_still_restricted(probe, monkeypatch, capsys):
-    clear_states(monkeypatch, "on")
-    with (probe / "lab.yaml").open("a") as profile:
-        profile.write("pre_authorized: true\n")
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert f"Restricted, and {PROBE_SENSOR} is on." in capsys.readouterr().out
 
 
 def test_a_probes_dry_run_says_whether_it_may_go_and_runs_nothing(probe, monkeypatch, capsys):

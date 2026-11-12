@@ -831,52 +831,36 @@ def test_a_dry_run_prints_the_decision(tmp_path, monkeypatch, capsys):
     assert "Authorization: profile lab is pre-authorized. Unrestricted." in capsys.readouterr().out
 
 
-def test_an_agents_restricted_run_is_refused_while_the_sensor_is_not_off(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "unavailable")
-    assert rig.main([]) == 1
-    assert f"Restricted, and {SENSOR} is unavailable. Needs" in capsys.readouterr().out
-    assert armed == []
-
-
-def test_an_agents_restricted_run_goes_unasked_while_the_sensor_is_off_and_is_watched(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "off")
-    assert rig.main([]) == 0
-    assert armed == [(True, True)]
-    assert "Proceed?" not in capsys.readouterr().out
-
-
-def test_an_approved_run_goes_while_the_sensor_is_on_and_is_watched_for_it_turning_on(tmp_path, monkeypatch):
-    armed = clear_run(tmp_path, monkeypatch, "on")
-    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
-    assert rig.main([]) == 0
-    assert armed == [(True, False)]  # no read of off yet: it waits for one before an on counts
-
-
-def test_a_human_at_a_terminal_is_asked_and_a_yes_is_the_approval(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "on")
-    monkeypatch.setattr(rig, "tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
-    assert rig.main([]) == 0
-    assert armed == [(True, False)]  # watched, as every restricted run is
-    assert f"Restricted: {SENSOR} is on. Proceed anyway? [y/N]" in capsys.readouterr().out
-
-
-def test_a_terminal_asks_a_readiness_question_of_a_clear_run(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "off")
-    monkeypatch.setattr(rig, "tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("n\n"))
-    assert rig.main([]) == 1
-    assert "Proceed? [y/N]" in capsys.readouterr().out
-    assert armed == []
-
-
-def test_a_pre_authorized_run_reads_no_sensor_and_is_not_watched(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "on")
-    pre_authorize(tmp_path)
-    monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
-    assert rig.main([]) == 0
-    assert armed == [(False, False)]
-    assert "Proceed?" not in capsys.readouterr().out
+@pytest.mark.parametrize(
+    ("state", "given", "code", "armed", "says"),
+    [
+        pytest.param(
+            "unavailable", "", 1, [], f"Restricted, and {SENSOR} is unavailable. Needs", id="not off: refused"
+        ),
+        pytest.param("off", "", 0, [(True, True)], "", id="off: goes unasked, watched"),
+        # Approved, it is watched with no read of off yet: it waits for one before an on counts.
+        pytest.param("on", "approved", 0, [(True, False)], "", id="approved: goes while on, watched for on"),
+        pytest.param("on", "y", 0, [(True, False)], f"Restricted: {SENSOR} is on. Proceed anyway? [y/N]", id="yes"),
+        pytest.param("off", "n", 1, [], "Proceed? [y/N]", id="a terminal asks a clear run if it is ready"),
+        pytest.param("on", "pre-authorized", 0, [(False, False)], "", id="pre-authorized: no read, not watched"),
+    ],
+)
+def test_the_run_gate(tmp_path, monkeypatch, capsys, state, given, code, armed, says):
+    """An agent's run (no terminal) is never asked; a human's answer at one is the approval."""
+    seen = clear_run(tmp_path, monkeypatch, state)
+    if given == "approved":
+        monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    if given in ("y", "n"):
+        monkeypatch.setattr(rig, "tty", lambda: True)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(f"{given}\n"))
+    if given == "pre-authorized":
+        pre_authorize(tmp_path)
+        monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
+    assert rig.main([]) == code
+    assert seen == armed
+    out = capsys.readouterr().out
+    assert says in out
+    assert ("Proceed" in out) is (given in ("y", "n"))
 
 
 def test_a_run_plans_lanes_unless_serial(tmp_path, monkeypatch, capsys):
