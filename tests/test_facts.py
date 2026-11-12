@@ -1,45 +1,48 @@
-from ha_rig.facts import FAIL, FIRMWARE_FACT, HEADER, OBSERVED, PASS, Fact, FactsFile
+from ha_rig.facts import AUTOMATED, FAIL, HEADER, OBSERVED, PASS, Fact, FactsFile, append
 
 LAMP = "Hue ambiance lamp (`LTA009`), firmware `1.163.1`"
 
 
-def test_the_file_round_trips_its_rows_in_the_order_they_were_added(tmp_path):
-    path = tmp_path / "_facts.md"
-    facts = FactsFile("Hue")
-    facts.add(
-        [
-            Fact("2026-11-12", "raise[light_ct] observed", OBSERVED, LAMP, PASS),
-            Fact("2026-11-10", "wins[light_ct]", FIRMWARE_FACT, f"Zone, firmware `unknown`; {LAMP}", FAIL),
-        ]
-    )
-    facts.write(path)
+def test_a_new_file_starts_with_its_heading_and_each_row_is_appended_in_turn(tmp_path):
+    path = tmp_path / "hue" / "_facts.md"
+    first = Fact("2026-11-12", "raise[light_ct] observed", OBSERVED, LAMP, PASS)
+    second = Fact("2026-11-10", "wins[light_ct]", AUTOMATED, f"Zone, firmware `unknown`; {LAMP}", FAIL)
+    append(path, "Hue", first)
+    append(path, "Hue", second)
+    append(path, "ignored", first)  # the same row again: appended, as each case ends once
     text = path.read_text()
-    assert text.startswith("# Hue · facts\n") and HEADER in text
-    assert text.index("raise[light_ct]") < text.index("wins[light_ct]")  # appended, never sorted
-    assert FactsFile.read(path, "ignored").rows == facts.rows
+    assert text.startswith("# Hue · facts\n") and text.count(HEADER) == 1 and "ignored" not in text
+    assert FactsFile.read(path).rows == (first, second, first)
 
 
-def test_rows_are_only_appended_and_only_an_identical_one_is_left_out(tmp_path):
+def test_an_empty_file_gets_its_heading(tmp_path):
+    (path := tmp_path / "_facts.md").write_text("")
+    append(path, "Hue", Fact("2026-11-12", "t[x]", AUTOMATED, LAMP, PASS))
+    assert path.read_text().startswith("# Hue · facts\n")
+
+
+def test_a_line_the_rig_cant_read_survives_a_write(tmp_path):
     path = tmp_path / "_facts.md"
-    seen = Fact("2026-11-12", "raise[light_ct] observed", OBSERVED, LAMP, PASS)
-    FactsFile("Hue", [seen]).write(path)
-    again = FactsFile.read(path, "Hue")
-    again.add([seen, Fact("2026-11-12", "raise[light_ct] observed", OBSERVED, LAMP, FAIL)])
-    assert [row.result for row in again.rows] == [PASS, FAIL]
+    append(path, "Hue", Fact("2026-11-12", "t[x]", AUTOMATED, LAMP, PASS))
+    path.write_text(path.read_text() + "A note a maintainer added by hand | with a pipe\n")
+    append(path, "Hue", Fact("2026-11-13", "t[x]", AUTOMATED, LAMP, FAIL))
+    assert "A note a maintainer added by hand | with a pipe\n" in path.read_text()
+    assert [row.result for row in FactsFile.read(path).rows] == [PASS, FAIL]
 
 
-def test_latest_is_the_newest_date_and_of_one_date_the_last_added():
-    old = Fact("2026-11-01", "t[x]", FIRMWARE_FACT, LAMP, FAIL)
-    facts = FactsFile("Hue", [Fact("2026-11-12", "t[x]", FIRMWARE_FACT, LAMP, PASS), old])
-    assert str(facts.latest("t[x]")) == "last on file 2026-11-12: pass"
-    facts.add([Fact("2026-11-12", "t[x]", FIRMWARE_FACT, "another", FAIL)])
-    assert str(facts.latest("t[x]")) == "last on file 2026-11-12: fail"
+def test_latest_is_the_last_row_for_the_case(tmp_path):
+    path = tmp_path / "_facts.md"
+    for result in (PASS, FAIL, PASS):  # one day
+        append(path, "Hue", Fact("2026-11-12", "t[x]", AUTOMATED, LAMP, result))
+    facts = FactsFile.read(path)
+    assert facts.latest("t[x]").result == PASS
+    assert str(facts.latest("t[x]")) == f"last on file 2026-11-12, on {LAMP}: pass"
     assert facts.latest("u[x]") is None
 
 
 def test_a_missing_file_reads_empty_and_a_pipe_in_a_cell_survives(tmp_path):
-    assert FactsFile.read(tmp_path / "none.md", "Hue").rows == []
+    assert FactsFile.read(tmp_path / "none.md").rows == ()
     path = tmp_path / "_facts.md"
-    facts = FactsFile("Hue", [Fact("2026-11-12", "t[x] observed", OBSERVED, "a | b", PASS)])
-    facts.write(path)
-    assert FactsFile.read(path, "Hue").rows == facts.rows
+    fact = Fact("2026-11-12", "t[x] observed", OBSERVED, "a | b", PASS)
+    append(path, "Hue", fact)
+    assert FactsFile.read(path).rows == (fact,)

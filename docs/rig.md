@@ -69,8 +69,9 @@ an Adaptive Lighting switch). `.env.rig` (from `ha_rig/env.example`) holds what 
 address, tokens, deploy commands and Hue bridge.
 
 `--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
-a record never narrows to a profile's roles: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`) writes no record
-over one that passed a case on it, and says `Kept <record>`. Run a profile with the role, or, to narrow on purpose
+a record never narrows to a profile: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`), or
+whose group lacks the light a case targets, writes no record over one that passed that case, and says `Kept
+<record>`. Run a profile with the role, or, to narrow on purpose
 (a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's (through
 `.private-terms.rig`) and this repo's (`scripts/check_private.py`), keep every profile's entity IDs, members, supplies,
@@ -159,24 +160,27 @@ proven or stale, and a test record in the checkout never leaves a suite out.
 TODO: deviceside's `check_release.py --signoffs` (evidence-rules plan, step 4) is to list the integrations that need a
 sign-off in a machine-readable form; a later rig change takes that list as its selection.
 
-**Opt-in cases.** Observed tests and firmware facts (Writing a step file, below) find facts, which stand once written
-down in the integration's `_facts.md` (Facts, below), so a default run skips them, each `skipped` with how to ask for
-it (`observed: runs with --observed`, `firmware fact: runs with --facts`). `--observed` and `--facts` add them to the
-run, for when a change or a bug calls for one. A skipped case moves nothing. A default run never writes `_facts.md`,
-so it never erases a fact.
+**Fact tests.** A fact test, one marked `firmware_fact: true` or with an `observe:` block or both (Writing a step
+file, below), finds a fact, which stands once written down in the integration's `_facts.md` (Facts, below). So a
+default run skips every case of it, automated and watched, each `skipped` with `fact test: runs with --facts`.
+`--facts` runs fact tests whole, for when a change or a bug calls for one; with `--unattended` too, their watched
+parts are `not observed` and their automated parts still run, so `--facts --unattended` runs every automated fact. A
+skipped case moves nothing. A default run never writes `_facts.md`, so it never erases a fact. A one-off probe (a
+bulb's timer that can't be stopped through its bridge, say) is no rig test: it lives in a deviceside research file.
 
 **The ledger.** A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's
 parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). It is
 there only to resume a run: its entries are per suite, keyed by the commit (HEAD when the run plans) and the step
 file's digest, so a rerun at the same commit of the same step file picks up where the last one stopped, and any other
-starts the suite afresh. (The digest goes once the step files move into deviceside, whose commit then covers them.) A saved case holds
-while it planned the same entities (a profile change reruns it), and a `not observed` one only for an `--unattended`
-run. An entry goes when HA runs another version (a record names one), when its suite's record is promoted into the
-checkout (Test records, below), when the run that saved a failure of one of its cases ends (the suite reruns whole,
-so a record never covers up a failure; the run's report keeps it), or after 30 days untouched. `--fresh` drops the
-selected suites' saved cases. `--no-deploy` saves nothing, as it writes no record, and neither does a run whose deploy
-left HA on another tree than the one planned (origin moved). A run whose every selected case is saved says so and
-stops; one whose HEAD moved while it waited for its locks stops too, to be run again.
+starts the suite afresh. (The digest goes once the step files move into deviceside, whose commit then covers them.)
+A saved case holds while it planned the same entities (a profile change reruns it), and a `not observed` one only for an
+`--unattended` run. An entry goes when HA runs another version (a record names one), when its suite's record is promoted
+into the checkout (Test records, below), when the run that saved a failure of one of its default cases ends (the suite
+reruns whole, so a record never covers up a failure; the run's report keeps it; a fact test's failure is a fact, and
+drops nothing), or after 30 days untouched. `--fresh` drops the selected suites' saved cases. `--no-deploy` saves
+nothing, as it writes no record, and neither does a run whose deploy left HA on another tree than the one planned
+(origin moved). A run whose every selected case is saved says so and stops; one whose HEAD moved while it waited for its
+locks stops too, to be run again.
 
 A run that stops part way puts everything back as always and exits 75; rerun it and it picks up at the cases with no
 saved result, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
@@ -235,10 +239,10 @@ some integrations; when those pile up, split the file. A step takes `only` too, 
 runs on.
 
 `firmware_fact: true` marks a test that proves how the device behaves (which of two calls wins, the bounds it
-takes, a timing it keeps), not a branch of the adapter's code. Its result, pass or fail, is a fact in `_facts.md` and
-stands until evidence contradicts it, so it runs only with `--facts` (What runs, above); its suite's record lists it
-as `skipped`. Mark only a test whose pass hangs on the device, not on the call the adapter sends: another case must
-prove the call. A firmware fact can't also `observe`: make the observed part its own test.
+takes, a timing it keeps), not a branch of the adapter's code. It is a fact test (What runs, above), as is any test
+with `observe:`, and may be both: its results, pass or fail, are facts in `_facts.md`, its suite's record lists its
+cases as `skipped`, and it runs only with `--facts`. Mark only a test whose pass hangs on the device, not on the call
+the adapter sends: another case must prove the call.
 
 The roles are listed in `ha_rig/profile.example.yaml`. `group_color` is a native group whose members all take
 color: color moves groupcast only to a group like that, so it runs the color cases a `group` can't. Everything this
@@ -295,11 +299,11 @@ has never shown and a check can't measure: once watched on an integration, a beh
       ask: Did it climb smoothly to full?
 ```
 
-Its observed case runs only with `--observed` (What runs, above). Asked for, such a test runs twice, so you are asked
+Such a test is a fact test, so it runs only with `--facts` (What runs, above). Then it runs twice, so you are asked
 only what a machine can't check:
 
 1. **Automated**, with every other test first: setup and steps, every check applied. It has no automated run if its
-   steps check nothing or its setup has a `do`; a default run, which skips the observed case, then runs nothing of it.
+   steps check nothing or its setup has a `do`.
 2. **Observed** (`<name>[<role>] observed`), after all automated runs. Setup runs and settles for 2 s, then the runner
    prints `see` (in bold) and `watch` and waits for Enter. The steps run with their checks turned into waits, so the
    timing matches. Then you answer `ask`: Enter or `y` if you saw it, `n` if not, which fails the test and asks what
@@ -307,9 +311,8 @@ only what a machine can't check:
    `nothing to observe` and the reason.
 
 `roles: [<role>]` in `observe:` limits the observed run to those roles, and `only: [<integration>]` to those
-integrations; the rest run automated only. `--unattended` doesn't ask, and reports each observed case `not observed`.
-Whatever an observed case does, its automated case still counts toward the record: what you saw is a fact for
-`_facts.md` (Facts, below), never the record's.
+integrations; the rest run automated only. `--unattended` doesn't ask, and reports each observed case `not observed`;
+the automated parts still run. What either part finds is a fact for `_facts.md` (Facts, below), never the record's.
 
 ## After a run
 
@@ -359,22 +362,25 @@ clear: when every selected case is saved there is no such run, and only `--promo
 
 A record holds the date, a `Ran` row (`N passed, M skipped`), the Home Assistant version, the devices' model and
 firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row) and Result. It needs
-every default case that applies to pass. The only skips it allows are of opt-in cases, which it always lists as
+every default case that applies to pass. The only skips it allows are of fact tests' cases, which it always lists as
 `skipped`, whatever they did in the run, and of cases that don't apply here: an action a test calls has no adapter,
 the profile lacks the role, or a group lacks the light the case targets. Any other skip, a failure, or a case not yet
 run (left out by `-k`, unreachable, or cut short) writes nothing until a later run at the same commit completes it
-(What runs, above). A record with opt-in cases ends with a line pointing to `_facts.md` and, for each, the latest row
-on file (`last on file 2026-11-12: fail`, or `none on file`), which only reports what is there. The record's Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this
-repo's. Whether a record signs off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate),
-not the rig's. A record never narrows to a profile's roles: a run never overwrites one with a record that skips, for
-a role its profile lacks, a case the record passed (Profiles, above). Facts live in `_facts.md`, never in a record.
+(What runs, above). A record with fact tests' cases ends with a line pointing to `_facts.md` and, for each, the
+latest row on file (``last on file 2026-11-12, on Mini (`S3`), firmware `2.0`: fail``, or `none on file`), which only
+reports what is there. The record's Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one
+of this repo's. Whether a record signs off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate),
+not the rig's. A record never narrows to a profile: a run never overwrites one with a record that skips, as not
+applying (a role the profile lacks, a group without the light, no adapter), a case the record passed (Profiles,
+above). Facts live in `_facts.md`, never in a record.
 
 ### Facts
 
-`_facts.md`, in each integration's records directory (`ha_rig/facts.py`), holds what the opt-in cases found: one row
-per observed case a person answered (`pass` if you saw it, `fail` for a `n`; a step that broke, or nobody there, adds
-nothing) and per firmware fact that passed or failed. A row holds the date, the case, its kind (`observed` or
-`firmware fact`), the devices it ran on with their firmware (a group's members included, as a record's Device row
-names them) and the result. Rows are only ever added, as each case ends, straight into the checkout, whether or not a
-record is written and however the run ends: a fact stands whatever the code, until evidence contradicts it. Nothing
-reruns an opt-in case by itself, and the rig decides nothing from the rows. Review the diff before committing it.
+`_facts.md`, in each integration's records directory (`ha_rig/facts.py`), holds what the fact tests found: one row per
+automated part that passed or failed, and per watched part a person answered (`pass` if you saw it, `fail` for a `n`;
+a step that broke, or nobody there, adds nothing). A row holds the date, the case, its kind, which says how the fact
+was seen (`automated` or `observed`), the devices it ran on with their firmware (a group's members included, as a
+record's Device row names them) and the result. The file is only ever appended to, a row as each case ends, straight
+into the checkout, whether or not a record is written and however the run ends: a fact stands whatever the code,
+until evidence contradicts it, and a line the rig can't read stays as it is. Nothing reruns a fact test by itself, and
+the rig decides nothing from the rows. Review the diff before committing it.

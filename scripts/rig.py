@@ -71,14 +71,15 @@ device left unpowered stops the run only when its phase comes, after the bulbs h
 --ignore-unreachables an unavailable fixed entity skips its cases instead (engine.unreachable), and while any is,
 those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
-A run runs the suites it is asked for; what needs testing is deviceside's to say. Observed tests and firmware facts
-run only with --observed and --facts: a default run skips them. It saves each case as it finishes in the profile's
-ledger (ha_rig/progress.py), keyed by the commit and the suite, so one that stops part way, on a signal, the restricted
-sensor or --for's budget, exits 75 and, rerun at the same commit, picks up where it stopped; a suite finished across
+A run runs the suites it is asked for; what needs testing is deviceside's to say. Fact tests (firmware facts, and
+tests a person watches) run only with --facts, automated and watched parts together: a default run skips them. It saves
+each case as it finishes in the profile's ledger (ha_rig/progress.py), keyed by the commit, the suite and its step
+file's digest (progress.run_key), so one that stops part way, on a signal, the restricted sensor or --for's budget,
+exits 75 and, rerun at the same commit with the same step files, picks up where it stopped; a suite finished across
 runs still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish; it
 counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case. A
-suite with a failed case, or saved on another HA version, reruns whole; --fresh drops the selected suites' saved
-cases.
+suite with a failed default case, or saved on another HA version, reruns whole; --fresh drops the selected suites'
+saved cases.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -87,10 +88,10 @@ DeviceSide and the run's integrations, and Z2M, to debug for the run, keeps the 
 baseline, so --recover too).
 
 Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] [--serial] [--debug-logs]
-                      [--integration KEY ...] [--action NAME ...] [-k TEXT] [--observed] [--facts]
+                      [--integration KEY ...] [--action NAME ...] [-k TEXT] [--facts]
                       [--for DURATION] [--fresh] [--ignore-unreachables]
        scripts/rig.py [--profile NAME] --check [--ignore-unreachables] [--integration KEY ...] [--action NAME ...]
-                      [-k TEXT] [--observed] [--facts]
+                      [-k TEXT] [--facts]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
@@ -140,8 +141,6 @@ from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
 from ha_rig.client import HAClient, HAError  # noqa: E402
 from ha_rig.engine import (  # noqa: E402
     ADMIN_INTEGRATIONS,
-    FACTS,
-    OBSERVED,
     Budget,
     Case,
     CaseResult,
@@ -238,16 +237,16 @@ def select(
     profile: Profile,
     integrations: list[str] | None,
     actions: list[str] | None = None,
-    opt_in: frozenset[str] = frozenset(),
+    facts: bool = False,
 ) -> list[Suite]:
     """Every step file on every integration in the profile it has a test for (`only:`), narrowed to --integration
-    and --action, each with the cases a default run skips that `opt_in` asks for (--observed, --facts). A file with
+    and --action, each running its fact tests when `facts` (--facts) asks for them. A file with
     no adapter there stays, for the dry-run's `no adapter, will skip`. An action takes every step file for it
     (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its record; a file with a
     `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is run_suites's job
     (engine.applies)."""
     return [
-        Suite(step_file, integration, opt_in)
+        Suite(step_file, integration, facts)
         for step_file in step_files
         if not actions or (step_file.name or step_file.action) in actions
         for integration in profile.integrations
@@ -726,19 +725,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--action", action="append", help="limit to an action's step files (repeatable)")
     parser.add_argument("-k", dest="keyword", help="run only test cases whose id contains this text")
     parser.add_argument(
-        "--observed",
-        action="store_true",
-        help="also run the observed tests, which ask the person at the rig what they saw, for _facts.md",
-    )
-    parser.add_argument(
         "--facts",
         action="store_true",
-        help="also run the firmware facts, which prove how a device behaves; their results stand in _facts.md",
+        help="also run the fact tests, automated and watched parts, which a default run skips; their results go to "
+        "_facts.md",
     )
     parser.add_argument(
         "--unattended",
         action="store_true",
-        help="ask no one: with --observed, the observed tests are reported not observed",
+        help="ask no one: with --facts, the watched parts are reported not observed, and the automated ones run",
     )
     parser.add_argument(
         "--serial",
@@ -849,7 +844,6 @@ def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namesp
         or args.keyword
         or args.serial
         or args.unattended
-        or args.observed
         or args.facts
         or args.debug_logs
         or args.budget
@@ -863,8 +857,8 @@ def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namesp
         parser.error("--ignore-unreachables is for a test run or --check")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
-    if (args.observed or args.facts) and (args.roam_check or args.recover or args.wait_free or command):
-        parser.error("--observed and --facts are for a test run or --check")
+    if args.facts and (args.roam_check or args.recover or args.wait_free or command):
+        parser.error("--facts is for a test run or --check")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
         parser.error("--debug-logs is for a run or --roam-check")
     if args.visual and not command:
@@ -1482,10 +1476,9 @@ def run_suites(args: argparse.Namespace, profile: Profile, registry: AdapterRegi
     step_files = load_step_files()
     check_options(step_files, registry)
     # No adapter stays, so the dry-run still says `no adapter, will skip`; an option file the adapter lacks goes.
-    opt_in = frozenset(kind for kind, asked in ((OBSERVED, args.observed), (FACTS, args.facts)) if asked)
     suites = [
         suite
-        for suite in select(step_files, profile, args.integration, args.action, opt_in)
+        for suite in select(step_files, profile, args.integration, args.action, args.facts)
         if registry.adapter(suite.action, suite.integration) is None or applies(suite, registry)
     ]
     if not any(registry.adapter(suite.action, suite.integration) for suite in suites):

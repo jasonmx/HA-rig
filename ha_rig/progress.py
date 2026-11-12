@@ -10,7 +10,8 @@ execution state only: what a suite needs to prove, and when, is deviceside's to 
 An entry goes when:
 - HA runs another version than its cases ran on: a record names one;
 - its suite's record is promoted into the checkout (ha_rig/staging.py);
-- the run that saved a failure of one of its cases ends: the suite reruns whole, so a record never covers up a failure;
+- the run that saved a failure of one of its default cases ends: the suite reruns whole, so a record never covers up a
+  failure. A fact test's failure is a fact (ha_rig/facts.py), not the suite's, so it drops nothing;
 - nothing has touched it for PRUNE_DAYS.
 
 Two runs on different integrations may save at once, so each save re-reads the file under a lock and merges this run's
@@ -21,13 +22,12 @@ it was. It holds household entity IDs, so it stays out of the repo, like the jou
 import contextlib
 import datetime
 import fcntl
-import hashlib
 import json
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 
-from .engine import Case, CaseResult, Device, Outcome, Suite, SuiteResult
+from .engine import Case, CaseResult, Device, Outcome, Suite, SuiteResult, opt_in
 from .journal import write_whole
 
 DIRECTORY = "deviceside-rig-progress"
@@ -46,10 +46,10 @@ def _now() -> str:
 
 
 def run_key(commit: str, suite: Suite) -> str:
-    """What a suite's saved cases were run at: the commit planned at, and its step file's digest, since the step files
-    live here, outside that commit. The digest can go once the step files move into deviceside (evidence-rules plan,
-    step 3b): the commit then covers them."""
-    return f"{commit}:{hashlib.sha256(suite.file.path.read_bytes()).hexdigest()[:12]}"
+    """What a suite's saved cases were run at: the commit planned at, and its step file's digest (StepFile.digest, taken
+    as it was loaded), since the step files live here, outside that commit. The digest can go once the step files move
+    into deviceside (evidence-rules plan, step 3b): the commit then covers them."""
+    return f"{commit}:{suite.file.digest}"
 
 
 def _key(entry: dict) -> EntryKey:
@@ -91,6 +91,7 @@ class Progress:
         self.path = path
         self.entries: dict[EntryKey, dict] = dict(entries or {})
         self.tracked: dict[tuple[str, str], str] = {}  # (integration, suite name): its run_key
+        self.suites: dict[tuple[str, str], Suite] = {}  # the tracked suites, for which of their cases are fact tests'
         self.ha_version: str | None = None
         self.changed: set[EntryKey] = set()
         self.dropped: set[EntryKey] = set()
@@ -110,6 +111,7 @@ class Progress:
     def track(self, suite: Suite, at: str) -> None:
         """Follow `suite` at `at` (run_key): its saved cases there are the run's, and its new ones are saved there."""
         self.tracked[suite.integration, suite.name] = at
+        self.suites[suite.integration, suite.name] = suite
 
     def resume(
         self, suite: Suite, commit: str, planned: Iterable[Case], *, fresh: bool = False, unattended: bool = False
@@ -118,7 +120,7 @@ class Progress:
         `planned`. `fresh` (--fresh), or a saved failure, drops the suite's entry, so it runs whole."""
         self.track(suite, run_key(commit, suite))
         saved = self.saved(suite)
-        if fresh or any(result.outcome is Outcome.FAIL for result in saved.values()):
+        if fresh or _failed(suite, saved.values()):
             self.drop(suite)
             return
         by_id = {case.id: case for case in planned}
@@ -245,11 +247,12 @@ class Progress:
         self.dropped.add(key)
 
     def drop_failed(self) -> list[tuple[str, str]]:
-        """At the run's end: drop each tracked suite holding a failure, so it reruns whole; saved. Returns them."""
+        """At the run's end: drop each tracked suite holding a default case's failure, so it reruns whole; saved.
+        Returns them."""
         failed = []
         for key in self.tracked_keys():
             entry = self.entries.get(key)
-            if entry and any(case["outcome"] == Outcome.FAIL for case in entry["cases"]):
+            if entry and _failed(self.suites[key[:2]], map(_result, entry["cases"])):
                 self._drop(key)
                 failed.append(key[:2])
         self.save()
@@ -278,6 +281,11 @@ class Progress:
                 yield
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _failed(suite: Suite, results: Iterable[CaseResult]) -> bool:
+    """Whether a default case failed: a fact test's failure is a fact, not the suite's."""
+    return any(result.outcome is Outcome.FAIL and not opt_in(suite, result.id) for result in results)
 
 
 def _saved(result: CaseResult) -> dict:
