@@ -831,22 +831,27 @@ def test_a_dry_run_prints_the_decision(tmp_path, monkeypatch, capsys):
     assert "Authorization: profile lab is pre-authorized. Unrestricted." in capsys.readouterr().out
 
 
+# How the run is given its go-ahead; `""` gives none, "y" and "n" answer at a terminal.
+RUN_GIVEN = ("", "approved", "y", "n", "pre-authorized")
+
+
 @pytest.mark.parametrize(
     ("state", "given", "code", "armed", "says"),
     [
         pytest.param(
             "unavailable", "", 1, [], f"Restricted, and {SENSOR} is unavailable. Needs", id="not off: refused"
         ),
-        pytest.param("off", "", 0, [(True, True)], "", id="off: goes unasked, watched"),
+        pytest.param("off", "", 0, [(True, True)], None, id="off: goes unasked, watched"),
         # Approved, it is watched with no read of off yet: it waits for one before an on counts.
-        pytest.param("on", "approved", 0, [(True, False)], "", id="approved: goes while on, watched for on"),
+        pytest.param("on", "approved", 0, [(True, False)], None, id="approved: goes while on, watched for on"),
         pytest.param("on", "y", 0, [(True, False)], f"Restricted: {SENSOR} is on. Proceed anyway? [y/N]", id="yes"),
         pytest.param("off", "n", 1, [], "Proceed? [y/N]", id="a terminal asks a clear run if it is ready"),
-        pytest.param("on", "pre-authorized", 0, [(False, False)], "", id="pre-authorized: no read, not watched"),
+        pytest.param("on", "pre-authorized", 0, [(False, False)], None, id="pre-authorized: no read, not watched"),
     ],
 )
 def test_the_run_gate(tmp_path, monkeypatch, capsys, state, given, code, armed, says):
     """An agent's run (no terminal) is never asked; a human's answer at one is the approval."""
+    assert given in RUN_GIVEN
     seen = clear_run(tmp_path, monkeypatch, state)
     if given == "approved":
         monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
@@ -859,7 +864,8 @@ def test_the_run_gate(tmp_path, monkeypatch, capsys, state, given, code, armed, 
     assert rig.main([]) == code
     assert seen == armed
     out = capsys.readouterr().out
-    assert says in out
+    if says is not None:
+        assert says in out
     assert ("Proceed" in out) is (given in ("y", "n"))
 
 
