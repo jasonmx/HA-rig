@@ -349,44 +349,30 @@ def step_suites(tmp_path: Path, text: str, *integrations: str) -> list:
     return [rig.Suite(load_step_file(path), integration) for integration in integrations]
 
 
-def test_a_plain_run_claims_its_integrations_and_ha_shared(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    run = setup(tmp_path, profile, step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"))
-    assert rig.claim(run_args(), run) == claim("shelly")
+OPTIONS = fakes.RESTORED_MIDWAY.replace("tests:", "options: [opt]\ntests:", 1)
+LIFECYCLE = fakes.RESTORED_MIDWAY.replace("tests:", "name: lifecycle\ntests:", 1).replace(
+    "restore: null", "entry: reload"
+)
+NO_ADAPTER = SimpleNamespace(adapter=lambda action, integration: None)
 
 
-def test_a_deploy_takes_ha_exclusive_unless_no_deploy(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    run = setup(tmp_path, profile, step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"), deploy_needed=True)
-    assert rig.claim(run_args(), run) == claim("shelly", ha="exclusive")
-    assert rig.claim(run_args("--no-deploy"), run) == claim("shelly")
-
-
-def test_an_option_suite_takes_ha_exclusive(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    options = fakes.RESTORED_MIDWAY.replace("tests:", "options: [opt]\ntests:", 1)
-    run = setup(tmp_path, profile, step_suites(tmp_path, options, "shelly"), registry=fakes.OPTION_REGISTRY)
-    assert rig.claim(run_args(), run) == claim("shelly", ha="exclusive")
-
-
-def test_a_suite_with_entry_steps_takes_ha_exclusive(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    lifecycle = fakes.RESTORED_MIDWAY.replace("tests:", "name: lifecycle\ntests:", 1).replace(
-        "restore: null", "entry: reload"
-    )
-    run = setup(tmp_path, profile, step_suites(tmp_path, lifecycle, "shelly"))
-    assert rig.claim(run_args(), run) == claim("shelly", ha="exclusive")
-
-
-def test_a_suite_with_no_adapter_claims_nothing(tmp_path):
+@pytest.mark.parametrize(
+    ("text", "deploy_needed", "argv", "registry", "expected"),
+    [
+        pytest.param(fakes.RESTORED_MIDWAY, False, (), None, claim("shelly"), id="plain: integrations, HA shared"),
+        pytest.param(fakes.RESTORED_MIDWAY, True, (), None, claim("shelly", ha="exclusive"), id="deploy"),
+        pytest.param(fakes.RESTORED_MIDWAY, True, ("--no-deploy",), None, claim("shelly"), id="no-deploy"),
+        pytest.param(OPTIONS, False, (), None, claim("shelly", ha="exclusive"), id="option suite"),
+        pytest.param(LIFECYCLE, False, (), None, claim("shelly", ha="exclusive"), id="entry steps"),
+        pytest.param(fakes.RESTORED_MIDWAY, False, (), NO_ADAPTER, SHARED, id="no adapter: nothing"),
+    ],
+)
+def test_a_runs_claim(tmp_path, text, deploy_needed, argv, registry, expected):
     profile = fakes.profile("shelly", light_ct="light.a")
     run = setup(
-        tmp_path,
-        profile,
-        step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"),
-        registry=SimpleNamespace(adapter=lambda action, integration: None),
+        tmp_path, profile, step_suites(tmp_path, text, "shelly"), deploy_needed=deploy_needed, registry=registry
     )
-    assert rig.claim(run_args(), run) == SHARED
+    assert rig.claim(run_args(*argv), run) == expected
 
 
 def test_a_zha_only_roam_claims_hue_and_zha_not_z2m(tmp_path):
