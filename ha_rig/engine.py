@@ -11,30 +11,25 @@ import ast
 import asyncio
 import contextlib
 import datetime
-import hashlib
-import json
 import logging
 import operator
 import re
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import yaml
 
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
-from .client import SCOPE_EVENT, HAClient, HAError, device_ieee
+from .client import HAClient, HAError, device_ieee
 from .journal import Journal
+from .observed import FAIL, PASS, Observation, ObservedFile
 from .observed import FILE as OBSERVED_FILE
-from .observed import Device as Maker
-from .observed import Observation, ObservedFile, Trace, render_call, sequence, short_hash
-from .observed import merge as merge_row
 from .profile import ENTRY_RELOADS, GROUP_ROLES, RIG_DIR, ROLES, SETTLE_S, TOLERANCE_S, Profile
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,7 +65,12 @@ COORDINATOR_BUSY = "coordinator busy"
 # lights have reached the start state it describes.
 SETUP_SETTLE_S = 2.0
 NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
-TAKEN_BACK = "a fail seen this run blocks its lend"  # a lent case's detail once a fail takes its pass back
+
+# The cases a default run leaves out, and the option that asks for them (Suite.opt_in): an observed case needs
+# someone at the rig, and a firmware fact's pass stands as written down until evidence contradicts it.
+OBSERVED, FACTS = "observed", "facts"
+OPT_IN = {OBSERVED: "--observed", FACTS: "--facts"}
+OPTED_OUT = {OBSERVED: "observed: runs with --observed", FACTS: "firmware fact: runs with --facts"}  # skips
 
 # ZCL Color Control's hue attributes, which bulb_hue reads on ZHA.
 _COLOR_CLUSTER, _CURRENT_HUE, _ENHANCED_CURRENT_HUE = 0x0300, 0x0000, 0x4000
@@ -200,11 +200,9 @@ class RigTest:
     steps: tuple[Step, ...]
     setup: tuple[Step, ...] = ()
     observe: Observe | None = None
-    # A device behavior (precedence, bounds, timing) rather than the adapter's code: its result stands across code
-    # changes while the device's model and firmware are those it ran at (ha_rig/progress.py, Firmware facts).
+    # A device behavior (precedence, bounds, timing) rather than the adapter's code: once passed, it stands, so it
+    # runs only when asked (--facts).
     firmware_fact: bool = False
-    # A hash of the test as written, so a firmware fact's saved result goes when its test changes.
-    digest: str = field(default="", compare=False)
 
     @property
     def automated(self) -> bool:
@@ -530,9 +528,7 @@ def _parse_test(raw: Any) -> RigTest:
         if not isinstance(firmware_fact := raw.get("firmware_fact", False), bool):
             raise ValueError("firmware_fact must be true or false")
         steps, setup, observe = _parse_phases(raw)
-        test = RigTest(
-            name, tuple(roles), frozenset(only) if only else None, steps, setup, observe, firmware_fact, _digest(raw)
-        )
+        test = RigTest(name, tuple(roles), frozenset(only) if only else None, steps, setup, observe, firmware_fact)
         _check_observe_scope(test)
         _check_step_scope(test)
     except ValueError as err:
@@ -551,10 +547,6 @@ def _check_observe_scope(test: RigTest) -> None:
         raise ValueError(f"observe only {', '.join(outside)} are not in the test's only")
     if not test.automated:
         raise ValueError("observe roles or only needs an automated run for what it leaves out")
-
-
-def _digest(raw: dict) -> str:
-    return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def _check_step_scope(test: RigTest) -> None:
@@ -642,10 +634,12 @@ def load_step_files(steps_dir: Path = STEPS_DIR) -> list[StepFile]:
 
 @dataclass(frozen=True, slots=True)
 class Suite:
-    """One step file on one integration."""
+    """One step file on one integration, and the cases a default run leaves out that this run asked for: OBSERVED,
+    FACTS."""
 
     file: StepFile
     integration: str
+    opt_in: frozenset[str] = frozenset()
 
     @property
     def action(self) -> str:
@@ -723,7 +717,8 @@ def cases(
     suite: Suite, profile: Profile, keyword: str | None = None, adapters: frozenset[str] | None = None
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
-    ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped."""
+    ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped, and
+    so is an observed case or a firmware fact the suite didn't opt in to (`opt_out`)."""
     result = []
     for test in suite.file.tests:
         if not test.runs_on(suite.integration):
@@ -733,6 +728,9 @@ def cases(
             for observed in [False] * test.automated + [True] * test.observed_on(role, suite.integration):
                 case = Case(suite, test, role, {}, observed=observed)
                 if keyword and keyword not in case.id:
+                    continue
+                if why := opt_out(case):
+                    result.append(replace(case, skip=why))
                     continue
                 if lacking:
                     result.append(replace(case, skip=f"no {lacking} adapter on {suite.integration}"))
@@ -753,6 +751,15 @@ def cases(
                         case = replace(case, skip=why, unreachable=True)
                 result.append(case)
     return result
+
+
+def opt_out(case: Case) -> str | None:
+    """Why a default run leaves the case out, or None: an observed case or a firmware fact its suite didn't opt in to.
+    It is skipped, with no entities, so it moves and locks nothing, and its record shows it wasn't run."""
+    kind = OBSERVED if case.observed else FACTS if case.test.firmware_fact else None
+    if kind is None or kind in case.suite.opt_in:
+        return None
+    return OPTED_OUT[kind]
 
 
 def unreachable(case: Case, profile: Profile) -> str | None:
@@ -933,24 +940,8 @@ class CaseResult:
     twin: str | None = None  # Case.twin
     unreachable: bool = False  # Case.unreachable
     absent: bool = False  # Case.absent
-    trace: Trace | None = None  # what the case sent, when DeviceSide's wire trace was on
-    # What its scope weighed for the case's targets, when the trace was on: the sorted distinct (action,
-    # integration, domain, capability, fields) of DeviceSide's `deviceside_scope` events.
-    scope: tuple[tuple[str, str, str, str | None, tuple[str, ...]], ...] = ()
-    lent: str | None = None  # an observed case not run: the date of the _observed.md pass that covers its twin's calls
-
-
-def _scope(events: Iterable[dict]) -> tuple[tuple[str, str, str, str | None, tuple[str, ...]], ...]:
-    """The distinct scope events as sorted (action, integration, domain, capability, fields) tuples."""
-    return tuple(
-        sorted(
-            {
-                (e["action"], e["integration"], e["domain"], e.get("capability"), tuple(e.get("fields") or ()))
-                for e in events
-            },
-            key=lambda row: tuple("" if part is None else part for part in row),
-        )
-    )
+    # An observed case a person answered: the devices it ran on, for its _observed.md row. Never saved.
+    devices: tuple[Device, ...] = ()
 
 
 @dataclass(slots=True)
@@ -980,14 +971,9 @@ class SuiteResult:
 
     @property
     def recordable(self) -> bool:
-        """A complete run that proved something and failed nothing; an all-unobserved run would erase a record."""
-        return self.complete and bool(self.proven) and all(case.outcome is not Outcome.FAIL for case in self.cases)
-
-    @property
-    def proven(self) -> list[CaseResult]:
-        """Passed cases whose twin passed too: a case with a twin proves nothing alone."""
-        passed = {case.id for case in self.cases if case.outcome is Outcome.PASS}
-        return [case for case in self.cases if case.id in passed and (case.twin is None or case.twin in passed)]
+        """A complete run that passed something and failed nothing; an all-unobserved run would erase a record."""
+        passed = any(case.outcome is Outcome.PASS for case in self.cases)
+        return self.complete and passed and all(case.outcome is not Outcome.FAIL for case in self.cases)
 
 
 @dataclass(slots=True)
@@ -1372,24 +1358,6 @@ def _timed(readings: list[float], offsets: list[float], call_times: tuple[float,
     return f"[{timed}] after the call, which took {returned_at - sent_at:.2f} s"
 
 
-def _plain(value: Any, role: str) -> Any:
-    """A step's args as data: an expression as written, and the case's own role, wherever it is named, as `target`."""
-    if isinstance(value, Expr):
-        return ast.unparse(value.node)
-    if isinstance(value, dict):
-        return {key: _plain(item, role) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_plain(item, role) for item in value]
-    return "target" if value == role else value
-
-
-def starting_state(case: Case) -> str:
-    """The hash of the case's setup as written for its integration, its own role as `target`: two cases whose setups
-    read the same start their calls from the same state, whichever test or role they are."""
-    steps = [step for step in case.test.setup if step.only is None or case.suite.integration in step.only]
-    return short_hash([[step.kind, _plain(step.args, case.role)] for step in steps])
-
-
 class _CaseRun:
     """The steps of one case, against one HA connection, with what earlier steps left behind.
 
@@ -1413,16 +1381,15 @@ class _CaseRun:
         journal: Journal | None = None,
         journal_key: str = SERIAL,
         entry: EntryOptions | None = None,
-        wire: HAClient | None = None,
-        makers: Callable[[], Awaitable[dict[str, Maker]]] | None = None,
+        admin: HAClient | None = None,
     ):
         self.bridge = bridge
-        self.wire, self.makers = wire, makers  # the admin connection the wire trace comes on, and its devices
-        self.traced: list[dict] | None = None  # the open wire tap's calls, while the case's steps run
-        self.scoped: list[dict] = []  # the scope events the case's steps drew; kept after its tap closes, for `attach`
+        self.admin = admin  # the admin connection, which watches Z2M's log for BUSY refusals
         self.in_setup = False  # while the case's setup runs: a group's `set` may be sent once more
         self.step: Step | None = None  # the step being run
-        self.call_windows: list[tuple[float, float]] = []  # each DeviceSide call's loop times, sent and answered
+        # Each DeviceSide call's loop times, from the call step's send to its answer: the windows a BUSY refusal in
+        # Z2M's log fails the case in (met_busy_coordinator).
+        self.call_windows: list[tuple[float, float]] = []
         self.entry = entry  # for entry steps; None without an admin connection
         self.case, self.ha, self.registry, self.ask, self.out, self.position = case, ha, registry, ask, out, position
         self.integration = case.suite.integration
@@ -1497,9 +1464,6 @@ class _CaseRun:
         result = CaseResult(
             case.id, case.role, domain, Outcome.PASS, entity_ids=tuple(case.entities.values()), twin=case.twin
         )
-        slots: dict[str, str] = {}
-        traced: list[dict] = []
-        self.scoped = []
         try:
             if case.observed:
                 self.out("")
@@ -1507,12 +1471,10 @@ class _CaseRun:
             await self.await_settled()
             await self.check_power()
             await self.steps(case.test.setup, setup=True)
-            slots = await self.slots()
-            async with self.tap(slots) as traced:
-                if case.observed:
-                    await self.observed()
-                else:
-                    await self.steps(case.test.steps)
+            if case.observed:
+                await self.observed()
+            else:
+                await self.steps(case.test.steps)
             try:
                 await self.snapshot.await_reload()  # so the next case never lands mid-reload
             except Exception as err:  # noqa: BLE001 - a watcher's error fails the case, not the run
@@ -1528,31 +1490,27 @@ class _CaseRun:
             await self.snapshot.restore()
             if self.baseline is not None:
                 await self.baseline.release()
-        return await self.concluded(result, slots, traced)
-
-    async def concluded(self, result: CaseResult, slots: dict[str, str], traced: list[dict]) -> CaseResult:
-        """The case's result, not run if the coordinator was busy for a call, else with what the traces saw."""
         if await self.met_busy_coordinator():
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
-        else:
-            await self.attach(result, slots, traced)
+        elif observed_answer(result):
+            result.devices = await self.observed_devices()
         return result
 
-    async def attach(self, result: CaseResult, slots: dict[str, str], traced: list[dict]) -> None:
-        """What the wire and scope traces saw, on a case that passed or failed."""
-        if result.outcome not in (Outcome.PASS, Outcome.FAIL):
-            return
-        result.scope = _scope(self.scoped)
-        if traced:
-            try:
-                result.trace = await self.trace(slots, traced)
-            except Exception as err:  # noqa: BLE001 - a lookup that fails costs the trace, not the case
-                _LOGGER.warning("Could not read the devices behind %s, so it has no trace: %s", self.case.id, err)
+    async def observed_devices(self) -> tuple[Device, ...]:
+        """The devices behind an observed case's entities, a group's members included, for its _observed.md row;
+        none when the lookup fails, which costs the row, not the case."""
+        try:
+            lights = [member for entity_id in self.case.entities.values() for member in await self.members(entity_id)]
+            entity_ids = dict.fromkeys([*self.case.entities.values(), *lights])
+            return tuple((await rig_facts(self.ha, entity_ids))[1])
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not read the devices behind %s, so _observed.md gets no row: %s", self.case.id, err)
+            return ()
 
     @property
     def watches_busy(self) -> bool:
         """Whether Z2M's BUSY refusals are watched for: a Z2M case with the admin connection's log feed."""
-        return self.integration == "zigbee2mqtt" and self.wire is not None and self.wire.watching_z2m_busy
+        return self.integration == "zigbee2mqtt" and self.admin is not None and self.admin.watching_z2m_busy
 
     async def met_busy_coordinator(self) -> bool:
         """Whether Z2M logged a BUSY refusal in the window of any DeviceSide call the case sent: the call may not have
@@ -1561,46 +1519,7 @@ class _CaseRun:
             return False
         loop = asyncio.get_running_loop()
         await asyncio.sleep(max(0.0, max(end for _, end in self.call_windows) + BUSY_LAG_S - loop.time()))
-        return any(self.wire.z2m_busy_between(start, end + BUSY_LAG_S) for start, end in self.call_windows)
-
-    async def slots(self) -> dict[str, str]:
-        """The slot of each entity the case's calls may reach: `target` for its role, the role's name for another,
-        and `<slot>.member<n>` for a group's members, which DeviceSide traces apart when it writes them one by one."""
-        slots = {}
-        for role, entity_id in self.case.entities.items():
-            slots[entity_id] = "target" if role == self.case.role else role
-        for entity_id, slot in list(slots.items()):
-            if self.is_group(entity_id):
-                for number, member in enumerate(await self.members(entity_id), 1):
-                    slots.setdefault(member, f"{slot}.member{number}")
-        return slots
-
-    @contextlib.asynccontextmanager
-    async def tap(self, slots: dict[str, str]) -> AsyncIterator[list[dict]]:
-        """The calls the steps send to the case's entities: DeviceSide's, from its wire trace, and the rig's own HA
-        calls (`_set`), in order. Empty without the admin connection the trace comes on."""
-        if self.wire is None:
-            yield []
-            return
-        with self.wire.wire_tap(slots) as traced, self.wire.wire_tap(slots, SCOPE_EVENT) as self.scoped:
-            self.traced = traced
-            try:
-                yield traced
-            finally:
-                # A failed drain loses only the calls still in flight, which a person may not have seen anyway.
-                with contextlib.suppress(Exception):
-                    await self.wire.drain_wire()
-                self.traced = None
-
-    async def trace(self, slots: dict[str, str], traced: list[dict]) -> Trace:
-        seq, legend = sequence(
-            (slots[call["entity_id"]], (call["transport"], call["command"], call["params"], call.get("options") or {}))
-            for call in traced
-        )
-        makers = await self.makers() if self.makers is not None else {}
-        devices = tuple(dict.fromkeys(makers[e] for e in slots if e in makers))
-        unknown = any(None in options.values() for *_, options in legend.values())
-        return Trace(starting_state(self.case), seq, legend, devices, unknown)
+        return any(self.admin.z2m_busy_between(start, end + BUSY_LAG_S) for start, end in self.call_windows)
 
     async def enable_entry(self) -> str | None:
         """Enable the entry a step left disabled; why it couldn't be, or None. The journal keeps it until it is."""
@@ -1707,11 +1626,6 @@ class _CaseRun:
         await self.touch(entity_id)
         data = {key: value for key, value in args.items() if key not in ("target", "state")}
         service = "turn_on" if domain == "scene" or args["state"] == "on" else "turn_off"
-        if self.traced is not None:
-            await self.wire.drain_wire()  # so the calls before it are in the tap first
-            self.traced.append(
-                {"entity_id": entity_id, "transport": "ha", "command": f"{domain}.{service}", "params": data}
-            )
         call = {"entity_id": entity_id, **data}
         loop = asyncio.get_running_loop()
         sent_at = loop.time()
@@ -1729,7 +1643,7 @@ class _CaseRun:
         try:
             await self.await_state(entity_id, want, within)
         except StepFailure as err:
-            if self.watches_busy and self.wire.z2m_busy_between(sent_at, loop.time()):
+            if self.watches_busy and self.admin.z2m_busy_between(sent_at, loop.time()):
                 # Z2M's coordinator refused the send with BUSY, so nothing reached the lights: send it once more.
                 label = self.step.label if self.step is not None else "set"
                 self.out(f"  {self.case.id}: {label}: Z2M's coordinator answered BUSY; sent the set again")
@@ -2140,8 +2054,6 @@ async def run(
     on_result: Callable[[Suite, CaseResult], None] | None = None,
     on_facts: Callable[[Suite, str | None, list[Device]], None] | None = None,
     budget: Budget | None = None,
-    observations: dict[str, list[Observation]] | None = None,
-    reobserve: bool = False,
 ) -> RunResult:
     """Run every case and print the table; ADMIN_INTEGRATIONS run on `admin`. `ask=None` is --unattended.
 
@@ -2156,11 +2068,8 @@ async def run(
     each case's result as it finishes (a cancelled case has none), `on_facts` each part's facts, taken even when a
     signal or the `budget` stops the part. Once the budget is spent no case starts; the rest get no result.
 
-    With `admin` subscribed to DeviceSide's wire trace (HAClient.subscribe_wire), each case's result carries the calls
-    its steps sent (CaseResult.trace). An observed case is then lent its pass, not run, when a pass in `observations`
-    (each integration's _observed.md rows) covers its twin's calls, unless `reobserve`. Each observed case's rows go
-    into `observations` as it ends, so a run passing the same dict to the next sees them, and a lend that a fail seen
-    later in this run blocks is taken back and the case run (_Run.unlend).
+    With `admin`, a Z2M case watches Z2M's log for the coordinator's BUSY refusals in the windows of its own call steps
+    (_CaseRun.met_busy_coordinator).
     """
     only = unfinished(done, only)
     planned = _plan(suites, profile, registry, ha, admin, keyword, only, out)
@@ -2183,9 +2092,7 @@ async def run(
         lanes=lanes,
         on_result=on_result,
         budget=budget,
-        wire=admin,
-        observations={} if observations is None else observations,
-        reobserve=reobserve,
+        admin=admin,
     )
     if busy is not None:
         rig_run.busy = busy
@@ -2199,7 +2106,6 @@ async def run(
                 out(f"Z2M's BUSY refusals aren't watched: {err}")
         waiting = await rig_run.all_automated([(suite, client, cases_) for suite, _, client, cases_ in planned])
         await rig_run.observed(waiting)
-        await rig_run.unlend()
     finally:
         if admin is not None:
             await admin.stop_z2m_busy()
@@ -2328,33 +2234,7 @@ class _Run:
     lanes: bool = False  # whether automated cases run in lanes: their lines then name their suite
     on_result: Callable[[Suite, CaseResult], None] | None = None
     budget: Budget | None = None
-    wire: HAClient | None = None  # the admin connection DeviceSide's wire trace comes on
-    observations: dict[str, list[Observation]] = field(default_factory=dict)  # each integration's _observed.md rows
-    reobserve: bool = False  # run observed cases even where a pass covers their calls
-    lends: list[tuple[Case, HAClient]] = field(default_factory=list)  # the cases this run lent a pass
-    taken_back: list[tuple[Case, HAClient]] = field(default_factory=list)  # lends a fail since blocks, for unlend
-    _makers: dict[str, Maker] | None = None
-    _makers_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    async def makers(self) -> dict[str, Maker]:
-        """The device behind each entity, read once a run: a roaming run calls run() once per network."""
-        async with self._makers_lock:
-            if self._makers is None:
-                self._makers = await entity_makers(self.wire)
-            return self._makers
-
-    def lent(self, case: Case, twin: CaseResult | None) -> CaseResult | None:
-        """An observed case's pass, not run, when an _observed.md pass covers the calls its twin just sent; else None.
-        A twin with no trace (no admin connection, or a resumed result saved before traces) lends nothing."""
-        if self.reobserve or twin is None or twin.outcome is not Outcome.PASS or twin.trace is None:
-            return None
-        trace = twin.trace
-        row = trace.lent_by(self.observations.get(case.suite.integration, ()))
-        if row is None:
-            return None
-        result = _not_run(case, Outcome.PASS, f"its calls passed when observed on {row.date}")
-        result.trace, result.lent = trace, row.date
-        return result
+    admin: HAClient | None = None  # the admin connection, which watches Z2M's log for BUSY refusals
 
     def seed(self, suites: list[Suite], done: dict[tuple[str, str, str], CaseResult]) -> None:
         """An earlier session's results, under this run's suites, for the twin lookup in `automated`."""
@@ -2382,8 +2262,7 @@ class _Run:
             self.journal,
             journal_key,
             self.entry_options,
-            self.wire,
-            self.makers,
+            self.admin,
         )
 
     async def run_case(
@@ -2402,29 +2281,11 @@ class _Run:
 
     def report(self, case: Case, result: CaseResult) -> None:
         self.results[id(case.suite), case.id] = result
-        if (seen := observed_by(result, datetime.date.today().isoformat())) is not None:
-            rows = self.observations.setdefault(case.suite.integration, [])
-            for row in seen[0]:
-                merge_row(rows, row)
         if self.on_result is not None:
             self.on_result(case.suite, result)
         # Lanes interleave their lines, so each names its suite.
         prefix = f"{case.suite.integration} / {case.suite.name}  " if self.lanes else "  "
         self.out(f"{prefix}{case.id}: {result.outcome}" + (f" ({result.detail})" if result.detail else ""))
-        if seen is not None and result.outcome is Outcome.FAIL:
-            self.take_back()
-
-    def take_back(self) -> None:
-        """Report not observed each case this run lent a pass that a fail seen since blocks, at once, so its pass is
-        never left saved however the run ends; unlend runs it."""
-        for case, client in self.lends:
-            if self.lent(case, self.results.get((id(case.suite), case.twin or ""))) is None:
-                self.taken_back.append((case, client))
-        gone = {(id(case.suite), case.id) for case, _ in self.taken_back}
-        self.lends = [(case, client) for case, client in self.lends if (id(case.suite), case.id) not in gone]
-        for case, _ in self.taken_back:
-            if self.results[id(case.suite), case.id].lent:
-                self.report(case, _not_run(case, Outcome.NOT_OBSERVED, TAKEN_BACK))
 
     async def all_automated(self, planned: list[tuple[Suite, HAClient, list[Case]]]) -> list[tuple[Case, HAClient]]:
         """Run the planned suites' automated cases, in lanes or one suite after another; return the observed cases
@@ -2470,9 +2331,6 @@ class _Run:
                 if self.budget is not None and self.budget.stops(device_case=True):
                     continue
                 self.report(case, await self.run_case(case, client, None))
-            elif (lent := self.lent(case, twin)) is not None:
-                self.lends.append((case, client))
-                self.report(case, lent)
             elif self.ask is None:
                 self.report(case, _not_run(case, Outcome.NOT_OBSERVED))
             elif twin is not None and twin.outcome is Outcome.FAIL:
@@ -2499,13 +2357,6 @@ class _Run:
             self.report(case, result)
             if result.outcome is Outcome.NOT_OBSERVED:
                 self.ask = None
-
-    async def unlend(self) -> None:
-        """Run the observed cases whose lends take_back took, while someone is there; a run of one can fail and take
-        back another, so it goes round again. One left unrun (unattended, or the budget spent) stays not observed."""
-        while self.taken_back and self.ask is not None:
-            taken, self.taken_back = self.taken_back, []
-            await self.observed(taken)
 
 
 def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
@@ -2549,11 +2400,11 @@ def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
     lines = ["| Test | Target | Result |", "|---|---|---|"]
     for case in suite_result.cases:
         target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
+        if not case.domain and not case.absent:  # skipped before planning entities: no adapter, or not opted in
+            target = case.role
         outcome = str(case.outcome) + (f": {case.detail}" if details and case.detail else "")
         if case.outcome is Outcome.PASS and _firmware_fact(suite_result.suite, case.id):
             outcome += FIRMWARE_FACT
-        if case.outcome is Outcome.PASS and case.lent:
-            outcome = f"{Outcome.PASS} (observed {case.lent})"
         lines.append(f"| `{case.id}` | {target} | {outcome} |")
     return lines
 
@@ -2571,23 +2422,6 @@ class Device:
     def __str__(self) -> str:
         model_id = f" (`{self.model_id}`)" if self.model_id and self.model_id != self.model else ""
         return f"{self.model or 'unknown model'}{model_id}, firmware `{self.firmware or 'unknown'}`"
-
-
-async def entity_makers(ha: HAClient) -> dict[str, Maker]:
-    """The maker, model and firmware of the device behind each entity whose device names a maker and model."""
-    listed, registered = await asyncio.gather(
-        ha.command({"type": "config/entity_registry/list_for_display"}),
-        ha.command({"type": "config/device_registry/list"}),
-    )
-    devices = {device["id"]: device for device in registered}
-    found = {}
-    for entry in listed["entities"]:
-        if (device := devices.get(entry.get("di"))) is None:
-            continue
-        # A device that names no maker or model can't lend to, or take a block from, another unnamed one.
-        if (maker := device.get("manufacturer")) and (model := device.get("model_id") or device.get("model")):
-            found[entry["ei"]] = Maker(maker, model, device.get("sw_version") or "unknown")
-    return found
 
 
 async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[Device]]:
@@ -2610,7 +2444,6 @@ CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULT
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
 FIRMWARE_FACT = " (firmware fact)"  # after a firmware fact's PASS in a record's Tests table
 CASE_ROW = re.compile(r"^\| `([^`]+)` \|.*\| ([^|]*?) \|$", re.MULTILINE)  # id, then the result column
-LENT = re.compile(r" \(observed \d{4}-\d{2}-\d{2}\)$")  # after a lent observed pass in a record's Tests table
 
 
 @dataclass(frozen=True, slots=True)
@@ -2632,9 +2465,7 @@ class Record:
         text = path.read_text()
         cited, date = CITED_COMMIT.search(text), DATE.search(text)
         _, _, tests = text.partition("## Tests")
-        rows = [
-            (case_id, LENT.sub("", result.removesuffix(FIRMWARE_FACT))) for case_id, result in CASE_ROW.findall(tests)
-        ]
+        rows = [(case_id, result.removesuffix(FIRMWARE_FACT)) for case_id, result in CASE_ROW.findall(tests)]
         return cls(
             path,
             cited and cited[1],
@@ -2658,42 +2489,10 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     return sorted(case.id for case in cases if record and case.absent and case.id in record.passed)
 
 
-def scope_events(suite_result: SuiteResult) -> set[tuple]:
-    """What DeviceSide's scope named for the suite's proven cases: only events of the suite's own action and
-    integration (a test's steps can call others). Empty when the run had no trace: every dispatched call fires one."""
-    suite = suite_result.suite
-    return {
-        row
-        for case in suite_result.proven
-        for row in case.scope
-        if row[0] == suite.action and row[1] == suite.integration
-    }
-
-
-def covers(suite_result: SuiteResult, options: Mapping[str, bool]) -> str:
-    """The `Covers` row's value: the domains, capabilities and fields of `scope_events`, and each option on or
-    off."""
-    events = scope_events(suite_result)
-    parts = {
-        "domains": {row[2] for row in events},
-        "capabilities": {row[3] for row in events if row[3]},
-        "fields": {field for row in events for field in row[4]},
-        "options": {f"{name}:{'on' if on else 'off'}" for name, on in options.items()},
-    }
-    return "; ".join(f"{key}={','.join(sorted(values))}" for key, values in parts.items())
-
-
 def render_record(
-    suite_result: SuiteResult,
-    title: str,
-    ha_version: str,
-    devices: list[Device],
-    date: str,
-    source: str,
-    options: Mapping[str, bool] = MappingProxyType({}),
+    suite_result: SuiteResult, title: str, ha_version: str, devices: list[Device], date: str, source: str
 ) -> str:
-    """The test record: a key/value table, then the per-test table. deviceside's check_release.py --records reads
-    its commit."""
+    """The test record: a key/value table, then the per-test table. deviceside reads its commit and Result."""
     suite = suite_result.suite
     rows = [
         ("Result", "pass"),
@@ -2704,23 +2503,18 @@ def render_record(
     ]
     if suite.file.options:
         rows.append(("Options", ", ".join(sorted(suite.file.options))))
-    rows.append(("Covers", covers(suite_result, options)))
     lines = [f"# {title} · {suite.name}", "", "| | |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     lines += ["", "## Tests", "", *table(suite_result)]
     if any(case.outcome is Outcome.NOT_OBSERVED for case in suite_result.cases):
         lines += ["", "Tests marked `not observed` had nobody watching."]
-    if any(case.lent for case in suite_result.cases):
+    if any(case.outcome is Outcome.PASS and _firmware_fact(suite, case.id) for case in suite_result.cases):
+        lines += ["", "A firmware fact proves how the device behaves, not the adapter's code."]
+    if any(case.outcome is Outcome.SKIPPED and case.detail in OPTED_OUT.values() for case in suite_result.cases):
         lines += [
             "",
-            f"A pass marked `observed` was not watched in this run: the calls its automated case sent here were seen "
-            f"to pass on the same maker's devices on that date ([`{OBSERVED_FILE}`]({OBSERVED_FILE})).",
-        ]
-    if any(_firmware_fact(suite, case.id) for case in suite_result.proven):
-        lines += [
-            "",
-            "A firmware fact proves the device's behavior, not the adapter's code: its pass stands at the firmware "
-            "listed under Device, and may come from an earlier commit at that firmware.",
+            f"Observed tests and firmware facts run only when asked ({OPT_IN[OBSERVED]}, {OPT_IN[FACTS]}); "
+            "a `skipped` one was not asked for in this run.",
         ]
     return "\n".join(lines) + "\n"
 
@@ -2733,22 +2527,6 @@ def report_path(directory: Path, title: str) -> Path:
     return directory / f"{title.replace(' ', '-').replace(':', '')}.md"
 
 
-def calls(suite_result: SuiteResult) -> list[str]:
-    """The report's calls section: each traced case's starting state and, per slot, the calls it sent as hashed (a
-    run's own, or the twin's a lent case took), so two runs of the same code can be diffed for calls that jitter."""
-    lines = []
-    for case in suite_result.cases:
-        if (trace := case.trace) is None:
-            continue
-        lent = f", lent from {case.lent}" if case.lent else ""
-        unknown = ", never lent or recorded: an option is unknown (null)" if trace.unknown else ""
-        lines.append(f"- `{case.id}`: state `{trace.state}`{lent}{unknown}")
-        for slot, hashes in trace.sequence:
-            lines.append(f"  - {slot}")
-            lines += [f"    - `{digest}` `{render_call(trace.legend[digest])}`" for digest in hashes]
-    return ["", "### Calls", "", *lines] if lines else []
-
-
 def write_report(result: RunResult, directory: Path, title: str) -> Path:
     """Every suite's table with each failure's and skip's reason, for any run: failed, partial or unattended."""
     lines = [f"# {title}"]
@@ -2758,7 +2536,6 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
         if partial := suite_result.partial:
             lines += [f"{partial}: no record.", ""]
         lines += table(suite_result, details=True)
-        lines += calls(suite_result)
     directory.mkdir(parents=True, exist_ok=True)
     path = report_path(directory, title)
     path.write_text("\n".join(lines) + "\n")
@@ -2766,13 +2543,7 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
 
 
 async def write_records(
-    result: RunResult,
-    registry: Any,
-    records: Records,
-    date: str,
-    source: str,
-    into: Records | None = None,
-    untraced: list[Path] | None = None,
+    result: RunResult, registry: Any, records: Records, date: str, source: str, into: Records | None = None
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
@@ -2780,11 +2551,7 @@ async def write_records(
 
     A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
     the file in `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To
-    narrow on purpose, delete the record.
-
-    A suite whose proven cases drew no scope event (no admin connection, or the wire logger would not go to DEBUG)
-    has nothing to put in `Covers`, and an empty row would replace a record that had one: its `records` path is
-    added to `untraced`, if given, and nothing is written."""
+    narrow on purpose, delete the record."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2796,50 +2563,30 @@ async def write_records(
         if narrowed := narrows(suite_result.cases, Record.read(path)):
             kept.append((path, narrowed))
             continue
-        if not scope_events(suite_result):
-            if untraced is not None:
-                untraced.append(path)
-            continue
         path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        # The adapter is always there for a suite that ran; a test's roster may not declare it.
-        adapter = registry.adapter(suite.action, suite.integration)
-        options = {name: name in suite.file.options for name in adapter.scope.options} if adapter else {}
-        path.write_text(
-            render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, options)
-        )
+        path.write_text(render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source))
         written.append(path)
     return written, kept
 
 
-def observed_by(case: CaseResult, date: str) -> tuple[list[Observation], dict] | None:
-    """What one observed case saw: its rows for _observed.md and their calls. A case a person watched pass, or saw
-    fail, adds a row per device; one lent, not observed, failed for another reason or with no trace adds none."""
-    if case.trace is None or case.lent or case.twin is None or not case.id.endswith(" observed"):
-        return None
-    passed = case.outcome is Outcome.PASS
-    if not passed and not (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN)):
-        return None
-    return case.trace.rows(case.twin, date, passed), dict(case.trace.legend)
-
-
-def add_observed(records: Records, integration: str, title: str, rows: list[Observation], legend: dict) -> Path:
-    """Merge `rows` into the integration's _observed.md in `records` and write it."""
-    path = records(integration) / OBSERVED_FILE
-    observed = ObservedFile.read(path, title)
-    observed.add(rows, legend)
-    observed.write(path)
-    return path
+def observed_answer(case: CaseResult) -> bool:
+    """Whether a person answered the observed case: they saw it pass, or saw something else (a step that broke, or
+    nobody there, is no answer)."""
+    if not case.id.endswith(" observed"):
+        return False
+    return case.outcome is Outcome.PASS or (case.outcome is Outcome.FAIL and case.detail.startswith(NOT_SEEN))
 
 
 def write_observed_case(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
-    """Write what one finished case observed, dated now: each row is written once, when its case ends, so a later
-    report or an interrupted run can't re-date it or lose it."""
-    if (seen := observed_by(case, date)) is None:
+    """Add what a person answered in one observed case to its integration's _observed.md in `records`, dated now: each
+    row is written once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None
+    for a case nobody answered, or whose devices couldn't be read."""
+    if not observed_answer(case) or not case.devices:
         return None
-    return add_observed(records, suite.integration, registry.integrations[suite.integration].title, seen[0], seen[1])
-
-
-def load_observations(records: Records, integrations: Iterable[str]) -> dict[str, list[Observation]]:
-    """Each integration's _observed.md rows in `records`, for run()."""
-    return {key: ObservedFile.read(records(key) / OBSERVED_FILE, "").rows for key in integrations}
+    path = records(suite.integration) / OBSERVED_FILE
+    observed = ObservedFile.read(path, registry.integrations[suite.integration].title)
+    result = PASS if case.outcome is Outcome.PASS else FAIL
+    observed.add([Observation(date, case.id, "; ".join(map(str, case.devices)), result)])
+    observed.write(path)
+    return path

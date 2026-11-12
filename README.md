@@ -2,8 +2,8 @@
 
 The automated test rig for [DeviceSide](https://github.com/DeviceSide/DeviceSide): it runs DeviceSide's actions
 against a live Home Assistant and its real devices, and writes the test records in deviceside (each
-integration's `docs/integrations/<integration>/test-records/`, from its `check_release.test_records_dir`) that clear
-an adapter's `experimental` flag and gate each release. Private; deviceside keeps only the records.
+integration's `docs/integrations/<integration>/test-records/`) that sign off an integration's changes for a
+release. Private; deviceside keeps only the records.
 
 Setup, running it, and writing step files: [docs/rig.md](docs/rig.md).
 
@@ -18,9 +18,9 @@ cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 
 <!-- rig-help -->
 ```text
-usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--coverage] [--no-deploy]
+usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--no-deploy]
               [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
-              [--unattended] [--reobserve] [--serial] [--debug-logs] [--deploy-only]
+              [--observed] [--facts] [--unattended] [--serial] [--debug-logs] [--deploy-only]
               [--for DURATION] [--fresh] [--ignore-unreachables] [--recover] [--promote DIR]
               [--roam-check] [--wait-free] [--hold INTEGRATION] [--exclusive]
               [--visual {none,profile}]
@@ -34,18 +34,16 @@ options:
   --check               check the run's devices are in HA, on their integration and available, and
                         where its roaming bulbs are, then stop: no lock, no deploy, nothing
                         changed
-  --coverage            say which selected suites are covered at this checkout's HEAD, by a fresh
-                        record or saved cases, and which devices the missing cases need, then
-                        stop: no lock, no deploy, nothing changed
   --no-deploy           test whatever HA already runs
   --integration {hue,matter,shelly,zha,zigbee2mqtt}
                         limit to an integration key (repeatable); with --wait-free, wait for it
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
-  --unattended          ask no one: an observed test whose calls no observed pass covers is
-                        reported not observed
-  --reobserve           run observed tests even where an observed pass covers their calls, as
-                        after a major firmware upgrade
+  --observed            also run the observed tests, which ask the person at the rig what they
+                        saw; a default run skips them
+  --facts               also run the firmware facts, which prove how a device behaves; a default
+                        run skips them: a pass stands
+  --unattended          ask no one: with --observed, the observed tests are reported not observed
   --serial              run every case one at a time, with no lanes: to tell a case that fails in
                         a lane from one that fails
   --debug-logs          run HA's DeviceSide and the run's integrations, and Z2M, at debug, and
@@ -55,8 +53,8 @@ options:
                         profile, no tests; unrestricted
   --for DURATION        start no case after this long (30m, 90s, 1h15m), let in-flight ones
                         finish, put back and exit 75; rerun the same way to resume
-  --fresh               rerun the selected suites whole, whatever their records and saved cases
-                        say
+  --fresh               rerun the selected suites whole, dropping the cases an earlier run at this
+                        commit saved
   --ignore-unreachables
                         run what the devices that are up allow: skip the cases of an unavailable
                         fixed entity, and while any is, of fixed groups whose members the profile

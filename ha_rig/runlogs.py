@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from .baseline import Apply, Baseline
-from .client import WIRE_LOGGER, Z2M_LOGGING, HAClient
+from .client import Z2M_LOGGING, HAClient
 from .engine import report_path
 
 HA_DOMAINS = {"hue": "hue", "zha": "zha", "zigbee2mqtt": "mqtt", "shelly": "shelly", "matter": "matter"}
@@ -258,11 +258,6 @@ class DebugLevels:
             await self.hold("ha_log_level", domain, lambda _, d=domain: self.ha.set_log_level(d, "DEBUG"), domain)
         if z2m:
             await self.hold("z2m_log_level", "", lambda _: self.ha.z2m_set_log_level("debug"), "Z2M's log level")
-
-    async def raise_wire(self) -> None:
-        """DeviceSide's wire logger to DEBUG, which turns its wire trace on (HAClient.wire_tap)."""
-        apply = lambda _: self.ha.set_logger_level(WIRE_LOGGER, "DEBUG")  # noqa: E731 - as raise_levels' holds
-        await self.hold("logger_level", WIRE_LOGGER, apply, "DeviceSide's wire trace")
 
     async def hold(self, kind: str, key: str, apply: Apply, what: str) -> None:
         try:

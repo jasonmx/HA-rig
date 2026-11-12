@@ -6,7 +6,7 @@ preflight reads the profile, the adapter registry and the deployed tree hash, pr
 go (Authorization, below), then, at a terminal, asks.
 
 The rig tests the deviceside checkout it is run from, or DEVICE_SIDE_REPO (ha_rig/target.py): it deploys that
-checkout's code, records where its check_release.test_records_dir says, and keeps its locks and journals in its git
+checkout's code, writes its test records into it, and keeps its locks and journals in its git
 common dir. The profiles and .env.rig live in this rig's main checkout. Each invocation refreshes deviceside's
 household terms (ha_rig/terms.py).
 
@@ -71,15 +71,14 @@ device left unpowered stops the run only when its phase comes, after the bulbs h
 --ignore-unreachables an unavailable fixed entity skips its cases instead (engine.unreachable), and while any is,
 those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
-A run builds coverage (ha_rig/coverage.py): it leaves out each selected suite with a fresh record, one citing a commit
-at which the suite's adapter code is unchanged, as deviceside's release gate judges it, or a saved result for every
-case, and runs only the cases of the rest with no saved result. It saves each case as it finishes in the profile's
-ledger (ha_rig/progress.py), keyed by the suite's code, so one that stops part way, on a signal, the restricted sensor
-or --for's budget, exits 75 and, rerun, picks up where it stopped; a suite finished across runs still writes its
-record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish; it counts from approval,
-the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case. A suite with a failed
-case, or saved on another HA version, reruns whole; --fresh reruns the selected suites whatever is recorded or saved.
---coverage prints each selected suite's coverage at HEAD and the devices its missing cases need, changing nothing.
+A run runs the suites it is asked for; what needs testing is deviceside's to say. Observed tests and firmware facts
+run only with --observed and --facts: a default run skips them. It saves each case as it finishes in the profile's
+ledger (ha_rig/progress.py), keyed by the commit and the suite, so one that stops part way, on a signal, the restricted
+sensor or --for's budget, exits 75 and, rerun at the same commit, picks up where it stopped; a suite finished across
+runs still writes its record. --for DURATION (30m, 1h15m) starts no case once spent, letting in-flight ones finish; it
+counts from approval, the deploy included. A move starts only with MOVE_LEAD_S left and always runs its first case. A
+suite with a failed case, or saved on another HA version, reruns whole; --fresh drops the selected suites' saved
+cases.
 
 Every run captures Z2M's log (when it touches Z2M) and HA's next to its report, as <report>.z2m.log and .ha.log
 (ha_rig/runlogs.py): deleted after a clean run, kept and printed after any other. A DeviceSide warning or error
@@ -88,11 +87,10 @@ DeviceSide and the run's integrations, and Z2M, to debug for the run, keeps the 
 baseline, so --recover too).
 
 Usage: scripts/rig.py [--profile NAME] [--dry-run] [--no-deploy] [--unattended] [--serial] [--debug-logs]
-                      [--integration KEY ...] [--action NAME ...] [-k TEXT] [--for DURATION] [--fresh]
-                      [--ignore-unreachables]
+                      [--integration KEY ...] [--action NAME ...] [-k TEXT] [--observed] [--facts]
+                      [--for DURATION] [--fresh] [--ignore-unreachables]
        scripts/rig.py [--profile NAME] --check [--ignore-unreachables] [--integration KEY ...] [--action NAME ...]
-                      [-k TEXT]
-       scripts/rig.py [--profile NAME] --coverage [--unattended] [--integration KEY ...] [--action NAME ...] [-k TEXT]
+                      [-k TEXT] [--observed] [--facts]
        scripts/rig.py [--profile NAME] --roam-check [--debug-logs]
        scripts/rig.py --deploy-only [--dry-run]
        scripts/rig.py --recover
@@ -134,15 +132,16 @@ sys.path.append(str(REPO))
 
 from custom_components.deviceside.core.registry import AdapterRegistry  # noqa: E402
 
-from ha_rig import coverage, locks, target, terms  # noqa: E402
+from ha_rig import locks, target, terms  # noqa: E402
 from ha_rig.authorize import APPROVAL, OLD_SENSOR_KEY, SENSOR_KEY, Decision, authorize  # noqa: E402
 from ha_rig.baseline import NAME as BASELINE_NAME  # noqa: E402
 from ha_rig.baseline import Baseline  # noqa: E402
 from ha_rig.bridge import BridgeError, HueBridge  # noqa: E402
 from ha_rig.client import HAClient, HAError  # noqa: E402
-from ha_rig.coverage import SuiteCoverage  # noqa: E402
 from ha_rig.engine import (  # noqa: E402
     ADMIN_INTEGRATIONS,
+    FACTS,
+    OBSERVED,
     Budget,
     Case,
     CaseResult,
@@ -157,7 +156,6 @@ from ha_rig.engine import (  # noqa: E402
     cases,
     check_options,
     in_head,
-    load_observations,
     load_step_files,
     merge,
     report_path,
@@ -191,7 +189,7 @@ SERVICE = ("deviceside", "turn_on_for")
 
 
 def checkout_records(integration: str) -> Path:
-    """The integration's test records directory in the checkout under test (its check_release.test_records_dir)."""
+    """The integration's test records directory in the checkout under test (target.test_records_dir)."""
     return test_records_dir(REPO, integration)
 
 
@@ -236,15 +234,20 @@ def git(*args: str, check: bool = True) -> str:
 
 
 def select(
-    step_files: list[StepFile], profile: Profile, integrations: list[str] | None, actions: list[str] | None = None
+    step_files: list[StepFile],
+    profile: Profile,
+    integrations: list[str] | None,
+    actions: list[str] | None = None,
+    opt_in: frozenset[str] = frozenset(),
 ) -> list[Suite]:
     """Every step file on every integration in the profile it has a test for (`only:`), narrowed to --integration
-    and --action. A file with no adapter there stays, for the dry-run's `no adapter, will skip`. An action takes
-    every step file for it (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its
-    record; a file with a `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is
-    run_suites's job (engine.applies)."""
+    and --action, each with the cases a default run skips that `opt_in` asks for (--observed, --facts). A file with
+    no adapter there stays, for the dry-run's `no adapter, will skip`. An action takes every step file for it
+    (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its record; a file with a
+    `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is run_suites's job
+    (engine.applies)."""
     return [
-        Suite(step_file, integration)
+        Suite(step_file, integration, opt_in)
         for step_file in step_files
         if not actions or (step_file.name or step_file.action) in actions
         for integration in profile.integrations
@@ -688,8 +691,7 @@ class Setup:
     deploy: Deploy | None = None  # None for --check, which deploys nothing
     progress: Progress | None = None  # None where no record is possible: --no-deploy, --roam-check, --check
     selected: list[Suite] = field(default_factory=list)  # every suite selected; `suites` are those with cases left
-    coverage: list[SuiteCoverage] = field(default_factory=list)  # each selected suite's, with progress
-    planned_tree: str | None = None  # the integration tree the coverage was planned at
+    planned_commit: str | None = None  # the commit the ledger was read at
 
     @property
     def done(self) -> Done:
@@ -714,12 +716,6 @@ def main(argv: list[str] | None = None) -> int:
         help="check the run's devices are in HA, on their integration and available, and where its roaming bulbs "
         "are, then stop: no lock, no deploy, nothing changed",
     )
-    parser.add_argument(
-        "--coverage",
-        action="store_true",
-        help="say which selected suites are covered at this checkout's HEAD, by a fresh record or saved cases, and "
-        "which devices the missing cases need, then stop: no lock, no deploy, nothing changed",
-    )
     parser.add_argument("--no-deploy", action="store_true", help="test whatever HA already runs")
     parser.add_argument(
         "--integration",
@@ -730,14 +726,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--action", action="append", help="limit to an action's step files (repeatable)")
     parser.add_argument("-k", dest="keyword", help="run only test cases whose id contains this text")
     parser.add_argument(
-        "--unattended",
+        "--observed",
         action="store_true",
-        help="ask no one: an observed test whose calls no observed pass covers is reported not observed",
+        help="also run the observed tests, which ask the person at the rig what they saw; a default run skips them",
     )
     parser.add_argument(
-        "--reobserve",
+        "--facts",
         action="store_true",
-        help="run observed tests even where an observed pass covers their calls, as after a major firmware upgrade",
+        help="also run the firmware facts, which prove how a device behaves; a default run skips them: a pass stands",
+    )
+    parser.add_argument(
+        "--unattended",
+        action="store_true",
+        help="ask no one: with --observed, the observed tests are reported not observed",
     )
     parser.add_argument(
         "--serial",
@@ -766,7 +767,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fresh",
         action="store_true",
-        help="rerun the selected suites whole, whatever their records and saved cases say",
+        help="rerun the selected suites whole, dropping the cases an earlier run at this commit saved",
     )
     parser.add_argument(
         "--ignore-unreachables",
@@ -837,7 +838,6 @@ def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namesp
         args.profile
         or args.no_deploy
         or args.check
-        or args.coverage
         or args.roam_check
         or args.recover
         or args.wait_free
@@ -849,6 +849,8 @@ def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namesp
         or args.keyword
         or args.serial
         or args.unattended
+        or args.observed
+        or args.facts
         or args.debug_logs
         or args.budget
         or args.fresh
@@ -861,21 +863,8 @@ def refuse_mode_conflicts(parser: argparse.ArgumentParser, args: argparse.Namesp
         parser.error("--ignore-unreachables is for a test run or --check")
     if args.check and (args.recover or args.roam_check or args.wait_free):
         parser.error("--check can't be combined with --recover, --roam-check or --wait-free")
-    if args.coverage and (
-        args.check
-        or args.dry_run
-        or args.no_deploy
-        or args.roam_check
-        or args.recover
-        or args.wait_free
-        or command
-        or args.serial
-        or args.debug_logs
-        or args.budget
-        or args.fresh
-        or args.ignore_unreachables
-    ):
-        parser.error("--coverage takes only --profile, --integration, --action, -k and --unattended")
+    if (args.observed or args.facts) and (args.roam_check or args.recover or args.wait_free or command):
+        parser.error("--observed and --facts are for a test run or --check")
     if args.debug_logs and (args.check or args.recover or args.wait_free or command):
         parser.error("--debug-logs is for a run or --roam-check")
     if args.visual and not command:
@@ -928,8 +917,6 @@ def wait_or_run(args: argparse.Namespace) -> int:
         return recover_all(args, directory)
     if args.deploy_only:
         return deploy_only(args, directory)
-    if args.coverage:
-        return coverage_only(args, directory)
     setup = prepare(args, directory)
     held = None if args.dry_run else take(args, setup, directory)  # waits for the locks, then holds them until exit
     try:
@@ -1010,17 +997,17 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
         return setup
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
     if directory is not None and not args.no_deploy and not args.roam_check:
-        plan_coverage(args, setup, directory)
+        plan_resume(args, setup, directory)
     if not args.dry_run:
         check_tokens(env, setup.suites, registry, setup.roaming or setup.grouping)
     return setup
 
 
-def plan_coverage(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
-    """Load the ledger and plan only what isn't covered (ha_rig/coverage.py): a selected suite with a fresh record, or
-    a saved result for every case, is left out, and the rest run only their cases with no saved result that holds,
-    those the keyword keeps. What the run holds, moves, checks and estimates shrinks with it. --fresh ignores the
-    records and drops the saved cases of the selected suites."""
+def plan_resume(args: argparse.Namespace, setup: Setup, directory: Path) -> None:
+    """Load the ledger, keep the selected suites' saved results at this commit that still hold, and plan only the
+    cases with none (those the keyword keeps), so a run that stopped part way picks up where it stopped. A suite with
+    every case saved is left out. What the run holds, moves, checks and estimates shrinks with it. --fresh drops the
+    selected suites' saved cases."""
     progress = Progress.load(directory, setup.profile.name)
     # A record names one HA version, so cases saved on another rerun, and new ones note it from the first.
     if (version := ha_version(setup.env)) is not None:
@@ -1030,24 +1017,16 @@ def plan_coverage(args: argparse.Namespace, setup: Setup, directory: Path) -> No
             raise SystemExit("Can't read HA's version, which the saved cases are checked against; is HA up?")
         print("HA's version can't be read, so saved cases on an older HA may still count below.")
     setup.progress = progress
-    setup.planned_tree = setup.deploy.local_tree
-    setup.coverage = coverage.of(
-        setup.selected,
-        setup.profile,
-        setup.registry,
-        REPO,
-        setup.deploy.commit,
-        progress,
-        fresh=args.fresh,
-        unattended=args.unattended,
-    )
-    covered = {(c.suite.integration, c.suite.name) for c in setup.coverage if c.covered}
-    done, profile, registry = setup.done, setup.profile, setup.registry
+    setup.planned_commit = commit = setup.deploy.commit
+    profile, registry = setup.profile, setup.registry
+    for suite in runnable_suites(setup.selected, registry):
+        planned = cases(suite, profile, None, adapters_for(suite, registry))
+        progress.resume(suite, commit, planned, fresh=args.fresh, unattended=args.unattended)
+    done = setup.done
     remaining = [
         suite
         for suite in setup.selected
-        if (suite.integration, suite.name) not in covered
-        and (not runnable_suite(suite, registry) or left(suite, profile, registry, done, args.keyword))
+        if not runnable_suite(suite, registry) or left(suite, profile, registry, done, args.keyword)
     ]
     setup.suites = remaining
     setup.roaming = roams(setup.profile, remaining)
@@ -1128,9 +1107,9 @@ def take(args: argparse.Namespace, setup: Setup, directory: Path) -> Held:
         print(f"HA changed while this run waited; it now needs {needed}.")
         held = locks.hold(held.claim | needed, holder, directory)
         setup.deploy = deploy_state(setup.env.get("RIG_STATUS_CMD", ""))
-    if setup.planned_tree is not None and setup.deploy.local_tree != setup.planned_tree:
-        held.close()  # the coverage was planned, and the suites fingerprinted, at the tree the plan read
-        raise SystemExit("The checkout's integration tree changed while this run waited; run it again.")
+    if setup.planned_commit is not None and setup.deploy.commit != setup.planned_commit:
+        held.close()  # the saved cases were read at the commit the plan read
+        raise SystemExit("The checkout's HEAD moved while this run waited; run it again.")
     return held
 
 
@@ -1167,7 +1146,7 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
     )
     print_resume(args, setup)
     if setup.progress is not None and not runnable(setup):
-        print("Nothing to run: every selected suite is covered (--fresh reruns them).")
+        print("Nothing to run: every case of the selected suites is saved at this commit (--fresh reruns them).")
         if unwritten := pending(setup):
             print(
                 f"{len(unwritten)} of them have no record yet: promote theirs with the --promote command the run that "
@@ -1206,10 +1185,7 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
 
 
 def print_resume(args: argparse.Namespace, setup: Setup) -> None:
-    """The selected suites left out as covered, how many cases of the rest are saved, and the budget."""
-    for suite_coverage in setup.coverage:
-        if suite_coverage.covered:
-            print(f"{suite_coverage.suite.integration} / {suite_coverage.suite.name}: {suite_coverage}, skipped")
+    """How many cases of the suites to run are saved, and the budget."""
     running = {(suite.integration, suite.name) for suite in setup.suites}
     if done := [key for key in setup.done if key[:2] in running]:
         registry = setup.registry
@@ -1288,7 +1264,6 @@ def run_approved(
             lanes=lanes,
             claim=held.claim,
             debug_logs=args.debug_logs,
-            reobserve=args.reobserve,
             progress=setup.progress,
             selected=setup.selected,
             budget=budget,
@@ -1299,12 +1274,16 @@ def run_approved(
 
 
 def pending(setup: Setup) -> set[tuple[str, str]]:
-    """The selected suites with every case saved and no fresh record: an earlier run finished them but didn't end
-    cleanly, so their records were staged and never promoted. A run that ends cleanly writes theirs too."""
+    """The selected suites with every case saved: an earlier run at this commit finished them but didn't end cleanly,
+    so their records were staged and never promoted (a promoted record takes its suite out of the ledger). A run that
+    ends cleanly writes theirs too."""
+    if setup.progress is None:
+        return set()
+    profile, registry, done = setup.profile, setup.registry, setup.done
     return {
-        (c.suite.integration, c.suite.name)
-        for c in setup.coverage
-        if c.complete and not c.freshness.fresh and not c.narrows  # a narrowing record is kept, never rewritten
+        (suite.integration, suite.name)
+        for suite in runnable_suites(setup.selected, registry)
+        if not left(suite, profile, registry, done, None)
     }
 
 
@@ -1369,68 +1348,6 @@ def check_only(
     )
     print_unreachable(setup.suites, setup.profile, setup.registry, keyword)
     return 1 if problems else 0
-
-
-def coverage_only(args: argparse.Namespace, directory: Path) -> int:
-    """--coverage: each selected suite's coverage at the checkout's HEAD, as a run would plan it, and the devices its
-    missing cases need, which is what to power up for the next run. Reads the records, the ledger and HA's version;
-    changes nothing, the ledger included. With no selection it is the whole profile: the release candidate's view.
-    Returns 0 when every suite is covered."""
-    env = load_env()
-    try:
-        profile = Profile.load(choose_profile(args.profile, env))
-    except ValueError as err:
-        raise SystemExit(f"Fix the profile: {err}") from err
-    registry = AdapterRegistry.discover()
-    suites = run_suites(args, profile, registry)
-    commit = git("rev-parse", "HEAD")
-    print(f"Coverage of profile {profile.name} at {git('rev-parse', '--short', commit)} (HEAD):")
-    if git("status", "--porcelain", "--", COMPONENT):
-        print(f"  Uncommitted changes under {COMPONENT} aren't counted: a run deploys only what is committed.")
-    progress = Progress.load(directory, profile.name)
-    if progress.entries:
-        if (version := ha_version(env)) is None:
-            print("  HA's version can't be read, so saved cases on an older HA may still count below.")
-        else:
-            progress.check_ha(version)
-    plan = coverage.of(suites, profile, registry, REPO, commit, progress, unattended=args.unattended)
-    observations = load_observations(checkout_records, {suite.integration for suite in suites})
-    hints = coverage.observed_hints(plan, progress, observations)
-    for line in coverage_lines(plan, profile, args.keyword, hints):
-        print(line)
-    return 0 if all(suite_coverage.covered for suite_coverage in plan) else 1
-
-
-def coverage_lines(
-    plan: list[SuiteCoverage],
-    profile: Profile,
-    keyword: str | None = None,
-    hints: dict[tuple[str, str, str], str] | None = None,
-) -> list[str]:
-    """One line per suite, its missing cases (those `keyword` keeps) under a partial one, and any with a hint
-    (coverage.observed_hints), then the total and the devices every missing case needs, their supplies included."""
-    hints = hints or {}
-    lines, needed = [], {}
-    power = profile.power()
-    for suite_coverage in plan:
-        suite = suite_coverage.suite
-        lines.append(f"  {suite.integration} / {suite.name}: {suite_coverage}")
-        if suite_coverage.covered:
-            continue
-        missing = [case for case in suite_coverage.missing if not keyword or keyword in case.id]
-        for case in missing:
-            devices = [] if case.skip else list(dict.fromkeys([*case.entities.values(), *case.members]))
-            devices += [power[e] for e in devices if e in power and power[e] not in devices]
-            needed.update(dict.fromkeys(devices))
-            hint = hints.get((suite.integration, suite.name, case.id))
-            if suite_coverage.saved or hint:
-                lines.append(f"      {case.id}: {', '.join(devices) or case.skip}" + (f" ({hint})" if hint else ""))
-    covered = sum(suite_coverage.covered for suite_coverage in plan)
-    left = sum(len(suite_coverage.missing) for suite_coverage in plan if not suite_coverage.covered)
-    lines.append(f"{covered} of {len(plan)} suites covered; {left} cases missing.")
-    if needed:
-        lines.append(f"The missing cases need: {', '.join(sorted(needed))}")
-    return lines
 
 
 def hold_command(args: argparse.Namespace, directory: Path) -> int:
@@ -1560,9 +1477,10 @@ def run_suites(args: argparse.Namespace, profile: Profile, registry: AdapterRegi
     step_files = load_step_files()
     check_options(step_files, registry)
     # No adapter stays, so the dry-run still says `no adapter, will skip`; an option file the adapter lacks goes.
+    opt_in = frozenset(kind for kind, asked in ((OBSERVED, args.observed), (FACTS, args.facts)) if asked)
     suites = [
         suite
-        for suite in select(step_files, profile, args.integration, args.action)
+        for suite in select(step_files, profile, args.integration, args.action, opt_in)
         if registry.adapter(suite.action, suite.integration) is None or applies(suite, registry)
     ]
     if not any(registry.adapter(suite.action, suite.integration) for suite in suites):
@@ -1873,7 +1791,6 @@ async def run_rig(
     selected: list[Suite] | None = None,
     budget: Budget | None = None,
     pending: set[tuple[str, str]] | None = None,
-    reobserve: bool = False,
 ) -> int:
     """Run the step files, in lanes first when `lanes` (run_phases), then phase by phase, moving the roaming bulbs
     before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then stage a
@@ -1917,8 +1834,7 @@ async def run_rig(
     stamp = started.strftime("%Y-%m-%d %H:%M:%S")
     expected = dict.fromkeys(pattern for suite in suites for pattern in suite.file.expected_log)
     logs = RunLogs(logs_dir or REPORT_DIR, f"rig run {stamp}", started, keep=debug_logs, expected=expected)
-    # The wire trace needs the admin connection, which alone may subscribe to it, and lends observed passes.
-    levels = DebugLevels(Baseline.of(admin or ha, journal, "debug")) if debug_logs or admin else None
+    levels = DebugLevels(Baseline.of(admin or ha, journal, "debug")) if debug_logs else None
     staging = staging_for(stamp, profile, progress)
     code = 1  # only a run that returns 0 is clean; any other end keeps the logs and promotes no record
     unrun = 0  # the cases the run planned with no result, once it ends 0
@@ -1943,7 +1859,6 @@ async def run_rig(
                 reloads=claim is None or claim.ha == "exclusive",  # holding HA shared, it may not reload the entry
                 progress=progress,
                 budget=budget,
-                reobserve=reobserve,
             )
             result, touched = joined(result, progress, selected)
             if suites:
@@ -2103,17 +2018,10 @@ async def begin_logging(
     debug_logs: bool = False,
 ) -> None:
     """Start Z2M's capture, when the run touches Z2M, then raise the debug levels, when asked: the raise's own lines
-    are captured. With the admin connection, turn DeviceSide's wire trace on and subscribe to it, for every run: it
-    lends observed passes (engine.run). Without, observed cases run as before, and a run unattended reports them not
-    observed."""
+    are captured."""
     z2m = touches_z2m(suites, roaming)
     if z2m:
         await logs.start_z2m(admin)
-    if admin is not None and levels is not None:
-        await admin.subscribe_wire()
-        await levels.raise_wire()
-    elif any(test.observe for suite in suites for test in suite.file.tests):
-        print("No HA_ADMIN_TOKEN, so no wire trace: no observed case is lent a pass its calls earned before.")
     if debug_logs and levels is not None:
         await levels.raise_levels(ha_domains({suite.integration for suite in suites}, roaming), z2m)
 
@@ -2144,7 +2052,6 @@ async def run_phases(
     reloads: bool = True,
     progress: Progress | None = None,
     budget: Budget | None = None,
-    reobserve: bool = False,
 ) -> RunResult:
     """Each phase: move the bulbs there and make its groups, wait for its targets, then run its cases, automated then
     observed. `pause` pauses the automations, once, after the first phase's targets are all there. A run with no suites
@@ -2170,8 +2077,6 @@ async def run_phases(
         "busy": {},
         "reloads": reloads,
         "budget": budget,
-        "observations": load_observations(checkout_records, {suite.integration for suite in suites}),
-        "reobserve": reobserve,
         **saving(progress),
         "on_result": observing(registry, progress),
     }
@@ -2229,9 +2134,9 @@ def saving(progress: Progress | None) -> dict:
 
 
 def observing(registry: AdapterRegistry, progress: Progress | None) -> Callable[[Suite, CaseResult], None]:
-    """run's `on_result`: save the case in `progress`, and write what it observed into the checkout's _observed.md,
-    dated now. What a person saw stands whatever the code (ha_rig/observed.py), so it is written as each case ends,
-    however the run does: with no commit, a failed run, or one cut short."""
+    """run's `on_result`: save the case in `progress`, and write what a person answered in an observed case into the
+    checkout's _observed.md, dated now. What a person saw is a fact (ha_rig/observed.py), so it is written as each
+    case ends, however the run does: with no commit, a failed run, or one cut short."""
 
     def on_result(suite: Suite, case: CaseResult) -> None:
         if progress is not None:
@@ -2288,9 +2193,8 @@ async def report(
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
-    untraced: list[Path] = []
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, into=staging.test_records_dir, untraced=untraced
+        result, registry, checkout_records, today, source, into=staging.test_records_dir
     )
     by_path = {
         staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
@@ -2298,11 +2202,6 @@ async def report(
     for path in written:
         suite = by_path.get(path)
         staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
-    for path in untraced:
-        print(
-            f"No record for {display(path, REPO)}: the run drew no DeviceSide scope trace (no HA_ADMIN_TOKEN, or its "
-            "wire logger would not go to DEBUG), so its Covers row would be empty."
-        )
     for path, narrowed in kept:
         print(
             f"Kept {display(path, REPO)}: profile {profile.name} skips {', '.join(narrowed)}, which it passed; "

@@ -6,13 +6,13 @@ record, its suite's ledger entry and the hash of the checkout's file when it was
 cleanly promotes its records into the checkout itself; any other end leaves the checkout untouched and prints the one
 command that promotes them (`command`).
 
-Promoting copies each record into the checkout, then drops its suite's ledger entry (the record carries its coverage
+Promoting copies each record into the checkout, then drops its suite's ledger entry (the record holds its result
 from then on), then removes the staged dir. A record whose file in the checkout changed since it was staged (a later
 run wrote it, or this dir was promoted already) is left staged and named, never overwritten.
 
 The ledger keeps a staged suite's cases until promotion, so a staged dir lost with the temp folder loses no result: the
-next run that ends cleanly, running any case, stages and promotes the record from the ledger. When every selected
-suite is covered there is no such run, and `--fresh` reruns them.
+next run that ends cleanly, running any case, stages and promotes the record from the ledger. When every case of the
+selected suites is saved there is no such run, and `--fresh` reruns them.
 """
 
 import hashlib
