@@ -34,8 +34,8 @@ entity IDs and IEEEs and `.env.rig`'s HA and Hue bridge hosts, tokens, Hue app k
 `python -m ha_rig.terms` does it by hand after editing a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in deviceside's main checkout, where the
 rig kept them before it moved: move them here.
 
-Keep DeviceSide's Experimental features option on in the rig's HA. Every run needs it on (Writing a step file), and a run
-holding HA shared can't turn it on itself. It only lets flagged actions be called; unflagged ones behave the same.
+The rig needs DeviceSide's Experimental features option on in its HA, and never changes it: a flagged item's case
+would otherwise test the refusal. The option only lets flagged actions be called; unflagged ones behave the same.
 
 ## Before a run
 
@@ -294,11 +294,9 @@ record is `<action>-<name>.md`, with an `Options` row. The rig's own options are
 save reloads the entry, so a run pins each set of options once: the suites that share a set run together, rather
 than each `<action>` file and its `<action>-<name>` twin in turn.
 
-Every run with `HA_ADMIN_TOKEN` also turns DeviceSide's Experimental features on, through the same flow and put back
-the same way, so a flagged item's case tests its call rather than the `experimental_off` refusal; the option never
-changes how an unflagged item behaves. A run holding HA shared can't save it, so it stops before its first case unless
-the option is already on. A pass on a flagged item is evidence a maintainer may use to lift its flag (deviceside's
-`docs/evidence.md`); a known failure gets `only:` or leaves the profile.
+A flagged item's case tests its call because the rig's HA keeps Experimental features on (Setup). A pass on a flagged
+item is evidence a maintainer may use to lift its flag (deviceside's `docs/evidence.md`); a known failure gets
+`only:` or leaves the profile.
 
 A test that means to make DeviceSide warn lists the line under `expected_log:` at the top of its file: regular
 expressions, each searched for in the whole log line, logger included. A matched line is counted in the summary and

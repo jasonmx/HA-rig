@@ -1,4 +1,4 @@
-"""Fakes shared by the rig's tests: a fake HAClient with DeviceSide's options flow (and its admin twin), a
+"""Fakes shared by the rig's tests: a fake HAClient (and its admin twin, with DeviceSide's options flow), a
 registry whose adapters all take options, and the step files that tests/test_rig.py reuses. STEPS holds the rig's
 own fixture step files: the tests never depend on deviceside's test plan, only tests/test_rig_steps.py reads it."""
 
@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
 from ha_rig.client import HAClient, HAError, device_ieee
-from ha_rig.engine import EXPERIMENTAL
 from ha_rig.profile import Profile, RigEntity, colon_ieee, hex_ieee
 from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
 from ha_rig.target import deviceside_repo, test_records_dir
@@ -99,10 +98,9 @@ class FakeHA(HAClient):
     """Entity states HA would hold, plain on/off services, and DeviceSide actions answered by `respond`.
 
     It inherits HAClient's network helpers (ZHA, Z2M, registries) and fakes the three things they sit on: `command`,
-    `call_service` and the MQTT subscription. It has DeviceSide's entry and options flow, which saves what it is sent,
-    with Experimental features already on, as every run turns it on. A bulb joins with `join`; a leave, a permit
-    window and a ZHA or Z2M group act as the real networks would, a group with its HA light (dropped with it, unless
-    `keeps_group_entities`). Nothing here is the network's timing: a join is instant.
+    `call_service` and the MQTT subscription. A bulb joins with `join`; a leave, a permit window and a ZHA or Z2M group
+    act as the real networks would, a group with its HA light (dropped with it, unless `keeps_group_entities`).
+    Nothing here is the network's timing: a join is instant.
     """
 
     def __init__(self, states: dict[str, dict], respond: Callable | None = None):
@@ -112,10 +110,6 @@ class FakeHA(HAClient):
         }
         self.respond = respond
         self.calls: list[tuple[str, str, dict]] = []
-        self.options: dict = {EXPERIMENTAL: True}  # DeviceSide's options
-        self.saved: list[dict] = []
-        self.aborted = 0
-        self.menu = ["settings", "report_device", "propose_device", "report_bug"]
         self.devices: list[dict] = [{"id": "d1", "model": "Mini", "model_id": "S3", "sw_version": "2.0"}]
         self.entity_devices: dict[str, str] = {}  # the entity registry: entity ID -> device ID
         self.entity_meta: dict[str, dict] = {}  # the registry's platform, unique_id and disabled_by, by entity ID
@@ -405,20 +399,6 @@ class FakeHA(HAClient):
             return
         self._z2m_handle(topic.removeprefix("zigbee2mqtt/bridge/request/"), payload)
 
-    async def rest(self, method: str, path: str, json: dict | None = None):
-        if path.endswith("/options/flow"):
-            # As DeviceSide's options flow: a menu, whose settings step is the options form.
-            return {"type": "menu", "flow_id": "f1", "menu_options": self.menu}
-        if method == "delete":
-            self.aborted += 1
-            return {"message": "Flow aborted"}
-        if json == {"next_step_id": "settings"}:
-            schema = [{"name": name, "default": value, "type": "boolean"} for name, value in self.options.items()]
-            return {"type": "form", "flow_id": "f1", "step_id": "settings", "data_schema": schema}
-        self.options = dict(json)
-        self.saved.append(dict(json))
-        return {"type": "create_entry"}
-
     async def get_state(self, entity_id: str) -> dict | None:
         return copy.deepcopy(self.states.get(entity_id))
 
@@ -446,8 +426,6 @@ class FakeHA(HAClient):
             return None
         if kind == "ping":
             return None
-        if kind == "config_entries/get":
-            return [{"entry_id": "e1", "state": "loaded"}]
         if kind == "logger/log_info":
             return [{"domain": domain, "level": level} for domain, level in self.ha_levels.items()]
         if kind == "logger/integration_log_level":
@@ -757,13 +735,16 @@ OPTION_REGISTRY = SimpleNamespace(
 
 
 class FakeAdmin(FakeHA):
-    """FakeHA plus two DeviceSide options (OPTION_REGISTRY's), and its entry reloads and is
+    """FakeHA plus DeviceSide's entry and its options flow, which saves what it is sent. The entry reloads and is
     disabled and enabled as HA's are, `moves` listing each; while it is disabled, DeviceSide's actions raise
     not_loaded, and `stuck` makes enabling it fail."""
 
     def __init__(self, states: dict[str, dict], respond: Callable | None = None, options: dict | None = None):
         super().__init__(states, respond)
-        self.options = {"opt": True, "other": False, EXPERIMENTAL: True} | (options or {})
+        self.options = {"opt": True, "other": False} | (options or {})
+        self.saved: list[dict] = []
+        self.aborted = 0
+        self.menu = ["settings", "report_device", "propose_device", "report_bug"]
         self.disabled = False
         self.stuck = False
         self.moves: list[str] = []
@@ -790,7 +771,18 @@ class FakeAdmin(FakeHA):
         if path == "/api/config/config_entries/entry/e1/reload":
             self.moves.append("reload")
             return {"require_restart": False}
-        return await super().rest(method, path, json)
+        if path.endswith("/options/flow"):
+            # As DeviceSide's options flow: a menu, whose settings step is the options form.
+            return {"type": "menu", "flow_id": "f1", "menu_options": self.menu}
+        if method == "delete":
+            self.aborted += 1
+            return {"message": "Flow aborted"}
+        if json == {"next_step_id": "settings"}:
+            schema = [{"name": name, "default": value, "type": "boolean"} for name, value in self.options.items()]
+            return {"type": "form", "flow_id": "f1", "step_id": "settings", "data_schema": schema}
+        self.options = dict(json)
+        self.saved.append(dict(json))
+        return {"type": "create_entry"}
 
 
 RESTORED_MIDWAY = """

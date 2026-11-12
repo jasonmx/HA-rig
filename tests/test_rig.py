@@ -729,7 +729,7 @@ def put_back(ha: RigHA) -> bool:
     return (
         ha.states["light.a"] == {"entity_id": "light.a", "state": "on", "attributes": {"brightness": 200}}
         and ha.states["automation.motion"]["state"] == "on"
-        and ha.options == {"opt": True, "other": False, "experimental_features": True}
+        and ha.options == {"opt": True, "other": False}
     )
 
 
@@ -802,7 +802,7 @@ def aborted_journal(path: Path) -> Journal:
     journal.update(
         profile="lab",
         paused=["automation.motion"],
-        options={"opt": True, "other": False, "experimental_features": True},
+        options={"opt": True, "other": False},
         cases={"serial": {"taken": {"light.a": LIGHT_A_ON}, "stored": {}, "power": {}}},
     )
     return journal
@@ -900,11 +900,8 @@ async def test_recover_without_an_admin_token_leaves_the_options_in_the_journal(
 
     await rig.recover(ha, None, journal, out=lambda _: None)
 
-    assert ha.options == {"opt": False, "other": False, "experimental_features": True}
-    assert Journal(journal.path).sections == {
-        "profile": "lab",
-        "options": {"opt": True, "other": False, "experimental_features": True},
-    }
+    assert ha.options == {"opt": False, "other": False}
+    assert Journal(journal.path).sections == {"profile": "lab", "options": {"opt": True, "other": False}}
 
 
 async def test_recover_enables_a_disabled_entry_before_it_puts_the_cases_back(tmp_path, monkeypatch):
