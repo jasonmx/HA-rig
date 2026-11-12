@@ -2562,7 +2562,7 @@ def render_record(
             "",
         ]
         on_file = facts or FactsFile()
-        lines += [f"- `{case_id}`: {on_file.latest(case_id) or 'none on file'}" for case_id in chosen]
+        lines += [f"- `{case_id}`: {on_file.latest(suite.name, case_id) or 'none on file'}" for case_id in chosen]
     return "\n".join(lines) + "\n"
 
 
@@ -2645,7 +2645,11 @@ def write_fact(suite: Suite, case: CaseResult, registry: Any, records: Records, 
         return None
     path = records(suite.integration) / FACTS_FILE
     result = PASS if case.outcome is Outcome.PASS else FAIL
-    append(path, registry.integrations[suite.integration].title, Fact(date, case.id, kind, _devices(case), result))
+    append(
+        path,
+        registry.integrations[suite.integration].title,
+        Fact(date, suite.name, case.id, kind, _devices(case), result),
+    )
     return path
 
 

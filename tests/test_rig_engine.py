@@ -2888,7 +2888,7 @@ def test_a_record_lists_a_fact_case_as_skipped_whatever_it_did_and_quotes_its_la
         CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS),
     ]
     devices = [engine.Device("Plug", "P1", "1.4.2")]
-    fact = Fact("2026-11-12", "wins[switch_plug]", AUTOMATED_KIND, "Plug (`P1`), firmware `1.4.2`", FAIL)
+    fact = Fact("2026-11-12", "turn_on_for", "wins[switch_plug]", AUTOMATED_KIND, "Plug (`P1`), firmware `1.4.2`", FAIL)
     on_file = FactsFile((fact,))
     result = SuiteResult(steps, cases, True)
     record = render_record(result, "Shelly", "2026.10.1", devices, "2026-11-12", "t", on_file)
@@ -3019,7 +3019,7 @@ async def test_an_answered_observed_case_adds_a_dated_row_with_its_devices(tmp_p
     assert watched.devices == (engine.Device("Mini", "S3", "2.0"),)
     path = write_fact(steps, watched, REGISTRY, records, "2026-11-12")
     assert FactsFile.read(path).rows == (
-        Fact("2026-11-12", WATCHED, OBSERVED_KIND, "Mini (`S3`), firmware `2.0`", PASS),
+        Fact("2026-11-12", "turn_on_for", WATCHED, OBSERVED_KIND, "Mini (`S3`), firmware `2.0`", PASS),
     )
     plain = CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS, devices=watched.devices)
     assert write_fact(suite(tmp_path, FIRMWARE_FACT), plain, REGISTRY, records, "d") is None  # a default case is none
@@ -3038,7 +3038,14 @@ async def test_a_firmware_fact_that_passed_or_failed_adds_a_row_naming_its_devic
     assert fact.outcome is outcome
     path = write_fact(result.suites[0].suite, fact, REGISTRY, under(tmp_path), "2026-11-12")
     assert FactsFile.read(path).rows == (
-        Fact("2026-11-12", "wins[switch_plug]", AUTOMATED_KIND, "Mini (`S3`), firmware `2.0`", str(outcome)),
+        Fact(
+            "2026-11-12",
+            "turn_on_for",
+            "wins[switch_plug]",
+            AUTOMATED_KIND,
+            "Mini (`S3`), firmware `2.0`",
+            str(outcome),
+        ),
     )
     assert result.suites[0].recordable  # the fact's result is no part of the record
 

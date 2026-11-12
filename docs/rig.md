@@ -379,9 +379,10 @@ record.
 
 `_facts.md`, in each integration's records directory (`ha_rig/facts.py`), holds what the fact cases found: one row per
 firmware fact's automated case that passed or failed, and per watched case a person answered (`pass` if you saw it,
-`fail` for a `n`; a step that broke, or nobody there, adds nothing). A row holds the date, the case, its kind, which
-says how the fact was seen (`automated` or `observed`), the devices it ran on with their firmware (a group's members
-included, as a record's Device row names them) and the result. The file is only ever appended to, a row as each case
-ends, straight into the checkout, whether or not a record is written and however the run ends: a fact stands whatever
-the code, until evidence contradicts it, and a line the rig can't read stays as it is. Nothing reruns a fact case by
-itself, and the rig decides nothing from the rows. Review the diff before committing it.
+`fail` for a `n`; a step that broke, or nobody there, adds nothing). A row holds the date, the suite (case ids repeat
+across suites), the case, its kind, which says how the fact was seen (`automated` or `observed`), the devices it ran on
+with their firmware (a group's members included, as a record's Device row names them) and the result. The file is only
+ever appended to, a row as each case ends, straight into the checkout, whether or not a record is written and however
+the run ends: a fact stands whatever the code, until evidence contradicts it, and a line the rig can't read stays as it
+is. Nothing reruns a fact case by itself, and the rig decides nothing from the rows. Review the diff before committing
+it.
