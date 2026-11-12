@@ -1,8 +1,9 @@
 # The rig
 
 The rig runs DeviceSide's actions against a live Home Assistant and its real devices, and writes the test records
-that sign off an integration's changes (deviceside's `docs/evidence.md`). Its tests are deviceside's YAML step files,
-in `tests/rig/steps/` of the checkout under test, one per action: deviceside owns the test plan, the rig runs it.
+that sign off an integration's changes (deviceside's `docs/evidence.md`). Its tests are deviceside's YAML step files
+in the checkout under test, shared ones in `tests/rig/steps/` and an integration's own in `tests/integrations/<x>/rig/`:
+deviceside owns the test plan, the rig runs it.
 `scripts/rig.py` runs each file against every integration in the profile that has an adapter for the action, after
 an authorization gate (below): the devices change state, so nothing moves until the work is authorized and, at a
 terminal, you say yes. `--dry-run` prints the plan and the decision, and stops.
@@ -183,7 +184,7 @@ than the one planned (origin moved). A run whose every selected case is saved sa
 while it waited for its locks stops too, to be run again.
 
 **Uncommitted step files.** A record cites the commit, so it must hold the step files that ran. The rig reads HEAD,
-then the checkout's `tests/rig/steps/*.yaml`, and parses each from the bytes it compares with HEAD's copy: a file
+then the checkout's step files in both homes, and parses each from the bytes it compares with HEAD's copy: a file
 edited, added (tracked or not, ignored or not) or removed, or an edit git is told not to see (assume-unchanged,
 skip-worktree), makes them uncommitted, and so does HEAD moving before the deploy state is read. Such a run still goes
 ahead, so a step file can be iterated on, but it says so, writes no test record or `_facts.md` row and neither reads
@@ -207,6 +208,12 @@ saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next
 
 A step file lives in deviceside, `tests/rig/steps/<action>.yaml`, and lands in the deviceside PR that adds or changes
 the action it tests. It names roles, never entities: deviceside is public, and its household check covers the file.
+
+An integration's own step file, `tests/integrations/<x>/rig/<action>.yaml`, belongs to that integration's maintainers.
+Its tests join the shared file for the action (the one with no `options` or `name`), as if each said `only: [<x>]`:
+the same suite, record and estimate, run on `<x>` alone. One with no shared file for its action stands as its own. It
+takes no `options` or `name`; an `only:` naming another integration, a test name the shared file already has, or an
+action with no adapter on `<x>` fails at load. A repo maintainer may adopt its cases into the shared file.
 The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`). A run while one is
 uncommitted writes no record (Uncommitted step files, above). The rig's own tests use fixture copies in its
 `tests/steps/`, so its CI doesn't depend on deviceside's test plan.

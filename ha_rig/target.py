@@ -6,7 +6,8 @@ this one named deviceside (the repo's name) or device-side (so the rig's own tes
 and baseline live in the target's git common dir, shared by every worktree of it; the profiles and .env.rig live in
 this rig's main checkout.
 
-Its step files, the test plan, live in `tests/rig/steps/` (STEPS), and its test records in
+Its step files, the test plan, live in `tests/rig/steps/` (STEPS, shared) and `tests/integrations/<x>/rig/` (an
+integration's own, integration_steps_dirs), and its test records in
 `docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out.
 
 Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
@@ -19,7 +20,8 @@ from pathlib import Path
 
 RIG_HOME = Path(__file__).resolve().parents[1]
 COMPONENT = "custom_components/deviceside"
-STEPS = "tests/rig/steps"  # deviceside's step files, one per action
+STEPS = "tests/rig/steps"  # deviceside's shared step files, one per action
+INTEGRATIONS = "tests/integrations"  # deviceside's integration test packages: each one's own step files are in its rig/
 RECORDS = "docs/integrations/{integration}/test-records"  # deviceside's test records directory, per integration
 SIBLINGS = ("deviceside", "device-side")
 UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner
@@ -50,6 +52,20 @@ def steps_dir(repo: Path) -> Path:
     return repo / STEPS
 
 
+def integration_steps_dirs(repo: Path) -> dict[str, Path]:
+    """Each integration's own step files' directory in `repo`, by integration, for those that have one."""
+    return {path.parent.name: path for path in sorted((repo / INTEGRATIONS).glob("*/rig")) if path.is_dir()}
+
+
+def is_step_path(path: str) -> bool:
+    """Whether `path`, relative to the checkout, is a step file: `*.yaml` directly in STEPS or in an integration's
+    rig/."""
+    parts = Path(path).parts
+    shared = Path(path).parent.as_posix() == STEPS
+    own = len(parts) == 5 and Path(*parts[:2]).as_posix() == INTEGRATIONS and parts[3] == "rig"
+    return path.endswith(".yaml") and (shared or own)
+
+
 def head_commit(repo: Path) -> str | None:
     """`repo`'s HEAD commit; None outside a checkout or without git."""
     try:
@@ -61,18 +77,18 @@ def head_commit(repo: Path) -> str | None:
 
 
 def committed_step_sources(repo: Path, commit: str) -> dict[str, bytes]:
-    """The `*.yaml` files directly in STEPS at `commit`, by name, as committed; none where git can't say."""
+    """The step files at `commit` (is_step_path), by path relative to the checkout, as committed; none where git can't
+    say."""
 
     def git(*args: str) -> bytes:
         return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
 
     sources = {}
     try:
-        for entry in filter(None, git("ls-tree", "-z", commit, "--", f"{STEPS}/").split(b"\0")):
-            meta, _, path = entry.partition(b"\t")
-            name = Path(path.decode()).name
-            if meta.split()[1] == b"blob" and name.endswith(".yaml"):
-                sources[name] = git("cat-file", "blob", f"{commit}:{STEPS}/{name}")
+        for entry in filter(None, git("ls-tree", "-r", "-z", commit, "--", STEPS, INTEGRATIONS).split(b"\0")):
+            meta, _, raw = entry.partition(b"\t")
+            if meta.split()[1] == b"blob" and is_step_path(path := raw.decode()):
+                sources[path] = git("cat-file", "blob", f"{commit}:{path}")
     except OSError, subprocess.CalledProcessError:
         return {}
     return sources

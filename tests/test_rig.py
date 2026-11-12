@@ -20,7 +20,7 @@ from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
 from tests import rig_fakes as fakes
-from tests.conftest import REAL_STEPS_DIR
+from tests.conftest import REAL_INTEGRATION_STEPS_DIRS, REAL_STEPS_DIR
 from tests.rig_fakes import STEPS, records_at, write
 
 RIG_HOME = Path(__file__).parents[1]
@@ -1456,6 +1456,7 @@ def steps_checkout(tmp_path: Path, monkeypatch) -> Path:
     """A git checkout in tmp_path with one committed step file; its steps directory."""
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     monkeypatch.setattr(target, "steps_dir", REAL_STEPS_DIR)
+    monkeypatch.setattr(target, "integration_steps_dirs", REAL_INTEGRATION_STEPS_DIRS)
     (steps := tmp_path / target.STEPS).mkdir(parents=True)
     (steps / "stop.yaml").write_text((STEPS / "stop.yaml").read_text())
     run_git("init", "-q", str(tmp_path))
@@ -1492,6 +1493,29 @@ def test_a_modified_or_removed_step_file_isnt_heads(tmp_path, monkeypatch, hidde
     assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
     (steps / "stop.yaml").unlink()
     assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+
+
+def test_an_integrations_own_step_file_is_checked_against_head_too(tmp_path, monkeypatch):
+    steps_checkout(tmp_path, monkeypatch)
+    (own := tmp_path / target.INTEGRATIONS / "shelly" / "rig").mkdir(parents=True)
+    (own / "turn_on_for.yaml").write_text(
+        "action: turn_on_for\nrig_seconds: 1\ntests:\n  - name: o\n    roles: [switch_plug]\n    steps: [{wait: 0}]\n"
+    )
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # untracked
+    run_git("-C", str(tmp_path), "add", ".")
+    run_git("-C", str(tmp_path), "commit", "-q", "-m", "own")
+    files, _, committed = REAL_LOAD_CHECKOUT_STEPS(tmp_path)
+    assert committed and {(f.action, f.owned_by) for f in files} == {
+        ("stop", frozenset()),
+        ("turn_on_for", frozenset({"shelly"})),
+    }
+    (own / "turn_on_for.yaml").write_text((own / "turn_on_for.yaml").read_text() + "# edited\n")
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # modified
+    (own / "turn_on_for.yaml").unlink()
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # removed
+    (tmp_path / target.INTEGRATIONS / "shelly" / "x.yaml").write_text("not a step file\n")
+    run_git("-C", str(tmp_path), "commit", "-q", "-am", "gone")
+    assert REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # only *.yaml directly in rig/ counts
 
 
 def test_committing_the_step_files_moves_the_ledger_key(tmp_path, monkeypatch):

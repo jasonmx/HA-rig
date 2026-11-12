@@ -249,6 +249,8 @@ class StepFile:
     expected_log: tuple[re.Pattern[str], ...] = ()
     # The name its record takes in place of the action's, for a file that tests something else through it (lifecycle).
     name: str | None = None
+    # The integrations whose own step files (tests/integrations/<x>/rig/) added tests to it, each only on its own.
+    owned_by: frozenset[str] = frozenset()
 
     @property
     def roles(self) -> tuple[str, ...]:
@@ -625,24 +627,91 @@ def _named(step_file: StepFile, name: Any) -> StepFile:
     return replace(step_file, name=name)
 
 
-def load_step_files(steps_dir: Path | None = None) -> list[StepFile]:
-    """Every `<action>.yaml` directly in steps_dir, by default the checkout under test's (target.steps_dir)."""
-    steps_dir = checkout.steps_dir(checkout.deviceside_repo()) if steps_dir is None else steps_dir
-    return [load_step_file(path) for path in sorted(steps_dir.glob("*.yaml"))]
+def load_step_files(steps_dir: Path | None = None, integration_dirs: dict[str, Path] | None = None) -> list[StepFile]:
+    """Every `<action>.yaml` directly in steps_dir, the shared files, with each integration's own from its directory in
+    `integration_dirs` merged in (merge_owned); by default the checkout under test's (target.steps_dir and
+    target.integration_steps_dirs)."""
+    if steps_dir is None:
+        repo = checkout.deviceside_repo()
+        steps_dir, integration_dirs = checkout.steps_dir(repo), checkout.integration_steps_dirs(repo)
+    shared = [load_step_file(path) for path in sorted(steps_dir.glob("*.yaml"))]
+    owned = [
+        owned_step_file(load_step_file(path), integration)
+        for integration, directory in sorted((integration_dirs or {}).items())
+        for path in sorted(directory.glob("*.yaml"))
+    ]
+    return merge_owned(shared, owned)
+
+
+def owned_step_file(step_file: StepFile, integration: str) -> StepFile:
+    """An integration's own step file, every test scoped to `integration` as if it said `only: [<integration>]`. Raises
+    SchemaError for an `only:` naming another integration, or for options or a record name, which only a shared file
+    takes."""
+    where = f"{integration}/rig/{step_file.path.name}"
+    if step_file.options or step_file.name is not None:
+        raise SchemaError(f"{where}: options and name are for shared step files")
+    mine = frozenset({integration})
+    tests = []
+    for test in step_file.tests:
+        named = (test.only or mine) | ((test.observe and test.observe.only) or mine)
+        named |= {key for step in (*test.setup, *test.steps) for key in step.only or ()}
+        if others := sorted(named - mine):
+            raise SchemaError(f"{where}: {test.name} names {', '.join(others)}, but the file is {integration}'s own")
+        tests.append(replace(test, only=mine))
+    return replace(step_file, tests=tuple(tests), owned_by=mine)
+
+
+def merge_owned(shared: list[StepFile], owned: list[StepFile]) -> list[StepFile]:
+    """The shared files with each integration's own merged into the plain file for its action (no options, no record
+    name): its tests join that suite, its record and its duration estimate. One with no shared file stands alone.
+    Raises SchemaError for a test name the action's file already has."""
+    files = list(shared)
+    for own in owned:
+        index = next((i for i, f in enumerate(files) if f.action == own.action and not f.options and not f.name), None)
+        if index is None:
+            files.append(own)
+            continue
+        base = files[index]
+        if clash := sorted({t.name for t in base.tests} & {t.name for t in own.tests}):
+            where = f"{next(iter(own.owned_by))}/rig/{own.path.name}"
+            raise SchemaError(f"{where}: test {', '.join(clash)} is already in {base.action}'s step file")
+        files[index] = replace(
+            base,
+            tests=base.tests + own.tests,
+            rig_seconds=base.rig_seconds + own.rig_seconds,
+            expected_log=base.expected_log + own.expected_log,
+            owned_by=base.owned_by | own.owned_by,
+        )
+    return files
+
+
+def check_owned(step_files: Iterable[StepFile], registry: Any) -> None:
+    """Raise SchemaError for an integration's own tests of an action it has no adapter for."""
+    for step_file in step_files:
+        if missing := sorted(x for x in step_file.owned_by if registry.adapter(step_file.action, x) is None):
+            raise SchemaError(f"{missing[0]}/rig: {missing[0]} has no {step_file.action} adapter")
 
 
 def load_checkout_steps(repo: Path) -> tuple[list[StepFile], str | None, bool]:
-    """`repo`'s step files, parsed from the bytes read here; HEAD, read before them; and whether they are HEAD's:
-    each file's bytes as committed there, and no file more or less. Git's own view (status) would miss an untracked file
+    """`repo`'s step files, shared and each integration's own merged in (load_step_files), parsed from the bytes read
+    here; HEAD, read before them; and whether they are HEAD's: each file's bytes as committed there, and no file more or
+    less, in either home. Git's own view (status) would miss an untracked file
     it hides, an ignored one and an assume-unchanged or skip-worktree edit, which the loader reads all the same.
 
     A record cites the commit, so a run whose files aren't HEAD's writes none, and no fact row, and keeps no ledger: a
     pass saved with an edit, then reverted, would otherwise resume into a record at that commit. Committing moves HEAD,
     so nothing saved before a commit resumes after it."""
     head = checkout.head_commit(repo)
-    directory = checkout.steps_dir(repo)
-    sources = {path.name: path.read_bytes() for path in sorted(directory.glob("*.yaml"))}
-    files = [load_step_file(directory / name, source.decode()) for name, source in sources.items()]
+    shared = sorted(checkout.steps_dir(repo).glob("*.yaml"))
+    own = {x: sorted(directory.glob("*.yaml")) for x, directory in checkout.integration_steps_dirs(repo).items()}
+    paths = shared + [path for paths in own.values() for path in paths]
+    sources = {path.relative_to(repo).as_posix(): path.read_bytes() for path in paths}
+
+    def parsed(path: Path) -> StepFile:
+        return load_step_file(path, sources[path.relative_to(repo).as_posix()].decode())
+
+    owned = [owned_step_file(parsed(path), x) for x, paths in own.items() for path in paths]
+    files = merge_owned([parsed(path) for path in shared], owned)
     return files, head, head is not None and sources == checkout.committed_step_sources(repo, head)
 
 

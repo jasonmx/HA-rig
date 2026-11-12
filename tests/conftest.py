@@ -16,6 +16,7 @@ sys.path.append(str(deviceside_repo()))
 
 REAL_WORKSPACE_COLOR = locks.workspace_color  # the autouse fixture swaps the module's for a recorder
 REAL_STEPS_DIR = target.steps_dir  # the autouse fixture points it at the fixture step files
+REAL_INTEGRATION_STEPS_DIRS = target.integration_steps_dirs  # and this at none
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -39,6 +40,7 @@ def fixture_steps(monkeypatch) -> None:
     """The rig's own fixture step files (rig_fakes.STEPS) in place of the checkout's, as committed at no commit in
     particular, so no test depends on deviceside's test plan or on its checkout's state."""
     monkeypatch.setattr(target, "steps_dir", lambda repo: STEPS)
+    monkeypatch.setattr(target, "integration_steps_dirs", lambda repo: {})
     monkeypatch.setattr(engine, "load_checkout_steps", lambda repo: (engine.load_step_files(STEPS), None, True))
 
 
