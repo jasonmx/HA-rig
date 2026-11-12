@@ -992,32 +992,39 @@ def at_a_terminal(monkeypatch, answer: str) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
 
 
-ON = f"Restricted, and {PROBE_SENSOR} is on."
-NO_KEY = "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig."
-ASKED = f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]"
-NOT_PRE = "--visual profile needs a pre-authorized profile, and lab isn't"
-NONE, PROFILE = ("--visual", "none"), ("--visual", "profile")
+PROBE_ON_SAYS = f"Restricted, and {PROBE_SENSOR} is on."
+NO_KEY_SAYS = "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig."
+ASKED_SAYS = f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]"
+VISUAL_NONE, VISUAL_PROFILE = ("--visual", "none"), ("--visual", "profile")
+# How the probe is given its go-ahead; `""` gives none.
+PROBE_GIVEN = ("", "no key", "y at a terminal", "approved", "pre-authorized")
 
 
 @pytest.mark.parametrize(
     ("reads", "given", "visual", "code", "armed", "says"),
     [
         pytest.param(
-            ("on",), "", (), 1, [], f"{ON} Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)", id="on: refused"
+            ("on",),
+            "",
+            (),
+            1,
+            [],
+            f"{PROBE_ON_SAYS} Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)",
+            id="on: refused",
         ),
-        pytest.param((), "no key", (), 1, [], NO_KEY, id="no key: refused"),
-        pytest.param(("off", "on"), "", (), 1, [], "", id="checked again once it holds its locks"),
-        pytest.param(("off", "off"), "", (), 0, [True], "", id="clear: runs watched and unasked"),
-        pytest.param(("on",), "y at a terminal", (), 0, [True], ASKED, id="let past: watched, not asked again"),
-        pytest.param(("on",), "approved", (), 0, [True], "", id="approved: goes while on, watched"),
-        pytest.param((), "", NONE, 0, [False], "", id="non-visual: reads no sensor, not watched"),
-        pytest.param((), "", PROFILE, SystemExit, [], NOT_PRE, id="visual profile: not pre-authorized"),
-        pytest.param((), "pre-authorized", PROFILE, 0, [False], "", id="visual profile: pre-authorized"),
-        pytest.param(("on",), "pre-authorized", (), 1, [], ON, id="undeclared on a pre-authorized profile"),
+        pytest.param((), "no key", (), 1, [], NO_KEY_SAYS, id="no key: refused"),
+        pytest.param(("off", "on"), "", (), 1, [], None, id="checked again once it holds its locks"),
+        pytest.param(("off", "off"), "", (), 0, [True], None, id="clear: runs watched and unasked"),
+        pytest.param(("on",), "y at a terminal", (), 0, [True], ASKED_SAYS, id="let past: watched, not asked again"),
+        pytest.param(("on",), "approved", (), 0, [True], None, id="approved: goes while on, watched"),
+        pytest.param((), "", VISUAL_NONE, 0, [False], None, id="non-visual: reads no sensor, not watched"),
+        pytest.param((), "pre-authorized", VISUAL_PROFILE, 0, [False], None, id="visual profile: pre-authorized"),
+        pytest.param(("on",), "pre-authorized", (), 1, [], PROBE_ON_SAYS, id="undeclared on a pre-authorized profile"),
     ],
 )
 def test_the_probe_gate(probe, monkeypatch, capsys, reads, given, visual, code, armed, says):
     """The sensor reads each of `reads` in turn (one more fails the test); an agent's probe is never asked."""
+    assert given in PROBE_GIVEN
     seen = clear_states(monkeypatch, *reads, key=given != "no key")
     if given == "y at a terminal":
         at_a_terminal(monkeypatch, "y\n")
@@ -1027,18 +1034,24 @@ def test_the_probe_gate(probe, monkeypatch, capsys, reads, given, visual, code, 
         with (probe / "lab.yaml").open("a") as profile:
             profile.write("pre_authorized: true\n")
     monkeypatch.setattr(rig, "run_command", lambda command: 0 if code == 0 else pytest.fail("ran"))
-    argv = ["--hold", "hue", *visual, "--", "true"]
-    if code is SystemExit:
-        with pytest.raises(SystemExit, match=says):
-            rig.main(argv)
-    else:
-        assert rig.main(argv) == code
-        out = capsys.readouterr().out
+    assert rig.main(["--hold", "hue", *visual, "--", "true"]) == code
+    out = capsys.readouterr().out
+    if says is not None:
         assert says in out
-        assert ("Proceed" in out) is (given == "y at a terminal")
+    assert ("Proceed" in out) is (given == "y at a terminal")
     assert seen == armed
     if code:
         assert ProbeHA.calls == []
+    assert not blocked(probe, claim("hue", ha="exclusive"))
+
+
+def test_a_visual_profile_probe_needs_a_pre_authorized_profile(probe, monkeypatch):
+    seen = clear_states(monkeypatch)
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    with pytest.raises(SystemExit, match="--visual profile needs a pre-authorized profile, and lab isn't"):
+        rig.main(["--hold", "hue", *VISUAL_PROFILE, "--", "true"])
+    assert seen == []
+    assert ProbeHA.calls == []
     assert not blocked(probe, claim("hue", ha="exclusive"))
 
 
