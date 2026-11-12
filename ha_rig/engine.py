@@ -83,10 +83,6 @@ UNRESTORED = "+unrestored"  # appended to a case's journal key for the entities 
 OPTIONS_RELOAD_S = 1.0
 # The step of DeviceSide's options menu that holds its options.
 SETTINGS_STEP = "settings"
-# DeviceSide's Experimental features option (its const.py CONF_EXPERIMENTAL), which every run turns on (EntryOptions):
-# a flagged item's case then tests its call rather than the experimental_off refusal, and the option never changes
-# how an unflagged item behaves.
-EXPERIMENTAL = "experimental_features"
 
 # Actions whose calls leave a prediction behind (SETTLE_S): the raises and lowers, which run for up to their
 # sweep_time (default: actions/ramp.py DEFAULT_SWEEP_TIME), and stop.
@@ -904,11 +900,10 @@ def in_head(case: Case, profile: Profile) -> bool:
 
 
 class EntryOptions:
-    """DeviceSide's config entry on the rig, on the admin connection: its options, Experimental features turned on
-    for the run (EXPERIMENTAL) and the rest set for each case, through the entry's options flow, and put back when
-    the run ends, and the reloads, disables and enables of entry steps. Saving a change reloads the entry. The
-    original options are journaled before the first save, and the entry as `entry` before it is disabled, until it is
-    enabled again."""
+    """DeviceSide's config entry on the rig, on the admin connection: its options, set for each case through the
+    entry's options flow and put back when the run ends, and the reloads, disables and enables of entry steps. Saving
+    a change reloads the entry. The original options are journaled before the first save, and the entry as `entry`
+    before it is disabled, until it is enabled again."""
 
     def __init__(
         self, admin: HAClient, reload_s: float | None = None, journal: Journal | None = None, reloads: bool = True
@@ -976,8 +971,8 @@ class EntryOptions:
             with contextlib.suppress(Exception):
                 await self.admin.rest("delete", flow_path)
             raise RuntimeError(
-                f"DeviceSide's options in HA differ from this run's ({wanted}), and saving them reloads the entry "
-                "under other runs; this run holds HA shared. Set them in HA, or run the suite alone with an "
+                f"DeviceSide's options in HA differ from this case's ({wanted}), and saving them reloads the entry "
+                "under other runs; this run holds HA shared. Set them back in HA, or run the suite alone with an "
                 "option step file, which takes HA exclusively"
             )
         values |= wanted
@@ -2217,8 +2212,6 @@ async def run(
                 await admin.watch_z2m_busy()
             except Exception as err:  # noqa: BLE001 - without it a BUSY fails a case as it did before
                 out(f"Z2M's BUSY refusals aren't watched: {err}")
-        if rig_run.entry_options is not None and planned:
-            await rig_run.entry_options.apply({EXPERIMENTAL: True})
         waiting = await rig_run.all_automated([(suite, client, cases_) for suite, _, client, cases_ in planned])
         await rig_run.observed(waiting)
     finally:

@@ -16,7 +16,6 @@ from ha_rig import engine
 from ha_rig.bridge import BridgeError
 from ha_rig.client import HAError
 from ha_rig.engine import (
-    EXPERIMENTAL,
     CaseResult,
     Outcome,
     RunResult,
@@ -1769,7 +1768,7 @@ class Z2MHA(FakeHA):
 
     def __init__(self, respond: Callable):
         super().__init__({"light.bulb": {}}, respond)
-        self.device_options: dict = {}
+        self.options: dict = {}
 
     async def command(self, payload: dict):
         if payload["type"] == "config/entity_registry/get":
@@ -1780,10 +1779,10 @@ class Z2MHA(FakeHA):
 
     async def set_z2m_device_options(self, ieee: str, options: dict) -> None:
         self.calls.append(("z2m", "options", {"id": ieee, **options}))
-        self.device_options.update(options)
+        self.options.update(options)
 
     async def z2m_device_options(self, ieee: str) -> dict:
-        return dict(self.device_options)
+        return dict(self.options)
 
     async def z2m_device(self, ieee: str) -> dict:
         return {"ieee_address": ieee}
@@ -1795,7 +1794,7 @@ def native_control(turns_it_on: bool) -> Callable:
         if action == "get_attributes":
             return {}
         if turns_it_on:
-            ha.device_options["hue_native_control"] = True
+            ha.options["hue_native_control"] = True
         return timer_on(ha, action, data)
 
     return respond
@@ -1820,11 +1819,11 @@ async def test_expect_z2m_option_fails_when_the_option_stays_off(tmp_path):
 
 async def test_a_failed_case_still_puts_the_option_back(tmp_path):
     ha = Z2MHA(native_control(turns_it_on=False))
-    ha.device_options = {"hue_native_control": True}
+    ha.options = {"hue_native_control": True}
     steps = suite(tmp_path, Z2M_COLOR, "zigbee2mqtt")
     result = await run_one(ha, steps, profile("zigbee2mqtt", light_color="light.bulb"), admin=ha)
     assert outcomes(result)["color_then_off[light_color]"][0] is Outcome.FAIL
-    assert ha.device_options == {"hue_native_control": True}
+    assert ha.options == {"hue_native_control": True}
     assert ha.calls[-1] == ("z2m", "options", {"id": "0x0017880100000001", "hue_native_control": True})
 
 
@@ -1840,11 +1839,8 @@ async def test_z2m_option_steps_do_nothing_in_another_integrations_suite(tmp_pat
 
 async def test_a_light_without_a_z2m_device_fails_the_step(tmp_path):
     ha = Z2MHA(timer_on)
-    command = ha.command
 
     async def no_device(payload):
-        if payload["type"] == "config_entries/get":
-            return await command(payload)
         return {"entity_id": "light.bulb", "device_id": None} if payload["type"] == "config/entity_registry/get" else []
 
     ha.command = no_device
@@ -1896,15 +1892,9 @@ async def test_each_suite_runs_with_its_options_and_the_rig_gets_its_own_back(tm
     )
 
     assert not result.failed
-    assert respond.seen == [
-        {"opt": False, "other": False, "experimental_features": True},
-        {"opt": True, "other": False, "experimental_features": True},
-    ]
-    assert admin.options == {"opt": True, "other": False, "experimental_features": True}  # as the rig had them
-    assert admin.saved == [
-        {"opt": False, "other": False, "experimental_features": True},
-        {"opt": True, "other": False, "experimental_features": True},
-    ]
+    assert respond.seen == [{"opt": False, "other": False}, {"opt": True, "other": False}]
+    assert admin.options == {"opt": True, "other": False}  # as the rig had them
+    assert admin.saved == [{"opt": False, "other": False}, {"opt": True, "other": False}]
     assert [suite_result.suite.name for suite_result in result.suites] == ["raise_brightness", "raise_brightness-opt"]
     records = [render_record(each, "Fake", "2026.10.1", [], "2026-10-25", "test") for each in result.suites]
     assert ["| Options | opt |" in record for record in records] == [False, True]
@@ -1929,50 +1919,6 @@ async def test_options_already_in_force_are_not_saved(tmp_path, monkeypatch):
     assert not result.failed
     assert admin.saved == []
     assert admin.aborted == 1
-
-
-def experimental_off(seen: list[bool]) -> FakeHA:
-    """A rig whose DeviceSide has Experimental features off, recording the option at each turn_on_for call."""
-
-    def respond(ha, action, data):
-        seen.append(ha.options[EXPERIMENTAL])
-        return timer_on(ha, action, data)
-
-    ha = FakeHA({"switch.plug": {}}, respond)
-    ha.options = {EXPERIMENTAL: False}
-    return ha
-
-
-async def test_every_run_turns_experimental_features_on_for_its_cases(tmp_path, monkeypatch):
-    # Even a suite whose adapter has no options: a flagged item's case then tests its call, not the refusal.
-    monkeypatch.setattr(engine, "OPTIONS_RELOAD_S", 0)
-    seen: list[bool] = []
-    ha = experimental_off(seen)
-    result = await run_one(ha, suite(tmp_path, ON_THEN_OFF), profile("shelly", switch_plug="switch.plug"), admin=ha)
-    assert not result.failed
-    assert seen == [True]
-
-
-async def test_a_run_puts_the_households_experimental_features_back_after(tmp_path, monkeypatch):
-    monkeypatch.setattr(engine, "OPTIONS_RELOAD_S", 0)
-    journal = Journal(tmp_path / "journal.json")
-    ha = experimental_off([])
-    steps = suite(tmp_path, ON_THEN_OFF)
-    await run_one(ha, steps, profile("shelly", switch_plug="switch.plug"), admin=ha, journal=journal)
-    assert ha.saved == [{EXPERIMENTAL: True}, {EXPERIMENTAL: False}]
-    assert ha.options == {EXPERIMENTAL: False}
-    assert journal.get("options") is None
-
-
-async def test_a_run_holding_ha_shared_refuses_to_turn_experimental_features_on(tmp_path):
-    # Saving it would reload the entry under the other runs.
-    ha = experimental_off(seen := [])
-    with pytest.raises(RuntimeError, match="this run holds HA shared"):
-        await run_one(
-            ha, suite(tmp_path, ON_THEN_OFF), profile("shelly", switch_plug="switch.plug"), admin=ha, reloads=False
-        )
-    assert seen == []
-    assert ha.saved == []
 
 
 async def test_the_journal_holds_each_change_before_it_is_made_and_is_gone_after_the_run(tmp_path, monkeypatch):
@@ -2006,7 +1952,7 @@ async def test_the_journal_holds_each_change_before_it_is_made_and_is_gone_after
     )
 
     assert not result.failed
-    original = {"opt": True, "other": False, "experimental_features": True}
+    original = {"opt": True, "other": False}
     assert seen == [
         ("save", original),
         ("turn_off", ["light.a"]),
@@ -2045,7 +1991,7 @@ async def test_a_run_cancelled_mid_case_puts_back_and_clears_its_journal(tmp_pat
         await task
 
     assert admin.states["light.a"] == {"entity_id": "light.a", "state": "on", "attributes": {"brightness": 200}}
-    assert admin.options == {"opt": True, "other": False, "experimental_features": True}
+    assert admin.options == {"opt": True, "other": False}
     assert not journal.path.exists()
 
 
@@ -2066,8 +2012,8 @@ async def test_a_save_the_flow_refuses_closes_the_flow_and_raises():
 async def test_options_are_read_and_saved_through_the_menus_settings_step():
     admin = FakeAdmin({})
     await engine.EntryOptions(admin, reload_s=0).apply({"opt": False})
-    assert admin.saved == [{"opt": False, "other": False, "experimental_features": True}]
-    assert admin.options == {"opt": False, "other": False, "experimental_features": True}
+    assert admin.saved == [{"opt": False, "other": False}]
+    assert admin.options == {"opt": False, "other": False}
 
 
 async def test_a_menu_without_settings_closes_the_flow_and_raises():
