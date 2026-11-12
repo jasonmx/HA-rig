@@ -21,9 +21,11 @@ Tests-with: the deviceside PR for step 2 (runtime), which removes the events.
    reads deviceside's layout directly, so the rig no longer loads `check_release.py`.
 3. **The ledger** (`progress.py`) only resumes an interrupted run: entries keyed by suite, commit and step-file digest
    (the digest goes once the step files move into deviceside), no firmware-fact ledger, no traces or scopes.
-4. **Opt-in cases.** `--observed` and `--facts` add observed cases and `firmware_fact` tests; a default run skips each
-   with how to ask for it. Their results go to an append-only `_facts.md` per integration (owner, 2026-11-12), never
-   into a record, which lists them as skipped and quotes the latest row on file. No hashing, lending or blocking.
+4. **Fact tests** (owner, 2026-11-12): a test with `firmware_fact: true`, an `observe:` block or both. `--facts`
+   runs it whole, automated and watched parts; a default run skips each of its cases with how to ask for it. Its
+   results go to an append-only `_facts.md` per integration, kind `automated` or `observed`, never into a record,
+   which lists them as skipped and quotes the latest row on file. No hashing, lending or blocking. One-off probes are
+   no rig tests: they live in deviceside research files.
 5. **Records** need every default case that applies to pass (owner, 2026-11-12), with a `Ran` row.
 6. **Z2M BUSY** windows come from the rig's own call-step times, on the admin connection's Z2M log feed.
 

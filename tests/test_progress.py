@@ -222,7 +222,7 @@ def test_resume_drops_a_suite_with_a_saved_failure_or_when_fresh(tmp_path):
 
 
 def test_a_saved_skip_holds_only_for_the_same_reason_and_not_observed_only_unattended():
-    why = "observed: runs with --observed"
+    why = "fact test: runs with --facts"
     skipped = ran(planned(), Outcome.SKIPPED, why)
     assert holds(planned(skip=why), skipped, False)
     assert not holds(planned(), skipped, False)  # asked for now: it runs
@@ -230,10 +230,49 @@ def test_a_saved_skip_holds_only_for_the_same_reason_and_not_observed_only_unatt
     assert holds(planned(), unwatched, True) and not holds(planned(), unwatched, False)
 
 
-def test_the_run_key_is_the_commit_and_the_step_files_digest(tmp_path):
+def test_the_run_key_is_the_commit_and_the_step_files_digest_taken_at_load(tmp_path):
     path = tmp_path / "steps.yaml"
     path.write_text(SUITE.file.path.read_text())
     copy = Suite(load_step_file(path), "shelly")
-    assert run_key("c1", copy) == run_key("c1", SUITE) and run_key("c1", copy).startswith("c1:")
+    assert run_key("c1", copy) == run_key("c1", SUITE) == f"c1:{SUITE.file.digest}"
     path.write_text(path.read_text() + "# edited\n")
-    assert run_key("c1", copy) != run_key("c1", SUITE)
+    assert run_key("c1", copy) == run_key("c1", SUITE)  # as loaded: a run's key holds while it runs
+    assert run_key("c1", Suite(load_step_file(path), "shelly")) != run_key("c1", SUITE)
+
+
+FACT_FILE = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: plain
+    roles: [switch_plug]
+    steps:
+      - wait: 0
+  - name: wins
+    roles: [switch_plug]
+    firmware_fact: true
+    steps:
+      - wait: 0
+"""
+
+
+def test_a_fact_tests_failure_never_drops_the_suite(tmp_path):
+    (path := tmp_path / "steps.yaml").write_text(FACT_FILE)
+    suite = Suite(load_step_file(path), "shelly", facts=True)
+    progress = loaded(tmp_path, "c1", "2026.10.1", suite)
+    passed = CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
+    progress.record(suite, passed)
+    progress.record(
+        suite, CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.FAIL, "x", ("switch.plug",))
+    )
+    assert progress.drop_failed() == []
+    again = Progress.load(tmp_path, "lab")
+    planned = [Case(suite, test, "switch_plug", {"switch_plug": "switch.plug"}) for test in suite.file.tests]
+    again.resume(suite, "c1", planned)
+    assert set(again.saved(suite)) == {"plain[switch_plug]", "wins[switch_plug]"}  # resumed, the fact's fail kept
+    progress.record(suite, replace_failed(passed))
+    assert progress.drop_failed() == [("shelly", "turn_on_for")]  # a default case's failure does
+
+
+def replace_failed(result: CaseResult) -> CaseResult:
+    return CaseResult(result.id, result.role, result.domain, Outcome.FAIL, "x", result.entity_ids)

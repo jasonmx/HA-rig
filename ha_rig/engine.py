@@ -11,6 +11,7 @@ import ast
 import asyncio
 import contextlib
 import datetime
+import hashlib
 import logging
 import operator
 import re
@@ -27,7 +28,7 @@ import yaml
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
 from .client import HAClient, HAError, device_ieee
-from .facts import FAIL, FIRMWARE_FACT, PASS, Fact, FactsFile
+from .facts import AUTOMATED, FAIL, PASS, Fact, FactsFile, append
 from .facts import FILE as FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
@@ -67,12 +68,10 @@ COORDINATOR_BUSY = "coordinator busy"
 SETUP_SETTLE_S = 2.0
 NOT_SEEN = "not seen: "  # an observed case's failure detail when the person saw something else
 
-# The cases a default run leaves out, and the option that asks for them (Suite.opt_in): an observed case needs
-# someone at the rig, and a firmware fact's result stands as written down until evidence contradicts it. Either's
-# result goes to the integration's _facts.md (ha_rig/facts.py), never into a record.
-OBSERVED, FACTS = "observed", "facts"
-OPT_IN = {OBSERVED: "--observed", FACTS: "--facts"}
-OPTED_OUT = {OBSERVED: "observed: runs with --observed", FACTS: "firmware fact: runs with --facts"}  # skips
+# A fact test (RigTest.fact) finds a fact, whose result stands as written down until evidence contradicts it, so a
+# default run leaves every case of it out; --facts (Suite.facts) runs it whole, its automated and watched parts. Its
+# results go to the integration's _facts.md (ha_rig/facts.py), never into a record.
+OPTED_OUT = "fact test: runs with --facts"  # the skip detail of a fact test's case in a default run
 
 # ZCL Color Control's hue attributes, which bulb_hue reads on ZHA.
 _COLOR_CLUSTER, _CURRENT_HUE, _ENHANCED_CURRENT_HUE = 0x0300, 0x0000, 0x4000
@@ -202,9 +201,14 @@ class RigTest:
     steps: tuple[Step, ...]
     setup: tuple[Step, ...] = ()
     observe: Observe | None = None
-    # A device behavior (precedence, bounds, timing) rather than the adapter's code: its result stands as a fact in
-    # _facts.md, so it runs only when asked (--facts). Never with `observe`: a test is one kind of opt-in or the other.
+    # A device behavior (precedence, bounds, timing) rather than the adapter's code: one kind of fact test (`fact`).
     firmware_fact: bool = False
+
+    @property
+    def fact(self) -> bool:
+        """Whether it is a fact test: a firmware fact, or one a person watches (`observe`), or both. Its every case
+        runs only with --facts, and its results are facts for _facts.md, not a record's."""
+        return self.firmware_fact or self.observe is not None
 
     @property
     def automated(self) -> bool:
@@ -251,6 +255,8 @@ class StepFile:
     expected_log: tuple[re.Pattern[str], ...] = ()
     # The name its record takes in place of the action's, for a file that tests something else through it (lifecycle).
     name: str | None = None
+    # A hash of the file as read, for the ledger's key (progress.run_key).
+    digest: str = ""
 
     @property
     def roles(self) -> tuple[str, ...]:
@@ -529,8 +535,6 @@ def _parse_test(raw: Any) -> RigTest:
             raise ValueError("only must be a non-empty list of integration keys")
         if not isinstance(firmware_fact := raw.get("firmware_fact", False), bool):
             raise ValueError("firmware_fact must be true or false")
-        if firmware_fact and "observe" in raw:
-            raise ValueError("a firmware_fact test can't also observe: make the observed part its own test")
         steps, setup, observe = _parse_phases(raw)
         test = RigTest(name, tuple(roles), frozenset(only) if only else None, steps, setup, observe, firmware_fact)
         _check_observe_scope(test)
@@ -596,7 +600,8 @@ def load_step_file(path: Path) -> StepFile:
         tests = tuple(_parse_test(test) for test in raw_tests)
         if duplicates := sorted({t.name for t in tests if [u.name for u in tests].count(t.name) > 1}):
             raise ValueError(f"duplicate test name(s) {', '.join(duplicates)}")
-        step_file = StepFile(path, action, seconds, tests, frozenset(options), expected_log)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        step_file = StepFile(path, action, seconds, tests, frozenset(options), expected_log, digest=digest)
         step_file = _named(step_file, raw.get("name"))
     except (ValueError, yaml.YAMLError) as err:
         raise SchemaError(f"{path.name}: {err}") from None
@@ -638,12 +643,11 @@ def load_step_files(steps_dir: Path = STEPS_DIR) -> list[StepFile]:
 
 @dataclass(frozen=True, slots=True)
 class Suite:
-    """One step file on one integration, and the cases a default run leaves out that this run asked for: OBSERVED,
-    FACTS."""
+    """One step file on one integration; `facts` when the run asked for its fact tests (--facts)."""
 
     file: StepFile
     integration: str
-    opt_in: frozenset[str] = frozenset()
+    facts: bool = False
 
     @property
     def action(self) -> str:
@@ -679,7 +683,8 @@ class Case:
     # narrow what an earlier profile proved.
     absent: bool = False
     # The skip is for a case that doesn't apply here: the role is not in the profile (absent), a group lacks the
-    # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult).
+    # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult), and
+    # never narrows to them (narrows).
     inapplicable: bool = False
 
     @property
@@ -726,7 +731,7 @@ def cases(
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
     ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped, and
-    so is an observed case or a firmware fact the suite didn't opt in to (`opt_out`)."""
+    so is a fact test's case the suite didn't opt in to (`opt_out`)."""
     result = []
     for test in suite.file.tests:
         if not test.runs_on(suite.integration):
@@ -763,12 +768,9 @@ def cases(
 
 
 def opt_out(case: Case) -> str | None:
-    """Why a default run leaves the case out, or None: an observed case or a firmware fact its suite didn't opt in to.
-    It is skipped, with no entities, so it moves and locks nothing, and its record shows it wasn't run."""
-    kind = OBSERVED if case.observed else FACTS if case.test.firmware_fact else None
-    if kind is None or kind in case.suite.opt_in:
-        return None
-    return OPTED_OUT[kind]
+    """Why a run leaves the case out, or None: a fact test's case, its automated part or its watched part, in a run
+    without --facts. It is skipped, with no entities, so it moves and locks nothing."""
+    return OPTED_OUT if case.test.fact and not case.suite.facts else None
 
 
 def unreachable(case: Case, profile: Profile) -> str | None:
@@ -2437,13 +2439,9 @@ def _result_cell(suite: Suite, case: CaseResult, details: bool) -> str:
     return str(Outcome.SKIPPED if opt_in(suite, case.id) else case.outcome)
 
 
-def _firmware_fact(suite: Suite, case_id: str) -> bool:
-    return (test := suite.test(case_id)) is not None and test.firmware_fact
-
-
 def opt_in(suite: Suite, case_id: str) -> bool:
-    """Whether the case is one a default run skips: an observed case, or a firmware fact."""
-    return case_id.endswith(" observed") or _firmware_fact(suite, case_id)
+    """Whether the case is a fact test's, which a default run skips (RigTest.fact)."""
+    return (test := suite.test(case_id)) is not None and test.fact
 
 
 @dataclass(frozen=True, slots=True)
@@ -2517,9 +2515,10 @@ class Record:
 
 
 def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[str]:
-    """The IDs of the cases `record` passed that the profile skips for lacking the role: a record with these
-    rewritten would lose what an earlier profile proved."""
-    return sorted(case.id for case in cases if record and case.absent and case.id in record.passed)
+    """The IDs of the cases `record` passed that this profile skips as not applying (Case.inapplicable: a role it
+    lacks, a group without the light, no adapter): a record with these rewritten would lose what an earlier profile
+    proved."""
+    return sorted(case.id for case in cases if record and case.inapplicable and case.id in record.passed)
 
 
 def render_record(
@@ -2551,11 +2550,11 @@ def render_record(
     if chosen := [case.id for case in suite_result.cases if opt_in(suite, case.id)]:
         lines += [
             "",
-            f"Observed tests and firmware facts run only when asked ({OPT_IN[OBSERVED]}, {OPT_IN[FACTS]}), and their "
-            f"results go to [`{FACTS_FILE}`]({FACTS_FILE}), never here:",
+            f"Fact tests run only when asked (--facts), and their results go to [`{FACTS_FILE}`]({FACTS_FILE}), "
+            "never here:",
             "",
         ]
-        on_file = facts or FactsFile("")
+        on_file = facts or FactsFile()
         lines += [f"- `{case_id}`: {on_file.latest(case_id) or 'none on file'}" for case_id in chosen]
     return "\n".join(lines) + "\n"
 
@@ -2590,9 +2589,9 @@ async def write_records(
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
     in its integration's directory of `into` (a run's staging, ha_rig/staging.py), else of `records`.
 
-    A record never narrows: where the profile lacks a role (an `absent` skip) for a case the existing record passed,
-    the file in `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To
-    narrow on purpose, delete the record."""
+    A record never narrows: where a case the existing record passed doesn't apply to this profile (an inapplicable skip:
+    a role it lacks, a group without the light), the file in `records` stays as it is, and the suite is `kept` with
+    those case IDs (its `records` path). To narrow on purpose, delete the record."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2606,7 +2605,7 @@ async def write_records(
             continue
         path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        facts = FactsFile.read(records(suite.integration) / FACTS_FILE, title)
+        facts = FactsFile.read(records(suite.integration) / FACTS_FILE)
         record = render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts)
         path.write_text(record)
         written.append(path)
@@ -2622,24 +2621,26 @@ def observed_answer(case: CaseResult) -> bool:
 
 
 def fact_kind(suite: Suite, case: CaseResult) -> str | None:
-    """The kind of fact the result is for _facts.md, or None: an observed case a person answered, or a firmware fact
-    that passed or failed."""
+    """How a fact test's result was seen, for _facts.md, or None for no fact: `observed` for a watched part a person
+    answered, `automated` for an automated part that passed or failed."""
     if case.id.endswith(" observed"):
         return OBSERVED_KIND if observed_answer(case) else None
-    if _firmware_fact(suite, case.id) and case.outcome in (Outcome.PASS, Outcome.FAIL):
-        return FIRMWARE_FACT
+    if opt_in(suite, case.id) and case.outcome in (Outcome.PASS, Outcome.FAIL):
+        return AUTOMATED
     return None
 
 
 def write_fact(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
-    """Append what one opt-in case found to its integration's _facts.md in `records`, dated now: each row is written
-    once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None for a result
-    that is no fact (fact_kind), or whose devices couldn't be read."""
+    """Append what one fact test's case found to its integration's _facts.md in `records`, dated now: each row is
+    written once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None for a
+    result that is no fact (fact_kind), or whose devices couldn't be read."""
     if (kind := fact_kind(suite, case)) is None or not case.devices:
         return None
     path = records(suite.integration) / FACTS_FILE
-    facts = FactsFile.read(path, registry.integrations[suite.integration].title)
     result = PASS if case.outcome is Outcome.PASS else FAIL
-    facts.add([Fact(date, case.id, kind, "; ".join(map(str, case.devices)), result)])
-    facts.write(path)
+    append(path, registry.integrations[suite.integration].title, Fact(date, case.id, kind, _devices(case), result))
     return path
+
+
+def _devices(case: CaseResult) -> str:
+    return "; ".join(map(str, case.devices))

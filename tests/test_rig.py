@@ -1391,7 +1391,9 @@ def test_an_edited_step_file_starts_its_suite_afresh(tmp_path, monkeypatch):
     setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
     assert setup.done
     profile, suites = resumable(tmp_path)
-    (tmp_path / "steps.yaml").write_text(TWO_SUITES + "# edited\n")  # the run key reads it at the plan
+    assert planned(tmp_path, monkeypatch, suites, profile).done  # the same file: it resumes
+    edited = load_step_file(write(tmp_path, "steps.yaml", TWO_SUITES + "# edited\n"))  # its digest, taken at load
+    suites = [rig.Suite(edited, suite.integration) for suite in suites]
     assert not planned(tmp_path, monkeypatch, suites, profile).done
 
 
@@ -1681,16 +1683,8 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     assert {call[2].get("entity_id") for call in ha.calls if call[0] == "light"} == {"light.b"}
 
 
-@pytest.mark.parametrize(
-    ("flags", "opt_in"),
-    [
-        ([], set()),
-        (["--observed"], {"observed"}),
-        (["--facts"], {"facts"}),
-        (["--observed", "--facts"], {"observed", "facts"}),
-    ],
-)
-def test_observed_and_facts_opt_each_selected_suite_in(flags, opt_in, monkeypatch):
+@pytest.mark.parametrize(("flags", "facts"), [([], False), (["--facts"], True), (["--facts", "--unattended"], True)])
+def test_facts_opts_each_selected_suite_in(flags, facts, monkeypatch):
     seen = []
 
     def capture(args):
@@ -1700,14 +1694,20 @@ def test_observed_and_facts_opt_each_selected_suite_in(flags, opt_in, monkeypatc
 
     monkeypatch.setattr(rig, "wait_or_run", capture)
     assert rig.main(["--dry-run", "--integration", "shelly", "--action", "set_auto_off", *flags]) == 0
-    assert seen and {suite.opt_in for suite in seen} == {frozenset(opt_in)}
+    assert seen and {suite.facts for suite in seen} == {facts}
 
 
 @pytest.mark.parametrize("mode", [["--recover"], ["--roam-check"], ["--wait-free"]])
-def test_observed_and_facts_are_for_a_run_or_check(mode, capsys):
+def test_facts_is_for_a_run_or_check(mode, capsys):
     with pytest.raises(SystemExit):
-        rig.main([*mode, "--observed"])
-    assert "--observed and --facts are for a test run or --check" in capsys.readouterr().err
+        rig.main([*mode, "--facts"])
+    assert "--facts is for a test run or --check" in capsys.readouterr().err
+
+
+def test_observed_is_gone(capsys):
+    with pytest.raises(SystemExit):
+        rig.main(["--dry-run", "--observed"])
+    assert "unrecognized arguments: --observed" in capsys.readouterr().err
 
 
 def test_a_signal_stops_a_run_with_progress_resumable(capsys):
@@ -1906,7 +1906,7 @@ def watched(passed: bool) -> engine.CaseResult:
 
 
 def observed_rows(records) -> list[tuple[str, str]]:
-    return [(row.date, row.result) for row in facts.FactsFile.read(records("shelly") / "_facts.md", "").rows]
+    return [(row.date, row.result) for row in facts.FactsFile.read(records("shelly") / "_facts.md").rows]
 
 
 def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_then(tmp_path, monkeypatch, capsys):
@@ -1927,9 +1927,9 @@ def test_a_report_leaves_a_rows_date_alone(tmp_path, monkeypatch):
     assert observed_rows(records) == [("2026-01-01", "pass")]
 
 
-def test_a_pass_and_a_fail_the_same_day_are_both_kept(tmp_path, monkeypatch):
+def test_each_answer_appends_a_row_even_the_same_one_again(tmp_path, monkeypatch):
     on_result, suite, records = observing_run(tmp_path, monkeypatch)
     on_result(suite, watched(False))
     on_result(suite, watched(True))
-    on_result(suite, watched(True))  # the same row again adds nothing
-    assert [result for _, result in observed_rows(records)] == ["fail", "pass"]
+    on_result(suite, watched(True))  # each case ends once: another row is another answer
+    assert [result for _, result in observed_rows(records)] == ["fail", "pass", "pass"]

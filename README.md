@@ -20,10 +20,9 @@ cd ../deviceside && ../ha-rig/scripts/rig.py --dry-run
 ```text
 usage: rig.py [-h] [--profile PROFILE] [--dry-run] [--check] [--no-deploy]
               [--integration {hue,matter,shelly,zha,zigbee2mqtt}] [--action ACTION] [-k KEYWORD]
-              [--observed] [--facts] [--unattended] [--serial] [--debug-logs] [--deploy-only]
-              [--for DURATION] [--fresh] [--ignore-unreachables] [--recover] [--promote DIR]
-              [--roam-check] [--wait-free] [--hold INTEGRATION] [--exclusive]
-              [--visual {none,profile}]
+              [--facts] [--unattended] [--serial] [--debug-logs] [--deploy-only] [--for DURATION]
+              [--fresh] [--ignore-unreachables] [--recover] [--promote DIR] [--roam-check]
+              [--wait-free] [--hold INTEGRATION] [--exclusive] [--visual {none,profile}]
 
 Run the rig tests against the live HA, behind an authorization gate.
 
@@ -39,11 +38,10 @@ options:
                         limit to an integration key (repeatable); with --wait-free, wait for it
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
-  --observed            also run the observed tests, which ask the person at the rig what they
-                        saw, for _facts.md
-  --facts               also run the firmware facts, which prove how a device behaves; their
-                        results stand in _facts.md
-  --unattended          ask no one: with --observed, the observed tests are reported not observed
+  --facts               also run the fact tests, automated and watched parts, which a default run
+                        skips; their results go to _facts.md
+  --unattended          ask no one: with --facts, the watched parts are reported not observed, and
+                        the automated ones run
   --serial              run every case one at a time, with no lanes: to tell a case that fails in
                         a lane from one that fails
   --debug-logs          run HA's DeviceSide and the run's integrations, and Z2M, at debug, and
