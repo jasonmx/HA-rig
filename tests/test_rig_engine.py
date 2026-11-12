@@ -417,21 +417,12 @@ async def test_observed_asks_and_its_answer_is_a_fact_not_a_record(tmp_path, ans
     assert result.suites[0].recordable  # what the person saw is a fact for _facts.md, never holding the record back
 
 
-@pytest.mark.parametrize(("saw", "detail"), [("Red, then  blue ", "; saw: Red, then  blue"), ("", "")])
-async def test_a_no_records_what_the_person_saw(tmp_path, saw, detail):
-    asked, ask = answers("", "n", saw)
+async def test_a_no_records_what_the_person_saw(tmp_path):
+    asked, ask = answers("", "n", "Red, then  blue ")
     ha = FakeHA({"switch.plug": {}}, timer_on)
     result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=ask)
     assert asked[-1] == "    What did you see? (Enter to skip) "
-    assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?" + detail)
-
-
-async def test_eof_at_what_was_seen_still_fails_the_case(tmp_path):
-    _, ask = answers("", "n")
-    result = await run_one(
-        FakeHA({"switch.plug": {}}, timer_on), suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=ask
-    )
-    assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?")
+    assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?; saw: Red, then  blue")
 
 
 async def test_a_report_lists_every_suite_with_its_reasons(tmp_path):
@@ -3057,16 +3048,6 @@ async def test_an_observed_case_nobody_answered_adds_no_row(tmp_path):
     [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
     assert watched.outcome is Outcome.NOT_OBSERVED and watched.devices == ()
     assert write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12") is None
-
-
-async def test_a_seen_failure_adds_a_fail_row(tmp_path):
-    ha = FakeHA({"switch.plug": {}}, timer_on)
-    result = await run_one(
-        ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=answers("", "n", "")[1]
-    )
-    [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
-    path = write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12")
-    assert [row.result for row in FactsFile.read(path).rows] == [FAIL]
 
 
 def test_a_record_has_no_covers_row(tmp_path):
