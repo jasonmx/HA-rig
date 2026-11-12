@@ -24,19 +24,10 @@ _spec.loader.exec_module(rig)
 FUTURE = "2999-01-01 00:00:00.000"
 
 
-class LoggedHA(fakes.FakeHA):
-    async def close(self):
-        pass
-
-
 @pytest.fixture
-def ha(monkeypatch, tmp_path) -> LoggedHA:
-    ha = LoggedHA({})
-
-    async def connect(env):
-        return ha, ha
-
-    monkeypatch.setattr(rig, "connect", connect)
+def ha(monkeypatch, tmp_path) -> fakes.FakeHA:
+    ha = fakes.FakeHA({})
+    monkeypatch.setattr(rig, "connect", fakes.connected(ha))
     monkeypatch.setattr(rig, "REPORT_DIR", tmp_path / "reports")
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: directory / "report.md")
     ha.ha_log = f"2000-01-01 00:00:00.000 INFO before the run\n{FUTURE} ERROR in the run\nTraceback: boom\n"
@@ -50,7 +41,7 @@ def suites(tmp_path: Path, *integrations: str, expected_log: str = "") -> list[r
     return [rig.Suite(load_step_file(path), integration) for integration in integrations]
 
 
-def phases(monkeypatch, ha: LoggedHA, crash: bool = False, during=None):
+def phases(monkeypatch, ha: fakes.FakeHA, crash: bool = False, during=None):
     """engine.run as a recorder of what `during` sees; Z2M logs two lines in it, and it crashes if asked."""
 
     async def run(phase_suites, *args, **kwargs):

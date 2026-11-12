@@ -7,7 +7,7 @@ from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestServer
 
 from ha_rig.client import HAClient, HAError, Z2MRemoveError, device_ieee
-from tests.rig_fakes import FakeBridge, FakeHA
+from tests.rig_fakes import FakeBridge, FakeHA, ws_handshake
 
 IEEE = "0x001788010abcdef0"
 ZHA_IEEE = "00:17:88:01:0a:bc:de:f0"
@@ -23,11 +23,7 @@ async def wire(socket_enabled):
     seen: list[dict] = []
 
     async def websocket(request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.send_json({"type": "auth_required"})
-        await ws.receive_json()
-        await ws.send_json({"type": "auth_ok"})
+        ws = await ws_handshake(request)
         async for message in ws:
             if message.type != WSMsgType.TEXT:
                 break

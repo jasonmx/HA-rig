@@ -14,7 +14,7 @@ from ha_rig.journal import Journal
 from ha_rig.profile import Profile, normalize_ieee
 from ha_rig.roam import Roamer, RoamError
 from scripts import check_private
-from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, LAB_OPTIONS, FakeBridge, FakeHA, Lab, lab_profile
+from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, LAB_OPTIONS, Lab, lab_profile, where
 
 A, B, OPTIONS, BULBS = LAB_A, LAB_B, LAB_OPTIONS, LAB_BULBS
 
@@ -26,18 +26,8 @@ def fast(monkeypatch):
         monkeypatch.setattr(client, name, value)
 
 
-@pytest.fixture
-def lab() -> Lab:
-    return Lab(FakeHA({}), FakeBridge(), {A: "light.lab_a", B: "light.lab_b"})
-
-
 def roamer(lab: Lab, journal: Journal | None = None, out=None) -> Roamer:
     return Roamer(lab.ha, lab.bridge, BULBS, journal, out=(out if out is not None else lambda _: None))
-
-
-async def where(lab: Lab) -> list[str | None]:
-    found = roamer(lab)
-    return [await found.locate(bulb) for bulb in BULBS]
 
 
 async def test_the_bulbs_move_together_round_the_cycle_keeping_their_entity_ids(lab):

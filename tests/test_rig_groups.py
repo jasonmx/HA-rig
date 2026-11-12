@@ -12,7 +12,7 @@ from ha_rig.engine import Suite, cases, load_step_file
 from ha_rig.journal import Journal
 from ha_rig.profile import Profile, RigEntity, RoamGroup
 from ha_rig.roam import Roamer, RoamError
-from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, FakeBridge, FakeHA, Lab, lab_profile
+from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, Lab, lab_profile
 
 A, B, BULBS = LAB_A, LAB_B, LAB_BULBS
 GROUP = RoamGroup("light.test_group", frozenset({"group"}), ("light.lab_a", "light.lab_b"), "scene.test_relax")
@@ -29,11 +29,6 @@ FIXED = ("light.test_group", "light.test_color_group")
 def fast(monkeypatch):
     monkeypatch.setattr(roam, "POLL_S", 0)
     monkeypatch.setattr(roam, "GONE_S", 0)
-
-
-@pytest.fixture
-def lab() -> Lab:
-    return Lab(FakeHA({}), FakeBridge(), {A: "light.lab_a", B: "light.lab_b"})
 
 
 def roamer(lab: Lab, journal: Journal | None = None, out=None, groups=(GROUP, COLOR)) -> Roamer:
