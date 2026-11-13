@@ -73,8 +73,8 @@ those on fixed groups whose members the profile doesn't list and on fixed scenes
 
 A run runs the suites it is asked for; what needs testing is deviceside's to say. --signoffs takes deviceside's list of
 the integrations still needing a sign-off (target.signoffs_needed) as the selection and runs each whole, as a sign-off
-is one whole passing run at one commit (so no --action or -k), naming those the profile lacks for a manual sign-off,
-and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
+is one whole passing run at one package tree (so no --action or -k), naming those the profile lacks for a manual
+sign-off, and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
 fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
 automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
 (ha_rig/progress.py), keyed by the suite and the commit, so one that stops part way, on a signal, the restricted sensor
@@ -2277,11 +2277,15 @@ async def report(
             "before the deploy, or uncommitted step files)."
         )
         return
+
+    def package_tree(integration: str) -> str:
+        return git("rev-parse", "--short=12", f"{commit}:{COMPONENT}/integrations/{integration}")
+
     source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, into=staging.test_records_dir
+        result, registry, checkout_records, today, source, into=staging.test_records_dir, package=package_tree
     )
     by_path = {
         staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites

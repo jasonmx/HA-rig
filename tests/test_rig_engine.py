@@ -1376,6 +1376,13 @@ async def test_a_full_pass_writes_a_record_and_a_failure_writes_none(tmp_path):
     [path], _ = await write_records(passed, REGISTRY, under(tmp_path / "test-records"), "2026-10-25", "rig run")
     assert path == tmp_path / "test-records" / "shelly" / "turn_on_for.md"
     record = path.read_text()
+    assert "| Package |" not in record  # no tree given
+
+    [with_tree], _ = await write_records(
+        passed, REGISTRY, under(tmp_path / "trees"), "2026-10-25", "rig run", package=lambda key: f"{key}tree"
+    )
+    rows = with_tree.read_text().splitlines()
+    assert rows[rows.index("| Source | rig run |") + 1] == "| Package | `shellytree` |"
     assert record.startswith("# Shelly · turn_on_for\n")
     assert "| Device | Mini (`S3`), firmware `2.0` |" in record
     assert "Profile" not in record
