@@ -157,7 +157,8 @@ def _drain(queue: asyncio.Queue[str] | None) -> list[str]:
 def _join(old: list[str], fresh: list[str]) -> list[str]:
     """The payloads of a replaced subscription (`old`) and its replacement (`fresh`), in order, each once. Every
     payload since the replacement went live reached both while the old one lasted, so the longest tail of `old` that
-    `fresh` starts with is the overlap; a payload that reached only one is kept."""
+    `fresh` starts with is the overlap; a payload that reached only one is kept. Z2M's log lines carry no time, so
+    two alike that straddle a subscription HA dropped mid-renewal read as one: the narrow cost of never doubling."""
     for overlap in range(min(len(old), len(fresh)), 0, -1):
         if old[-overlap:] == fresh[:overlap]:
             return old[:-overlap] + fresh
