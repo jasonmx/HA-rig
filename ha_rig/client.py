@@ -613,14 +613,22 @@ class HAClient:
         if Z2M_READ_KEY not in filtered:
             await self.set_z2m_device_options(ieee, {"filtered_cache": [*filtered, Z2M_READ_KEY]})
         async with self._mqtt_messages(f"zigbee2mqtt/{name}") as messages:
+            # Its retained state comes first, and is no answer: with Z2M's `retain` on, it holds the last read's reply.
+            # The wait also lets the broker take the subscription, which HA answers before it has.
+            await asyncio.sleep(Z2M_SETTLE_S)
+            while not messages.empty():
+                messages.get_nowait()
             read = {"cluster": "lightingColorCtrl", "attributes": ["currentHue"], "state_property": Z2M_READ_KEY}
             payload = json.dumps({"read": read})
             await self.call_service("mqtt", "publish", {"topic": f"zigbee2mqtt/{name}/set", "payload": payload})
             try:
                 async with asyncio.timeout(Z2M_ANSWER_S):
                     while True:
-                        reply = (json.loads(await messages.get()) or {}).get(Z2M_READ_KEY) or {}
-                        if isinstance(hue := reply.get("currentHue"), int | float):
+                        try:
+                            reply = json.loads(await messages.get()).get(Z2M_READ_KEY) or {}
+                        except ValueError, AttributeError:
+                            continue
+                        if isinstance(reply, dict) and isinstance(hue := reply.get("currentHue"), int | float):
                             return hue * 360 / Z2M_MAX_HUE
             except TimeoutError:
                 return None

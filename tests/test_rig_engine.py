@@ -2630,6 +2630,7 @@ async def test_expect_hue_travel_reads_the_z2m_bulbs_own_hue_not_has(tmp_path, m
     ha = FakeHA({"light.bulb": {"state": "on", "attributes": {"hs_color": [213, 99]}}}, respond)
     ha.join("zigbee2mqtt", ieee, "light.bulb")
     ha.z2m_hues[ieee[2:]] = 190.0
+    ha.z2m_retained_read = 0  # a stale reply, retained, which the read must not take
     if offline:
         ha.z2m_offline.add(ieee[2:])
     steps = suite(tmp_path, HUE_TRAVEL, "zigbee2mqtt")
