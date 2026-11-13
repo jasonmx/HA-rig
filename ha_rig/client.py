@@ -24,6 +24,10 @@ Z2M_CLOSE_TRIES = 3  # a close Z2M answers with an error (radio BUSY after a joi
 Z2M_CLOSE_RETRY_S = 5  # how long a close gets to show in bridge/info before it is sent again
 Z2M_ANSWER_S = 10  # for a device to answer a read through Z2M; no reply means it isn't there
 Z2M_SETTLE_S = 1.0  # after subscribing to a device's topic, for its retained state, which is no answer, to land
+# DeviceSide's key for a read's reply (its integrations/zigbee2mqtt/read.py READ_KEY), which it keeps in a device's
+# filtered_cache: the rig reads under it too, so it adds no option of its own to the household's Z2M.
+Z2M_READ_KEY = "deviceside_read"
+Z2M_MAX_HUE = 254  # CurrentHue's top, 0xFE
 Z2M_CRASH_WATCH_S = 30  # after a failed remove, for Z2M to go offline: its coordinator crashed
 Z2M_RESTART_S = 120  # for Z2M to come back online after a crash
 Z2M_LOGGING = f"{Z2M_TOPIC}/logging"
@@ -596,21 +600,28 @@ class HAClient:
                 return False
             return True
 
-    async def z2m_hue(self, name: str) -> float | None:
-        """The Z2M device `name`'s hue on its own wheel, in degrees, from a live color read (Z2M's `color.hue`, from
-        the bulb's EnhancedCurrentHue or CurrentHue); None if no reply with one comes within Z2M_ANSWER_S."""
+    async def z2m_hue(self, ieee: str, name: str) -> float | None:
+        """The Z2M device's CurrentHue on its own wheel, in degrees, from a live ZCL read; None if no reply comes
+        within Z2M_ANSWER_S. `name` is its friendly name.
+
+        It reads as DeviceSide does (its integrations/zigbee2mqtt/read.py): a `read` whose reply Z2M publishes under
+        Z2M_READ_KEY, a key kept out of Z2M's cache with the device's filtered_cache option, so only the read's own
+        reply carries it. Z2M's `color.hue` won't do: a report landing before the reply publishes the cached hue, which
+        after an xy set is the xy's, off the bulb's wheel (#75).
+        """
+        filtered = (await self.z2m_device_options(ieee)).get("filtered_cache") or []
+        if Z2M_READ_KEY not in filtered:
+            await self.set_z2m_device_options(ieee, {"filtered_cache": [*filtered, Z2M_READ_KEY]})
         async with self._mqtt_messages(f"zigbee2mqtt/{name}") as messages:
-            await asyncio.sleep(Z2M_SETTLE_S)  # its retained state comes first, and is no answer
-            while not messages.empty():
-                messages.get_nowait()
-            payload = json.dumps({"color": ""})
-            await self.call_service("mqtt", "publish", {"topic": f"zigbee2mqtt/{name}/get", "payload": payload})
+            read = {"cluster": "lightingColorCtrl", "attributes": ["currentHue"], "state_property": Z2M_READ_KEY}
+            payload = json.dumps({"read": read})
+            await self.call_service("mqtt", "publish", {"topic": f"zigbee2mqtt/{name}/set", "payload": payload})
             try:
                 async with asyncio.timeout(Z2M_ANSWER_S):
                     while True:
-                        hue = ((json.loads(await messages.get()) or {}).get("color") or {}).get("hue")
-                        if isinstance(hue, int | float):
-                            return float(hue)
+                        reply = (json.loads(await messages.get()) or {}).get(Z2M_READ_KEY) or {}
+                        if isinstance(hue := reply.get("currentHue"), int | float):
+                            return hue * 360 / Z2M_MAX_HUE
             except TimeoutError:
                 return None
 

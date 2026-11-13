@@ -1997,11 +1997,11 @@ class _CaseRun:
     async def bulb_hue(self, light: str) -> float:
         """The light's hue on its own wheel, in degrees, read live off the bulb: never HA's, which is worked out from
         an xy (ZHA's always, Z2M's after an xy set, as hue_native_control makes one) and departs from the bulb's wheel
-        by 25° and more in the greens. ZHA's is EnhancedCurrentHue, else CurrentHue; Z2M's is the `color.hue` that a
-        color get publishes, from the same attributes."""
+        by 25° and more in the greens. ZHA's is EnhancedCurrentHue, else CurrentHue; Z2M's is CurrentHue
+        (HAClient.z2m_hue)."""
         if self.integration == "zigbee2mqtt":
             device = await self.ha.z2m_device(ieee := await self.z2m_ieee(light)) or {}
-            if (hue := await self.ha.z2m_hue(device.get("friendly_name") or ieee)) is None:
+            if (hue := await self.ha.z2m_hue(ieee, device.get("friendly_name") or ieee)) is None:
                 raise StepFailure(f"{light}: the bulb returned no hue through Zigbee2MQTT")
             return hue
         if self.integration != "zha":
