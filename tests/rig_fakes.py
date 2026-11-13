@@ -144,6 +144,9 @@ class FakeHA(HAClient):
         self.on_open: Callable[[str], None] | None = None  # ZHA or Z2M joining opened (Lab joins its bulbs)
         self.on_leave: Callable[[str, str], None] | None = None  # (integration, IEEE) after a remove
         self.z2m_offline: set[str] = set()  # IEEEs Z2M lists that aren't there: availability offline, no reply
+        self.z2m_hues: dict[str, float] = {}  # IEEE -> the hue a CurrentHue read gets off the bulb
+        self.z2m_cached_hue = 213.0  # the `color.hue` Z2M keeps after an xy set, off the bulb's wheel
+        self.z2m_retained_read: int | None = None  # a past read's CurrentHue, retained on the device's topic
         self.z2m_availability_on = True  # bridge/info's config.availability.enabled
         self.z2m_group_offline: set[str] = set()  # Z2M groups whose availability never says online
         self.z2m_bridge_state = "online"  # the retained bridge/state
@@ -353,6 +356,8 @@ class FakeHA(HAClient):
                 queue.put_nowait(json.dumps({"state": "online"}))
         else:
             self._z2m_device_topics[topic] = queue
+            if self.z2m_retained_read is not None:  # Z2M's `retain` on: the last read's reply comes back first
+                queue.put_nowait(json.dumps({"deviceside_read": {"currentHue": self.z2m_retained_read}}))
         return queue
 
     def set(self, entity_id: str, state: str, **attributes) -> None:
@@ -396,11 +401,19 @@ class FakeHA(HAClient):
         return None
 
     def _mqtt_publish(self, topic: str, payload: dict) -> None:
-        """A Z2M bridge request, or a device's `/get`, answered while the device is there."""
-        if topic.endswith("/get"):
-            name = topic.removeprefix("zigbee2mqtt/").removesuffix("/get")
-            if normalize_ieee(name) not in self.z2m_offline and (queue := self._z2m_device_topics.get(name)):
+        """A Z2M bridge request, a device's `/get`, or a `/set` read of CurrentHue, answered while the device is there.
+
+        A hue read's reply comes after a publish of Z2M's cached state, whose `color.hue` (z2m_cached_hue) is stale.
+        """
+        if topic.endswith(("/get", "/set")):
+            name, _, verb = topic.removeprefix("zigbee2mqtt/").rpartition("/")
+            if normalize_ieee(name) in self.z2m_offline or not (queue := self._z2m_device_topics.get(name)):
+                return
+            if verb == "get":
                 queue.put_nowait(json.dumps({"state": "ON"}))
+            elif (read := payload.get("read")) and (hue := self.z2m_hues.get(normalize_ieee(name))) is not None:
+                queue.put_nowait(json.dumps({"state": "ON", "color": {"hue": self.z2m_cached_hue}}))
+                queue.put_nowait(json.dumps({read["state_property"]: {"currentHue": round(hue * 254 / 360)}}))
             return
         self._z2m_handle(topic.removeprefix("zigbee2mqtt/bridge/request/"), payload)
 

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import json
 import re
 import threading
 import time
@@ -2611,18 +2612,36 @@ async def test_expect_hue_travel_fails_when_the_zha_bulb_returns_no_hue(tmp_path
     assert "light.bulb: the bulb returned no hue" in outcomes(result)["turns[light_color]"][1]
 
 
-@pytest.mark.parametrize(("shown", "failure"), [([84, 90], ""), (None, "HA shows no hs_color to take its hue from")])
-async def test_expect_hue_travel_reads_ha_hue_on_other_integrations(tmp_path, shown, failure):
+@pytest.mark.parametrize(
+    ("offline", "failure"), [(False, ""), (True, "light.bulb: the bulb returned no hue through Zigbee2MQTT")]
+)
+async def test_expect_hue_travel_reads_the_z2m_bulbs_own_hue_not_has(tmp_path, monkeypatch, offline, failure):
+    """HA's hue, worked out from the xy Z2M echoes after a hue_native_control set, sits off the bulb's wheel (#75):
+    HA's 213° here would make the bulb's 54° turn from 190° read as 31°. Z2M's cached `color.hue` holds the same 213°
+    and rides in a publish ahead of the read's reply, so only the reply's own key counts."""
+    monkeypatch.setattr("ha_rig.client.Z2M_SETTLE_S", 0)
+    monkeypatch.setattr("ha_rig.client.Z2M_ANSWER_S", 0.05)
+    ieee = "0x001788010abcdef0"
+
     def respond(ha, action, data):
-        ha.set("light.bulb", "on", **({"hs_color": shown} if shown else {}))
+        ha.z2m_hues[ieee[2:]] = 244.0
         return {data["entity_id"]: {"status": "sent"}}
 
-    ha = FakeHA({"light.bulb": {"state": "on", "attributes": {"hs_color": [30, 90]}}}, respond)
+    ha = FakeHA({"light.bulb": {"state": "on", "attributes": {"hs_color": [213, 99]}}}, respond)
+    ha.join("zigbee2mqtt", ieee, "light.bulb")
+    ha.z2m_hues[ieee[2:]] = 190.0
+    ha.z2m_retained_read = 0  # a stale reply, retained, which the read must not take
+    if offline:
+        ha.z2m_offline.add(ieee[2:])
     steps = suite(tmp_path, HUE_TRAVEL, "zigbee2mqtt")
     result = await run_one(ha, steps, profile("zigbee2mqtt", light_color="light.bulb"), admin=ha)
     outcome, detail = outcomes(result)["turns[light_color]"]
     assert outcome is (Outcome.FAIL if failure else Outcome.PASS), detail
     assert failure in detail
+    reads = [c[2] for c in ha.calls if c[:2] == ("mqtt", "publish") and c[2]["topic"].endswith("/set")]
+    assert reads[0]["topic"] == f"zigbee2mqtt/{ieee}/set"
+    assert json.loads(reads[0]["payload"])["read"]["attributes"] == ["currentHue"]
+    assert ha.z2m_options[ieee]["filtered_cache"] == ["deviceside_read"]
 
 
 async def test_expect_hue_travel_needs_a_mark_first(tmp_path):
