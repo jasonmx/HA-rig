@@ -1,5 +1,8 @@
 # The rig as a standalone framework, with DeviceSide as its first target
 
+**Status: parked (2026-11-13)** until DeviceSide v0.1.0 ships and an integration owner wants the rig; see Before
+starting.
+
 Starts once DeviceSide v0.1.0 has shipped and an integration owner outside DeviceSide wants to use the rig (Jason,
 2026-11-13), so v0.1.0's sign-off runs use today's rig; see Before starting. Builds on the
 evidence-rules work on both `main`s (rig `docs/plans/2026-11-12-evidence-rules-rig.md`, DeviceSide
