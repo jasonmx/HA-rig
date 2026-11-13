@@ -14,6 +14,7 @@ import datetime
 import logging
 import operator
 import re
+import shutil
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -1329,6 +1330,34 @@ class Snapshot:
         await self.ha.call_service(domain, "turn_on", {"entity_id": entity_id, **data})
 
 
+_SAYING: set[asyncio.Task] = set()  # the speaking cues, held so none is garbage-collected mid-word
+
+
+async def _say(text: str) -> None:
+    """Speak `text` with macOS `say`, then reap the process. Never awaited by a step: see `speak`."""
+    with contextlib.suppress(OSError):
+        process = await asyncio.create_subprocess_exec(
+            "say", text, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+        await process.wait()
+
+
+def say_exists() -> bool:
+    return shutil.which("say") is not None
+
+
+def speak(text: str, out: Callable[[str], None]) -> None:
+    """A watched case's cue: print `text` and speak it, when `say` exists, in a task of its own. The call a cue marks
+    is timed by the case, so it never waits for the speech or for the process to start."""
+    out(f"    >> {text}")
+    if not say_exists():
+        return
+    task = asyncio.get_running_loop().create_task(_say(text))
+    _SAYING.add(task)
+    task.add_done_callback(_SAYING.discard)
+
+
 async def _prompt(ask: Callable[[str], str], text: str) -> str:
     """`ask(text)` on a daemon thread. A cancelled run can't interrupt a thread blocked in input(), and
     asyncio.to_thread's executor would hold the exit until someone pressed Enter; a daemon thread is left behind."""
@@ -1530,6 +1559,8 @@ class _CaseRun:
         self.call_times: tuple[float, float] | None = None
         self.sent: dict[str, Any] = {}  # the last call's data
         self.hue_marks: dict[str, float] = {}  # each light's own hue at the last mark_hue
+        # Called with each call's action in words as it goes out; set only while a watched case runs its steps.
+        self.cue: Callable[[str], None] | None = None
 
     def reads_auto(self) -> frozenset[str]:
         """The case's lights and switches whose auto config its snapshot keeps: those of a case calling an
@@ -1670,6 +1701,8 @@ class _CaseRun:
         self.out(f"You'll see: {_bold(observe.see)}")
         self.out(f"Watch for: {observe.watch}")
         await self.answer("Press Enter to start... ")
+        if self.ask is not None:  # a person is there: cue each call, so they know when a move starts and stops
+            self.cue = lambda text: speak(text, self.out)
         try:
             await self.steps(self.case.test.steps, relaxed=True)
         except StepFailure as err:
@@ -1843,6 +1876,8 @@ class _CaseRun:
         self.last_action, self.response, self.error, self.sent = action, None, None, data
         # ActionKind is a StrEnum: compared by value so the engine needs no integration import.
         self.query = getattr(getattr(self.registry, "actions", {}).get(action), "kind", None) == "query"
+        if self.cue is not None:
+            self.cue(action.replace("_", " "))
         sent_at = asyncio.get_running_loop().time()
         try:
             try:

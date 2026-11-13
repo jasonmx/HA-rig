@@ -426,6 +426,64 @@ async def test_a_no_records_what_the_person_saw(tmp_path):
     assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?; saw: Red, then  blue")
 
 
+async def test_a_watched_case_speaks_and_prints_a_cue_at_each_call_and_an_automated_one_none(tmp_path, spoken):
+    text = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: twice
+    roles: [switch_plug]
+    setup:
+      - set: {state: off}
+    steps:
+      - call: {duration: 0.2}
+      - call: {action: turn_on_for, duration: 0.2}
+    observe: {see: It clicks., watch: Clicks., ask: 'Did it click?'}
+"""
+    ha, printed = FakeHA({"switch.plug": {}}, timer_on), []
+    inv = profile(switch_plug="switch.plug")
+    await run(
+        [suite(tmp_path, text)], inv, REGISTRY, ha, tolerance=TOLERANCE, out=printed.append, ask=answers("", "y")[1]
+    )
+    assert spoken == ["turn on for"] * 2  # the observed case's two calls; the automated case's none
+    assert printed.count("    >> turn on for") == 2
+
+
+async def test_an_unattended_run_speaks_no_cue(tmp_path, spoken):
+    ha = FakeHA({"switch.plug": {}}, timer_on)
+    await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=None)
+    assert spoken == []
+
+
+async def test_a_cue_is_printed_but_not_spoken_without_say(tmp_path, spoken, monkeypatch):
+    monkeypatch.setattr(engine, "say_exists", lambda: False)
+    ha, printed = FakeHA({"switch.plug": {}}, timer_on), []
+    inv = profile(switch_plug="switch.plug")
+    await run(
+        [suite(tmp_path, OBSERVED)], inv, REGISTRY, ha, tolerance=TOLERANCE, out=printed.append, ask=answers("", "y")[1]
+    )
+    assert spoken == []
+    assert "    >> turn on for" in printed
+
+
+async def test_a_cue_that_never_finishes_does_not_hold_up_the_call(tmp_path, monkeypatch):
+    started = []
+
+    async def hang(text: str) -> None:
+        started.append(text)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(engine, "_say", hang)
+    ha = FakeHA({"switch.plug": {}}, timer_on)
+    result = await asyncio.wait_for(
+        run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=answers("", "y")[1]), 10
+    )
+    assert outcomes(result)[WATCHED] == (Outcome.PASS, "")
+    assert started == ["turn on for"]
+    for task in list(engine._SAYING):  # the hung cue is still pending, held by the engine
+        task.cancel()
+
+
 async def test_a_report_lists_every_suite_with_its_reasons(tmp_path):
     ha = FakeHA({"switch.plug": {}}, stuck)
     result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=answers()[1])
