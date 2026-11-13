@@ -51,13 +51,15 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          key: pre-commit-${{ runner.os }}-py3.14-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Run pre-commit
         run: pre-commit run --all-files
 
       # The pre-commit hook only sees the working tree; the steps below catch a secret committed and later deleted.
+      # They run even when a hook failed, so a lint error never hides a leaked secret.
       - name: Check the hook pins the same betterleaks
+        if: ${{ !cancelled() }}
         run: |
           grep -q "# frozen: v${BETTERLEAKS_VERSION}$" .pre-commit-config.yaml || {
             echo "::error::.pre-commit-config.yaml pins a different betterleaks than v${BETTERLEAKS_VERSION}"
@@ -67,6 +69,7 @@ jobs:
       # The runner is thrown away after each run, so the binary is cached by version: a run only downloads it on a
       # cache miss, and GitHub's release CDN sometimes answers 504.
       - name: Cache betterleaks
+        if: ${{ !cancelled() }}
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -74,7 +77,7 @@ jobs:
           key: betterleaks-${{ env.BETTERLEAKS_VERSION }}-${{ env.BETTERLEAKS_SHA256 }}
 
       - name: Install betterleaks
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
         run: |
           curl -sSfL --retry 5 --retry-delay 10 --retry-all-errors -o betterleaks.tar.gz \
             "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_x64.tar.gz"
@@ -84,4 +87,5 @@ jobs:
           rm betterleaks.tar.gz
 
       - name: Scan full history
+        if: ${{ !cancelled() }}
         run: ~/betterleaks-bin/betterleaks git . --log-opts=--all --redact --verbose
