@@ -1995,15 +1995,17 @@ class _CaseRun:
                 await asyncio.sleep(0.5)
 
     async def bulb_hue(self, light: str) -> float:
-        """The light's hue on its own wheel, in degrees. ZHA's comes live off the bulb (EnhancedCurrentHue, else
-        CurrentHue), since HA's is worked out from the bulb's xy and departs from the bulb's wheel by 25° and more in
-        the greens; elsewhere it is HA's hs_color, which Zigbee2MQTT publishes from the bulb's own hue."""
+        """The light's hue on its own wheel, in degrees, read live off the bulb: never HA's, which is worked out from
+        an xy (ZHA's always, Z2M's after an xy set, as hue_native_control makes one) and departs from the bulb's wheel
+        by 25° and more in the greens. ZHA's is EnhancedCurrentHue, else CurrentHue; Z2M's is CurrentHue
+        (HAClient.z2m_hue)."""
+        if self.integration == "zigbee2mqtt":
+            device = await self.ha.z2m_device(ieee := await self.z2m_ieee(light)) or {}
+            if (hue := await self.ha.z2m_hue(ieee, device.get("friendly_name") or ieee)) is None:
+                raise StepFailure(f"{light}: the bulb returned no hue through Zigbee2MQTT")
+            return hue
         if self.integration != "zha":
-            state = await self.ha.get_state(light)
-            hue = _lookup((state or {}).get("attributes", {}), "hs_color.0")
-            if not isinstance(hue, int | float):
-                raise StepFailure(f"{light}: HA shows no hs_color to take its hue from")
-            return float(hue)
+            raise StepFailure(f"{light}: a hue travel is measured on ZHA and Zigbee2MQTT only")
         entry = await self.ha.command({"type": "config/entity_registry/get", "entity_id": light})
         ieee, _, endpoint = (entry.get("unique_id") or "").partition("-")
         if not endpoint.isdigit():
