@@ -25,8 +25,46 @@ a household's real devices. It works out of the box with DeviceSide. The archite
 a generic engine, with targets as plugins; DeviceSide owns its target and its step files, next to the evidence rules
 they carry out.
 
+**Shape.** A CLI run from a machine on the household's LAN, as today. No daemon, add-on or container: a
+household-side agent (the engine running next to HA, the CLI as its client) would make cloud sessions and shared
+rigs possible, but costs a second versioned contract, a network service that can install code into HA, and an
+engine development loop through a deploy. The seams below keep that door open without building it. A cloud session
+that needs the rig uses Remote Control to a LAN machine.
+
 **Non-goals.** Core HA integrations (their test culture is mocks and snapshots); a hosted or multi-user service;
-supporting every Zigbee stack's roaming (roaming stays Hue-home, as today).
+the household agent; deploy backends beyond the shell hooks; supporting every Zigbee stack's roaming (roaming stays
+Hue-home, as today).
+
+## Seams
+
+Each seam names the failure it prevents now and what it keeps possible. Code across a seam talks only through it.
+
+1. **The target is data.** The rig reads the target's generated manifest (Stage 1.1) and its step files; it never
+   imports or loads target code to run a test. Prevents: the rig breaking when deviceside's imports or
+   `homeassistant` change, and the rig needing deviceside's environment. It is the only versioned contract between
+   the repos (`manifest_version`), so version drift has one place to be checked and one error to name.
+2. **The executor takes a plan and emits results.** A run is: select (target data + profile → a plan), execute
+   (plan → a results file, JSON lines of cases, calls, samples and outcomes), render (results → records, by the
+   target). The executor runs no target code and writes nothing in the checkout. Prevents: a crash mid-render
+   losing a run's evidence, and record-format changes needing a rerun (re-render from the saved results). Keeps
+   possible: the executor moving next to HA later, behind a transport.
+3. **One home for household state.** A single `household` module owns every path: config (`rig.env`, profiles) and
+   state (locks, journals, home record, baseline, ledger), keyed by HA instance. Nothing else builds a path to them.
+   Prevents: household data leaking into a checkout, and two checkouts on one HA missing each other's locks.
+4. **Every change is journaled before it is made.** The HA, Hue and MQTT clients' mutating calls are reachable only
+   through the journal's write-ahead wrapper; the raw clients are read-only outside it. Prevents: a change the next
+   run can't put back because a new code path forgot to journal it.
+5. **Credentials load in one place.** `rig.env` is read once, refused unless it is mode 0600, and tokens go to the
+   clients that need them: the non-admin token by default, the admin token only for suites that declare the need.
+   No token, host or entity ID reaches a log line, run report or record. Prevents: a token or household detail in
+   a public record or a shared log.
+6. **Deploy is one interface with one implementation.** `status`, `sync(tree)`, `restart`, behind the existing
+   shell-hook protocol (`RIG_SYNC_CMD`, `RIG_STATUS_CMD`, `RIG_RESTART_CMD`). The docs carry example hooks (SSH +
+   rsync to a Docker host) rather than the rig shipping backends it would have to maintain.
+
+**Keeping maintenance low.** Single user until Stage 2, so renames break cleanly: the old name is refused with the
+new one named, and no compatibility shim outlives one rig release. No feature lands before a second user needs it
+(generic roles, an init wizard beyond the essentials, more deploy backends).
 
 ## Stages
 
@@ -70,6 +108,7 @@ they belong with the target.
 - `<ha>` is a short hash of `HA_URL`: the locks guard an HA, not a checkout, so two checkouts (or a deviceside
   clone and another target later) on the same HA share them. This also fixes runs from two separate deviceside
   clones not seeing each other's locks today.
+- All of it goes through the `household` module (Seam 3).
 - `HA_RIG_CONFIG` (a directory) overrides `~/.config/ha-rig` for a second HA or for tests.
 - `ha-rig migrate` moves the files from their old homes, once `--wait-free` shows no run holds a lock and no journal
   is pending; until then any command refuses, naming it (replacing `refuse_moved_files`, whose earlier move is done).
@@ -84,6 +123,7 @@ they belong with the target.
   set in Jason's; `HA_RIG_UNOWNED_CHECKOUT` goes. It prevents a record citing code nobody owns; that is one
   maintainer's process, not something a new user's first run should stop on.
 - `RIG_BLOCKER_ENTITY`, the restricted sensor's old name, stops being read.
+- Credentials load in one place, with the 0600 check and the admin token only for suites that need it (Seam 5).
 
 **0.5 Subcommands for the 22 flags.** One mode per subcommand, so flags valid only in one mode can't be combined
 wrongly, and `--help` per subcommand stays short. Run options keep their names.
@@ -129,7 +169,8 @@ manifest, naming the regenerate command.
 - suite selection: which step files apply to which integrations, and option suites (`<action>-<option>.yaml`);
 - expected outcome per case, and per-target step extensions: `source: <target>` reads, setting the target's options,
   and the default service domain for `call`;
-- record rendering and the coverage ledger, including observed tests;
+- record rendering and the coverage ledger, including observed tests, run from the executor's results file after
+  the run (Seam 2), never during it;
 - household-terms export (`.private-terms.rig`) and the deploy unit (which component directory a deploy ships).
 
 The generic engine keeps: the HA client, locks, journal and restore, baseline and pauses, authorization, log
@@ -146,8 +187,9 @@ integration on the household HA (Jason picks it; open question 3), with a handfu
 probe through `ha-rig probe`. **Exit criterion for Stage 1:** that target runs without any engine change specific
 to it, and the DeviceSide target's records come out byte-identical to Stage 0's for the same run.
 
-**Stage 1 PRs:** 1.1 (deviceside + rig, `Tests-with`); 1.2, moving deviceside's logic behind the interface without
-changing a record; 1.3; 1.4.
+**Stage 1 PRs:** 1.1 (deviceside + rig, `Tests-with`); the executor's results file and render-after-run (Seam 2);
+mutations only through the journal (Seam 4); 1.2, moving deviceside's logic behind the interface without changing a
+record; 1.3; 1.4.
 
 ### Stage 2: split and publish
 
@@ -168,9 +210,9 @@ matching change there" leaves the rig's `CLAUDE.md`: what a record proves now li
 - `ha-rig init`: asks for HA's URL and a token (and tells you to create a non-admin user for it), tests the
   connection, picks a deploy backend, and drafts a profile from the entities it finds per integration, with every
   entity's roles left for the user to confirm. Nothing moves during init.
-- Deploy backends built in: SSH + rsync (HA OS through the SSH add-on, or any host), Docker volume, and the current
-  `RIG_*_CMD` shell hooks as the escape hatch. Restart goes through HA's API with the admin token. The synced/loaded
-  tree-hash check stays, done by the backend.
+- Deploy stays the shell hooks (Seam 6). The docs give a worked example for HA in Docker on a LAN host (SSH +
+  rsync into the mounted config directory, a rename swap, restart through HA's API, the synced/loaded tree-hash
+  status), which `init` can copy into `rig.env`.
 - Safe defaults: a new profile is not `pre_authorized`; with no restricted sensor, restricted work needs a yes at a
   terminal or `HA_RIG_APPROVE_RESTRICTED=1`; every change is journaled before it is made; `ha-rig recover` is in the
   first page of the docs.
@@ -192,6 +234,8 @@ path; versions are semver from 0.x, and deviceside pins one.
   defaults in 2.3, by keeping journal and restore generic and well tested, and by labeling roaming experimental.
 - **Competing with DeviceSide v0.1.0.** Stage 0 helps both and is small; Stages 1–2 should not block a deviceside
   release, and the release gate's records must stay unchanged through them (1.4's byte-identical check).
+- **Version drift between rig and target.** One contract, the manifest, carries a version the rig checks at load
+  (Seam 1); deviceside pins the rig version it was tested with.
 - **Repo move breaks automation.** The checks listed in 0.1 cover CI, the GitHub App and Renovate.
 
 ## Open questions
