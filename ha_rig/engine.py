@@ -425,6 +425,16 @@ def _parse_bridge(args: Any) -> dict:
     return args
 
 
+def _parse_zcl(args: Any) -> dict:
+    args = _mapping(args, required=["cluster", "command"], allowed=["target", "endpoint", "params"])
+    for key in ("cluster", "command", "endpoint"):
+        if key in args and (not isinstance(args[key], int) or isinstance(args[key], bool) or args[key] < 0):
+            raise ValueError(f"{key} takes a number, got {args[key]!r}")
+    if not isinstance(args.setdefault("params", {}), dict):
+        raise ValueError("params takes a mapping of the command's fields")
+    return args
+
+
 ENTRY_MOVES = ("reload", "disable", "enable")
 
 
@@ -460,6 +470,8 @@ PARSERS: dict[str, Callable[[Any], Any]] = {
     "entry": _parse_entry,
     # A write to the Hue bridge that bypasses HA; fails in any other integration's suite.
     "bridge": _parse_bridge,
+    # One raw ZCL cluster command to a ZHA light, for probes; fails in any other integration's suite.
+    "zcl": _parse_zcl,
     # Zigbee2MQTT device options; both steps do nothing in another integration's suite.
     "z2m_option": _parse_z2m_option,
     "expect_z2m_option": _parse_z2m_option,
@@ -1860,6 +1872,33 @@ class _CaseRun:
             await self.bridge.put(resource_type, resource_id, body)
         except BridgeError as err:
             raise StepFailure(str(err)) from None
+
+    async def _zcl(self, args: dict, _following: str | None) -> None:
+        """One server-cluster command through zha.issue_zigbee_cluster_command, to the endpoint in the target's
+        unique_id unless `endpoint` says otherwise."""
+        if self.integration != "zha":
+            raise StepFailure(f"zcl steps need a ZHA suite, not {self.integration}")
+        entity_id = self.entity(args)
+        await self.touch(entity_id)
+        entry = await self.ha.command({"type": "config/entity_registry/get", "entity_id": entity_id})
+        ieee, _, endpoint = (entry.get("unique_id") or "").partition("-")
+        if not ieee or not (endpoint.isdigit() or "endpoint" in args):
+            raise StepFailure(f"{entity_id} has no ZHA address in its unique_id {entry.get('unique_id')!r}")
+        data = {
+            "ieee": ieee,
+            "endpoint_id": args.get("endpoint", int(endpoint) if endpoint.isdigit() else None),
+            "cluster_id": args["cluster"],
+            "cluster_type": "in",
+            "command": args["command"],
+            "command_type": "server",
+            "params": args["params"],
+        }
+        try:
+            await self.ha.call_service("zha", "issue_zigbee_cluster_command", data)
+        except HAError as err:
+            raise StepFailure(
+                f"zcl cluster {args['cluster']} command {args['command']} on {entity_id}: {err}"
+            ) from None
 
     async def _call(self, args: dict, following: str | None) -> None:
         action = args.get("action", self.case.suite.action)

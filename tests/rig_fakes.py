@@ -117,6 +117,7 @@ class FakeHA(HAClient):
         self.entity_meta: dict[str, dict] = {}  # the registry's platform, unique_id and disabled_by, by entity ID
         self.keeps_group_entities = False  # HA keeps a removed group's entity in its registry
         self.zha_open = False
+        self.zcl_error: str | None = None
         self.logger_levels: dict[str, str] = {}  # logger.set_level's, by logger name
         self.zha_group_names: dict[int, str] = {}
         self.zha_group_members: dict[int, list[dict]] = {}
@@ -369,19 +370,25 @@ class FakeHA(HAClient):
     def later(self, delay: float, entity_id: str, state: str) -> None:
         PENDING.append(asyncio.get_running_loop().call_later(delay, self.set, entity_id, state))
 
+    def _zha_service(self, service: str, data: dict) -> None:
+        if service == "permit":
+            self.zha_open = data["duration"] > 0
+            if self.zha_open and self.on_open is not None:
+                self.on_open("zha")
+        elif service == "issue_zigbee_cluster_command":
+            if self.zcl_error:
+                raise HAError({"code": "home_assistant_error", "message": self.zcl_error})
+        else:
+            self._leave("zha", data["ieee"])
+            if self.on_leave is not None:
+                self.on_leave("zha", data["ieee"])
+
     async def call_service(self, domain: str, service: str, data: dict | None = None, return_response=False):
         self.calls.append((domain, service, dict(data or {})))
         if domain == "deviceside":
             return self.respond(self, service, data)
         if domain == "zha":
-            if service == "permit":
-                self.zha_open = data["duration"] > 0
-                if self.zha_open and self.on_open is not None:
-                    self.on_open("zha")
-            else:
-                self._leave("zha", data["ieee"])
-                if self.on_leave is not None:
-                    self.on_leave("zha", data["ieee"])
+            self._zha_service(service, data or {})
             return None
         if domain == "mqtt":
             self._mqtt_publish(data["topic"], json.loads(data["payload"]))

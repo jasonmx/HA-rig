@@ -3119,3 +3119,101 @@ async def test_a_firmware_fact_that_passed_or_failed_adds_a_row_naming_its_devic
         ),
     )
     assert result.suites[0].recordable  # the fact's result is no part of the record
+
+
+# --- zcl ------------------------------------------------------------------------------------------------------
+
+ZCL_STEPS = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: raw_command
+    roles: [light_dimmable]
+    steps:
+      - zcl: {cluster: 8, command: 1, params: {move_mode: 1, rate: 25}}
+"""
+
+
+class ZclHA(BridgeHA):
+    def __init__(self, unique_id: str | None = "00:11:22:33:44:55:66:77-11"):
+        super().__init__("zha", unique_id or "")
+        self.unique_id = unique_id
+
+
+async def run_zcl(tmp_path, ha, text=ZCL_STEPS, integration="zha") -> dict:
+    steps = suite(tmp_path, text, integration)
+    result = await run_one(ha, steps, profile(integration, light_dimmable="light.bulb"), admin=ha)
+    return outcomes(result)
+
+
+def zcl_calls(ha) -> list[tuple[str, str, dict]]:
+    return [call for call in ha.calls if call[:2] == ("zha", "issue_zigbee_cluster_command")]
+
+
+async def test_a_zcl_step_sends_the_command_to_the_endpoint_in_the_unique_id(tmp_path):
+    ha = ZclHA()
+    assert await run_zcl(tmp_path, ha) == {"raw_command[light_dimmable]": (Outcome.PASS, "")}
+    assert zcl_calls(ha) == [
+        (
+            "zha",
+            "issue_zigbee_cluster_command",
+            {
+                "ieee": "00:11:22:33:44:55:66:77",
+                "endpoint_id": 11,
+                "cluster_id": 8,
+                "cluster_type": "in",
+                "command": 1,
+                "command_type": "server",
+                "params": {"move_mode": 1, "rate": 25},
+            },
+        )
+    ]
+
+
+async def test_a_zcl_step_takes_an_endpoint_and_empty_params(tmp_path):
+    ha = ZclHA()
+    text = ZCL_STEPS.replace(
+        "{cluster: 8, command: 1, params: {move_mode: 1, rate: 25}}", "{cluster: 8, command: 3, endpoint: 2}"
+    )
+    assert (await run_zcl(tmp_path, ha, text))["raw_command[light_dimmable]"][0] is Outcome.PASS
+    [(_, _, data)] = zcl_calls(ha)
+    assert (data["endpoint_id"], data["command"], data["params"]) == (2, 3, {})
+
+
+async def test_a_zcl_step_outside_zha_fails(tmp_path):
+    ha = ZclHA()
+    outcome, detail = (await run_zcl(tmp_path, ha, integration="shelly"))["raw_command[light_dimmable]"]
+    assert outcome is Outcome.FAIL
+    assert "zcl steps need a ZHA suite, not shelly" in detail
+    assert zcl_calls(ha) == []
+
+
+async def test_a_zcl_step_without_a_zha_address_fails(tmp_path):
+    outcome, detail = (await run_zcl(tmp_path, ZclHA(unique_id="abc")))["raw_command[light_dimmable]"]
+    assert outcome is Outcome.FAIL
+    assert "light.bulb has no ZHA address" in detail
+
+
+async def test_a_zcl_error_from_ha_fails_the_case(tmp_path):
+    ha = ZclHA()
+    ha.zcl_error = "timed out"
+    outcome, detail = (await run_zcl(tmp_path, ha))["raw_command[light_dimmable]"]
+    assert outcome is Outcome.FAIL
+    assert "zcl cluster 8 command 1 on light.bulb: timed out" in detail
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ("{command: 1}", "missing cluster"),
+        ("{cluster: 8}", "missing command"),
+        ("{cluster: 8, command: 1, rate: 25}", r"unknown key\(s\) rate"),
+        ("{cluster: 8, command: 1, params: [1]}", "params takes a mapping"),
+        ("{cluster: x, command: 1}", "cluster takes a number"),
+        ("{cluster: 8, command: 1, endpoint: true}", "endpoint takes a number"),
+    ],
+)
+def test_a_malformed_zcl_step_is_a_parse_error(tmp_path, step, message):
+    text = ZCL_STEPS.replace("{cluster: 8, command: 1, params: {move_mode: 1, rate: 25}}", step)
+    with pytest.raises(Exception, match=message):
+        cases(suite(tmp_path, text, "zha"), profile("zha", light_dimmable="light.bulb"))
