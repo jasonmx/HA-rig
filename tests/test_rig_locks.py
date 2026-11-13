@@ -340,7 +340,7 @@ def run_args(*argv: str) -> argparse.Namespace:
 def setup(tmp_path, profile, suites, deploy_needed=False, roaming=False, grouping=False, registry=None) -> rig.Setup:
     tree = "old" if deploy_needed else "tree"
     deploy = rig.Deploy("c1", "tree", tree, tree, "wt")
-    return rig.Setup({}, profile, registry or fakes.OPTION_REGISTRY, suites, roaming, grouping, deploy)
+    return rig.Setup({}, profile, registry or fakes.PLAIN_REGISTRY, suites, roaming, grouping, deploy)
 
 
 def step_suites(tmp_path: Path, text: str, *integrations: str) -> list:
@@ -360,6 +360,14 @@ NO_ADAPTER = SimpleNamespace(adapter=lambda action, integration: None)
     ("text", "deploy_needed", "argv", "registry", "expected"),
     [
         pytest.param(fakes.RESTORED_MIDWAY, False, (), None, claim("shelly"), id="plain: integrations, HA shared"),
+        pytest.param(
+            fakes.RESTORED_MIDWAY,
+            False,
+            (),
+            fakes.OPTION_REGISTRY,
+            claim("shelly", ha="exclusive"),
+            id="plain on an adapter with options: it pins them off, a save if HA's are on",
+        ),
         pytest.param(fakes.RESTORED_MIDWAY, True, (), None, claim("shelly", ha="exclusive"), id="deploy"),
         pytest.param(fakes.RESTORED_MIDWAY, True, ("--no-deploy",), None, claim("shelly"), id="no-deploy"),
         pytest.param(OPTIONS, False, (), None, claim("shelly", ha="exclusive"), id="option suite"),

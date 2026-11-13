@@ -1113,8 +1113,7 @@ def ha_version(env: dict) -> str | None:
 def claim(args: argparse.Namespace, setup: Setup) -> Claim:
     """What the run must hold: each integration with a suite that has an adapter, the integrations their entities draw
     power through, and the networks its roaming bulbs visit, home included; HA exclusively when it deploys, which
-    restarts HA, or runs a suite that reloads the entry (DeviceSide options, whose save does, or entry steps); HA
-    shared otherwise."""
+    restarts HA, or runs a suite that may reload the entry (reloads); HA shared otherwise."""
     integrations = {suite.integration for suite in runnable(setup)}
     integrations |= supplies(setup.profile, integrations)
     if setup.roaming:
@@ -1139,9 +1138,13 @@ def runnable_suite(suite: Suite, registry: AdapterRegistry) -> bool:
 
 
 def reloads(setup: Setup) -> bool:
-    """Whether a suite the run can run reloads the entry under every other run: it has DeviceSide options, whose
-    save does, or entry steps."""
-    return any(suite.file.reloads for suite in runnable(setup))
+    """Whether a suite the run can run may reload the entry under every other run: it has entry steps, or its
+    adapter has DeviceSide options, whose save does. A plain file pins its adapter's options off, which saves too
+    when HA's are on (predicted_state is on by default)."""
+    return any(
+        suite.file.reloads or setup.registry.adapter(suite.action, suite.integration).scope.options
+        for suite in runnable(setup)
+    )
 
 
 def supplies(profile: Profile, integrations: set[str]) -> set[str]:
