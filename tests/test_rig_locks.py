@@ -495,6 +495,16 @@ def test_a_deploying_run_with_options_keeps_ha_exclusive(tmp_path, monkeypatch):
         assert blocked(tmp_path, claim("zha"))
 
 
+def test_a_deploying_plain_run_on_an_adapter_with_options_keeps_ha_exclusive(tmp_path, monkeypatch):
+    profile = fakes.profile("shelly", light_ct="light.a")
+    suites = step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly")
+    run = setup(tmp_path, profile, suites, deploy_needed=True, registry=fakes.OPTION_REGISTRY)
+    held, given = approved(tmp_path, monkeypatch, run, deploying=True)
+    with held:
+        assert held.claim == given[0] == claim("shelly", ha="exclusive")
+        assert blocked(tmp_path, claim("zha"))
+
+
 # --- Journals -------------------------------------------------------------------------------------------------
 
 

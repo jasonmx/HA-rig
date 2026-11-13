@@ -972,8 +972,8 @@ class EntryOptions:
                 await self.admin.rest("delete", flow_path)
             raise RuntimeError(
                 f"DeviceSide's options in HA differ from this case's ({wanted}), and saving them reloads the entry "
-                "under other runs; this run holds HA shared. Set them back in HA, or run the suite alone with an "
-                "option step file, which takes HA exclusively"
+                "under other runs; this run holds HA shared. Set them back in HA, or rerun: a suite whose adapter "
+                "has options takes HA exclusively"
             )
         values |= wanted
         try:
