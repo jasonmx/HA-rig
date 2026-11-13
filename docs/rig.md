@@ -34,6 +34,9 @@ entity IDs and IEEEs and `.env.rig`'s HA and Hue bridge hosts, tokens, Hue app k
 `python -m ha_rig.terms` does it by hand after editing a profile. A run refuses while `.env.rig` or `tests/rig/profiles/` is still in deviceside's main checkout, where the
 rig kept them before it moved: move them here.
 
+The rig needs DeviceSide's Experimental features option on in its HA, and never changes it: a flagged item's case
+would otherwise test the refusal. The option only lets flagged actions be called; unflagged ones behave the same.
+
 ## Before a run
 
 The run first checks every device it will use: each fixed entity must be in HA, on its integration and available, and each roaming bulb
@@ -158,8 +161,16 @@ A run runs the suites it is asked for: every one the profile has an adapter for,
 `--action` and `-k`. What needs testing is deviceside's to say, not the rig's: the rig keeps no record of what is
 proven or stale, and a test record in the checkout never leaves a suite out.
 
-TODO: deviceside's `check_release.py --signoffs` (evidence-rules plan, step 4) is to list the integrations that need a
-sign-off in a machine-readable form; a later rig change takes that list as its selection.
+**`--signoffs`** runs what deviceside says needs a sign-off: the integrations its `scripts/check_release.py --signoffs
+--json` lists, run in the checkout with the interpreter the rig imports it with, in place of `--integration`. A record
+sign-off is one whole passing run of the integration at one commit, so each is run whole, every suite it has, and
+`--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same commit with `--integration <x>
+--action <a>` to complete the run. Those the profile has no entities for are named as needing a manual sign-off
+(`_manual.md`), and the run goes on with the rest; when the list is empty, or the profile has none of it, the run says
+so and exits 0 before touching HA. The check's exit code says whether the release gate fails, not whether the list is
+empty: exit 0 and 1 both carry the list, and the rig points to `scripts/check_release.py --signoffs` in the checkout for
+why each needs one. A check that fails (any other exit, or exit 1 with nothing listed) or prints no JSON list stops the
+run, before anything moves.
 
 **Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`), or any case of a
 `firmware_fact: true` test, its watched one included (Writing a step file, below). It finds a fact, which stands once
@@ -282,6 +293,10 @@ An adapter with options runs each file for its action with them pinned through D
 record is `<action>-<name>.md`, with an `Options` row. The rig's own options are put back when the run ends. Each
 save reloads the entry, so a run pins each set of options once: the suites that share a set run together, rather
 than each `<action>` file and its `<action>-<name>` twin in turn.
+
+A flagged item's case tests its call because the rig's HA keeps Experimental features on (Setup). A pass on a flagged
+item is evidence a maintainer may use to lift its flag (deviceside's `docs/evidence.md`); a known failure gets
+`only:` or leaves the profile.
 
 A test that means to make DeviceSide warn lists the line under `expected_log:` at the top of its file: regular
 expressions, each searched for in the whole log line, logger included. A matched line is counted in the summary and
