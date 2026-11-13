@@ -2701,9 +2701,10 @@ def render_record(
     date: str,
     source: str,
     facts: FactsFile | None = None,
+    package: str | None = None,
 ) -> str:
     """The test record: a key/value table, then the per-test table, then a note on the opt-in cases quoting the latest
-    row `facts` (the integration's _facts.md) holds for each. deviceside reads its commit and Result."""
+    row `facts` (the integration's _facts.md) holds for each. deviceside reads its commit, Package tree and Result."""
     suite = suite_result.suite
     cells = [_result_cell(suite, case, details=False) for case in suite_result.cases]
     rows = [
@@ -2711,6 +2712,7 @@ def render_record(
         ("Ran", f"{cells.count(Outcome.PASS)} passed, {cells.count(Outcome.SKIPPED)} skipped"),
         ("Date", date),
         ("Source", source),
+        *([("Package", f"`{package}`")] if package else []),
         ("Home Assistant", ha_version),
         ("Device", "; ".join(map(str, devices)) or "none"),
     ]
@@ -2755,7 +2757,13 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
 
 
 async def write_records(
-    result: RunResult, registry: Any, records: Records, date: str, source: str, into: Records | None = None
+    result: RunResult,
+    registry: Any,
+    records: Records,
+    date: str,
+    source: str,
+    into: Records | None = None,
+    package: Callable[[str], str] | None = None,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
@@ -2763,7 +2771,10 @@ async def write_records(
 
     A record never narrows: where a case the existing record passed doesn't apply to this profile (an inapplicable skip:
     a role it lacks, a group without the light), the file in `records` stays as it is, and the suite is `kept` with
-    those case IDs (its `records` path). To narrow on purpose, delete the record."""
+    those case IDs (its `records` path). To narrow on purpose, delete the record.
+
+    `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
+    after Source: what deviceside's release check compares to the tree that ships."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2778,7 +2789,10 @@ async def write_records(
         path = into(suite.integration) / f"{suite.name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         facts = FactsFile.read(records(suite.integration) / FACTS_FILE)
-        record = render_record(suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts)
+        tree = package(suite.integration) if package else None
+        record = render_record(
+            suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts, tree
+        )
         path.write_text(record)
         written.append(path)
     return written, kept

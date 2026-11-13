@@ -163,8 +163,8 @@ proven or stale, and a test record in the checkout never leaves a suite out.
 
 **`--signoffs`** runs what deviceside says needs a sign-off: the integrations its `scripts/check_release.py --signoffs
 --json` lists, run in the checkout with the interpreter the rig imports it with, in place of `--integration`. A record
-sign-off is one whole passing run of the integration at one commit, so each is run whole, every suite it has, and
-`--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same commit with `--integration <x>
+sign-off is one whole passing run of the integration at one package tree, so each is run whole, every suite it has, and
+`--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same package tree with `--integration <x>
 --action <a>` to complete the run. Those the profile has no entities for are named as needing a manual sign-off
 (`_manual.md`), and the run goes on with the rest; when the list is empty, or the profile has none of it, the run says
 so and exits 0 before touching HA. The check's exit code says whether the release gate fails, not whether the list is

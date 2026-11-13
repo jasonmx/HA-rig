@@ -768,10 +768,11 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
         head["HEAD"] = "c2short"  # the session commits mid-run
         return engine.RunResult([])
 
-    written = []
+    written, trees = [], []
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, package=None):
         written.append(source)
+        trees.append(package("matter"))
         return [], []
 
     monkeypatch.setattr(rig, "run", run)
@@ -781,6 +782,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
     suites = target_suite(tmp_path)
     assert await rig.run_rig({}, suites, fakes.profile("shelly"), fakes.OPTION_REGISTRY, None, True, commit) == 0
     assert written == sources
+    assert trees == ([f"{commit}:custom_components/deviceside/integrations/mattershort"] if commit else [])
     assert ("No test records" in capsys.readouterr().out) is (commit is None)
 
 
@@ -1614,7 +1616,7 @@ def record_path(integration: str, name: str = "raise_brightness") -> str:
 def recording(written: list[list[str]]):
     """A write_records that notes each call's recordable suites and writes a stub record for each, where it is told."""
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, package=None):
         paths = []
         for part in result.suites:
             if part.recordable:
@@ -1732,7 +1734,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
             progress.record(suite, result)
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, package=None):
         path = into("zha") / "raise_brightness.md"
         path.parent.mkdir(parents=True)
         path.write_text("zha\n")
@@ -1767,7 +1769,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     written: list[list[str]] = []
 
-    async def write_records(result, registry, records, date, source, into=None):
+    async def write_records(result, registry, records, date, source, into=None, package=None):
         written.append([part.suite.integration for part in result.suites if part.recordable])
         return [], []
 
