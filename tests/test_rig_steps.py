@@ -1,66 +1,105 @@
-"""Step files parse, and a broken one fails at load naming the file, the test and the step."""
+"""deviceside's step files parse, and a broken one fails at load naming the file, the test and the step."""
 
 from pathlib import Path
 
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
-from ha_rig.engine import STEPS_DIR, Expr, Observe, SchemaError, load_step_file, load_step_files
+from ha_rig.engine import Expr, Observe, SchemaError, check_owned, load_step_file, load_step_files
+from ha_rig.target import deviceside_repo, integration_steps_dirs, steps_dir
+from tests.rig_fakes import STEPS
+
+# deviceside's step files, the only ones a rig test reads, and only to check they parse: what they test is deviceside's.
+SHIPPED = steps_dir(deviceside_repo())
+SHIPPED_OWN = integration_steps_dirs(deviceside_repo())  # each integration's own
 
 
-@pytest.mark.parametrize("path", sorted(STEPS_DIR.rglob("*.yaml")), ids=lambda path: path.name)
+@pytest.mark.parametrize(
+    "path",
+    sorted(SHIPPED.glob("*.yaml")) + sorted(path for d in SHIPPED_OWN.values() for path in d.glob("*.yaml")),
+    ids=lambda path: path.relative_to(deviceside_repo()).as_posix(),
+)
 def test_every_shipped_step_file_parses(path):
     assert load_step_file(path).tests
 
 
 def test_every_step_file_has_an_action():
-    actions = {step_file.action for step_file in load_step_files()}
-    assert actions == {
-        "clear_auto_off",
-        "clear_auto_on",
-        "get_attributes",
-        "lower_brightness",
-        "lower_hue",
-        "lower_saturation",
-        "raise_brightness",
-        "raise_hue",
-        "raise_saturation",
-        "set_attributes",
-        "set_auto_off",
-        "set_auto_on",
-        "set_scene",
-        "stop",
-        "turn_on_for",
-        "turn_off_for",
-    }
-    assert actions <= set(AdapterRegistry.discover().actions)
+    """An integration's own files merge (no collision, no `only:` naming another) and have its adapter."""
+    step_files = load_step_files(SHIPPED, SHIPPED_OWN)
+    registry = AdapterRegistry.discover()
+    assert step_files
+    assert {step_file.action for step_file in step_files} <= set(registry.actions)
+    check_owned(step_files, registry)
 
 
 def test_every_only_names_an_integration():
     """A misspelled key would silently drop the test, or its observed run, from every suite."""
     known = set(AdapterRegistry.discover().integrations)
-    for step_file in load_step_files():
+    for step_file in load_step_files(SHIPPED, SHIPPED_OWN):
         for test in step_file.tests:
             named = (test.only or frozenset()) | ((test.observe and test.observe.only) or frozenset())
             named |= {key for step in (*test.setup, *test.steps) for key in step.only or ()}
             assert named <= known, f"{step_file.action} {test.name}: {sorted(named - known)}"
 
 
-def test_the_step_files_keep_their_roles():
-    by_action = {step_file.action: step_file for step_file in load_step_files()}
-    assert by_action["turn_on_for"].roles == (
-        "switch_plug",
-        "light_wrapped",
-        "light_onoff",
-        "light_dimmable",
-        "light_ct",
-        "light_color",
-        "group",
-    )
-    assert by_action["turn_off_for"].roles == ("switch_plug", "light_dimmable")
-    for action in ("set_auto_off", "set_auto_on", "clear_auto_off", "clear_auto_on"):
-        assert by_action[action].roles == ("switch_plug",)
-        assert all(test.only == frozenset({"shelly"}) for test in by_action[action].tests)
+OWN = """
+action: turn_on_for
+rig_seconds: 7
+tests:
+  - name: own_case
+    roles: [switch_plug]
+    steps:
+      - call: {duration: 1}
+"""
+
+
+def own_dirs(tmp_path: Path, text: str = OWN, integration: str = "shelly", name: str = "turn_on_for") -> dict:
+    """An integration's own step file `name`.yaml holding `text`; the integration_dirs that find it."""
+    (directory := tmp_path / integration / "rig").mkdir(parents=True)
+    (directory / f"{name}.yaml").write_text(text)
+    return {integration: directory}
+
+
+def test_an_integrations_own_tests_join_the_actions_suite_on_it_alone(tmp_path):
+    files = load_step_files(STEPS, own_dirs(tmp_path))
+    merged = next(f for f in files if f.action == "turn_on_for" and not f.options)
+    shared = next(f for f in load_step_files(STEPS) if f.action == "turn_on_for")
+    assert [t.name for t in merged.tests] == [t.name for t in shared.tests] + ["own_case"]
+    assert merged.tests[-1].only == frozenset({"shelly"}) and merged.owned_by == frozenset({"shelly"})
+    assert merged.rig_seconds == shared.rig_seconds + 7 and merged.path == shared.path  # one suite, one record
+    assert merged.tests[-1].runs_on("shelly") and not merged.tests[-1].runs_on("hue")
+    assert len(files) == len(load_step_files(STEPS))
+
+
+def test_an_integrations_own_file_with_no_shared_one_stands_alone(tmp_path):
+    files = load_step_files(STEPS, own_dirs(tmp_path, OWN.replace("turn_on_for", "clear_auto_off"), name="x"))
+    assert [(f.action, f.owned_by) for f in files if f.action == "clear_auto_off"] == [
+        ("clear_auto_off", frozenset({"shelly"}))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (OWN.replace("own_case", "on_then_off"), "shelly/rig/turn_on_for.yaml: test on_then_off is already in"),
+        (OWN.replace("    roles:", "    only: [hue]\n    roles:"), "own_case names hue, but the file is shelly's own"),
+        (OWN.replace("      - call: {duration: 1}", "      - {wait: 1, only: [zha]}"), "own_case names zha"),
+        ("options: [x]\n" + OWN, "options and name are for shared step files"),
+    ],
+    ids=["collision", "only_another", "step_only_another", "options"],
+)
+def test_an_integrations_own_file_refuses(tmp_path, text, message):
+    with pytest.raises(SchemaError, match=message):
+        load_step_files(STEPS, own_dirs(tmp_path, text))
+
+
+def test_an_integrations_own_file_needs_its_adapter(tmp_path):
+    registry = AdapterRegistry.discover()
+    assert registry.adapter("set_scene", "shelly") is None
+    files = load_step_files(STEPS, own_dirs(tmp_path, OWN.replace("turn_on_for", "set_scene").replace("own_case", "x")))
+    with pytest.raises(SchemaError, match="shelly has no set_scene adapter"):
+        check_owned(files, registry)
+    check_owned(load_step_files(STEPS, own_dirs(tmp_path / "ok")), registry)
 
 
 HEADER = "action: turn_on_for\nrig_seconds: 5\ntests:\n  - name: broken\n    roles: [switch_plug]\n    steps:\n"
@@ -238,13 +277,10 @@ def test_a_step_takes_only_beside_its_kind(tmp_path: Path):
     ]
 
 
-def test_firmware_fact_marks_the_test_and_its_digest_follows_the_test(tmp_path: Path):
+def test_firmware_fact_marks_the_test(tmp_path: Path):
     path = tmp_path / "fact.yaml"
     path.write_text(HEADER.replace("    steps:\n", "    firmware_fact: true\n    steps:\n") + "      - wait: 1\n")
     (fact,) = load_step_file(path).tests
     path.write_text(HEADER + "      - wait: 1\n")
     (plain,) = load_step_file(path).tests
     assert (fact.firmware_fact, plain.firmware_fact) == (True, False)
-    assert fact.digest and fact.digest != plain.digest
-    path.write_text("# a comment moves nothing\n" + HEADER + "      - wait: 1\n")
-    assert load_step_file(path).tests[0].digest == plain.digest

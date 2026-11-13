@@ -1,7 +1,9 @@
 # The rig
 
 The rig runs DeviceSide's actions against a live Home Assistant and its real devices, and writes the test records
-that clear an adapter's `experimental` flag. Its tests are YAML step files in `ha_rig/steps/`, one per action.
+that sign off an integration's changes (deviceside's `docs/evidence.md`). Its tests are deviceside's YAML step files
+in the checkout under test, shared ones in `tests/rig/steps/` and an integration's own in `tests/integrations/<x>/rig/`:
+deviceside owns the test plan, the rig runs it.
 `scripts/rig.py` runs each file against every integration in the profile that has an adapter for the action, after
 an authorization gate (below): the devices change state, so nothing moves until the work is authorized and, at a
 terminal, you say yes. `--dry-run` prints the plan and the decision, and stops.
@@ -68,8 +70,9 @@ an Adaptive Lighting switch). `.env.rig` (from `ha_rig/env.example`) holds what 
 address, tokens, deploy commands and Hue bridge.
 
 `--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
-a record never narrows: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`) writes no record
-over one that passed a case on it, and says `Kept <record>`. Run a profile with the role, or, to narrow on purpose
+a record never narrows to a profile: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`), or
+whose group lacks the light a case targets, writes no record over one that passed that case, and says `Kept
+<record>`. Run a profile with the role, or, to narrow on purpose
 (a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's (through
 `.private-terms.rig`) and this repo's (`scripts/check_private.py`), keep every profile's entity IDs, members, supplies,
@@ -149,40 +152,45 @@ sensor on) is named in a warning, with its journal and profile, and the probe st
 changes that anyone could see: `--visual none`, nothing, or `--visual profile`, only what a pre-authorized profile
 covers. `--dry-run` prints whether it may go and runs nothing.
 
-### Coverage, stopping and resuming
+### What runs, stopping and resuming
 
-The rig treats the full-suite run before an RC as **coverage**: every test has a result at code unchanged since,
-built up over any number of runs. A suite's code is that of each adapter its tests call on its integration (its own
-action's, and those its `call` steps name), as deviceside's `check_release.py --records` defines an adapter's code:
-the `core/` modules it imports count, `actions/` doesn't, and nor does HA's version. Editing a suite's step file counts too. How:
-`ha_rig/coverage.py`.
+A run runs the suites it is asked for: every one the profile has an adapter for, narrowed by `--integration`,
+`--action` and `-k`. What needs testing is deviceside's to say, not the rig's: the rig keeps no record of what is
+proven or stale, and a test record in the checkout never leaves a suite out.
 
-A suite is **covered** when its record (`<suite>.md` in the integration's records directory, deviceside's
-`check_release.test_records_dir`) cites a commit at which that code is unchanged and lists exactly the cases the suite
-plans now (and shows none as skipped that this profile runs: a narrower profile's record doesn't cover a broader one),
-or when the ledger holds a result for every case it plans. A run leaves a selected suite that is covered out, saying
-`covered (record <date>, commit <c>), skipped`, and runs only the cases of the rest with no saved result; a run whose
-every selected suite is covered says so and stops. `--fresh` ignores the records and the saved cases of the selected
-suites and reruns them whole. The selection (`--integration`, `--action`, `-k`, `--serial`) decides only what runs, so
-a `-k` run's cases count towards their suite's record.
+TODO: deviceside's `check_release.py --signoffs` (evidence-rules plan, step 4) is to list the integrations that need a
+sign-off in a machine-readable form; a later rig change takes that list as its selection.
 
-**`--coverage`** prints each selected suite's coverage at the checkout's HEAD, as `--check` does the devices: no
-lock, no deploy, nothing written. A suite is `covered`, `partial N/M` with its missing cases and the entities they
-need, or `uncovered`, with its record stale (naming the files changed since) or missing. It ends with the total and
-every device the missing cases need: what to power up for the next run. With no selection it covers the whole
-profile, which is the RC view, and exits 0 only when every suite is covered. It can't confirm a lend (Observed tests,
-below) without a run, so a missing observed case whose automated twin's last saved calls an `_observed.md` pass covers
-says `observed <date>, if the calls are unchanged`, noting a pass seen on another model or firmware.
+**Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`), or any case of a
+`firmware_fact: true` test, its watched one included (Writing a step file, below). It finds a fact, which stands once
+written down in the integration's `_facts.md` (Facts, below), so a default run skips it, `skipped` with `fact case: runs
+with --facts`. The automated case of a test with `observe:` is an ordinary check of a shipped call, and every default
+run runs it, unless the test is a firmware fact. `--facts` adds the fact cases, for when a change or a bug calls for
+one; with `--unattended` too, the watched cases are `not observed`, so `--facts --unattended` runs every automated fact.
+A skipped case moves nothing. A default run never writes `_facts.md`, so it never erases a fact. A one-off probe (a
+bulb's timer that can't be stopped through its bridge, say) is no rig test: it lives in a deviceside research file.
 
 **The ledger.** A test run saves each case the moment it finishes, with the facts (HA version, devices) its suite's
-parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). Its
-entries are per suite, keyed by the suite's code at the commit tested, so runs from worktrees with different code
-sit side by side, and a run on one integration never discards another's. A saved case holds while it planned the
-same entities (a profile change reruns it), and a `not observed` one only for an `--unattended` run. An entry goes
-when HA runs another version (a record names one), when its suite's record is promoted into the checkout (the record
-carries it from then on; Test records, below), when the run that saved a failure of one of its cases ends (the
-suite reruns whole, so a record never covers up a failure; the run's report keeps it), or after 30 days untouched. `--no-deploy` saves nothing, as it
-writes no record.
+parts took, in `deviceside-rig-progress/<profile>.json` in deviceside's git common dir (`ha_rig/progress.py`). It is
+there only to resume a run: its entries are per suite, keyed by the commit (HEAD when the run plans), so a rerun at the
+same commit picks up where the last one stopped, and any other starts the suite afresh. The commit covers the step
+files, as deviceside's. A saved case holds while it planned the same entities (a profile change reruns it), and a `not
+observed` one only for an `--unattended` run. An entry goes when HA runs another version (a record names one), when
+its suite's record is promoted into the checkout (Test records, below), when the run that saved a failure of one of its
+default cases ends (the suite reruns whole, so a record never covers up a failure; the run's report keeps it; a fact
+case's failure is a fact, and drops nothing), or after 30 days untouched. `--fresh` drops the selected suites' saved
+cases. `--no-deploy` saves nothing, as it writes no record, and neither does a run whose deploy left HA on another tree
+than the one planned (origin moved). A run whose every selected case is saved says so and stops; one whose HEAD moved
+while it waited for its locks stops too, to be run again.
+
+**Uncommitted step files.** A record cites the commit, so it must hold the step files that ran. The rig reads HEAD,
+then the checkout's step files in both homes, and parses each from the bytes it compares with HEAD's copy: a file
+edited, added (tracked or not, ignored or not) or removed, or an edit git is told not to see (assume-unchanged,
+skip-worktree), makes them uncommitted, and so does HEAD moving before the deploy state is read. Such a run still goes
+ahead, so a step file can be iterated on, but it says so, writes no test record or `_facts.md` row and neither reads
+nor saves the ledger: a pass made with an edit that is then reverted would otherwise resume into a record at that
+commit. Commit the step files for a record; committing moves HEAD, so nothing saved before the commit resumes after
+it.
 
 A run that stops part way puts everything back as always and exits 75; rerun it and it picks up at the cases with no
 saved result, planning, locking, moving and estimating only what is left, and printing `Resuming: N of M cases
@@ -194,18 +202,22 @@ saved`. So a 45-minute suite completes as 30 minutes one evening and 15 the next
   Ctrl-C, SIGTERM and the restricted sensor still stop at once: the cases in flight are
   cancelled and rerun on resume.
 - **Records.** The report joins the saved cases to the session's, so a suite finished across sessions writes its
-  record, dated the finishing session and citing its commit. Its cases may have run at earlier commits, all with the
-  same code for the suite, which is what deviceside's gate checks.
-- **Firmware facts.** A `firmware_fact` case's pass is also kept apart from its suite's entry, with the devices it
-  ran on, and outlives the entry, the suite's record and HA's version. While its test is as written then and the
-  profile plans it on the same entities, coverage lends it to the suite at the code tested now, so it counts as
-  saved (`--coverage` says `N by firmware`) and the next record carries it, marked `(firmware fact)`, with its
-  devices' firmware under Device. It goes when it fails or reruns, and when a later part of its suite shows a device
-  of the same model at another firmware. `--fresh` reruns it.
-- **Not covered by a record:** a step-file edit that keeps every case ID. The record doesn't name the step file's
-  version, so such an edit reruns a suite only while it is in the ledger; use `--fresh` to rerun a recorded one.
+  record, dated the finishing session and citing its commit.
 
 ## Writing a step file
+
+A step file lives in deviceside, `tests/rig/steps/<action>.yaml`, and lands in the deviceside PR that adds or changes
+the action it tests. It names roles, never entities: deviceside is public, and its household check covers the file.
+
+An integration's own step file, `tests/integrations/<x>/rig/<action>.yaml`, belongs to that integration's maintainers.
+Its tests join the shared file for the action (the one with no `options` or `name`), as if each said `only: [<x>]`:
+the same suite, record and estimate, run on `<x>` alone; its `expected_log` applies only to the suite on `<x>`. One
+with no shared file for its action stands as its own. It
+takes no `options` or `name`; an `only:` naming another integration, a test name the shared file already has, or an
+action with no adapter on `<x>` fails at load. A repo maintainer may adopt its cases into the shared file.
+The rig's CI parses every one against the paired deviceside checkout (`tests/test_rig_steps.py`). A run while one is
+uncommitted writes no record (Uncommitted step files, above). The rig's own tests use fixture copies in its
+`tests/steps/`, so its CI doesn't depend on deviceside's test plan.
 
 ```yaml
 action: turn_on_for        # the DeviceSide action every test in the file calls
@@ -249,10 +261,11 @@ some integrations; when those pile up, split the file. A step takes `only` too, 
 [zha]}`), for a step one integration needs and the others would only wait through; it names integrations the test
 runs on.
 
-`firmware_fact: true` marks a test that proves how the device behaves (which of two calls wins, the bounds it
-takes, a timing it keeps), not a branch of the adapter's code. Its pass stands across code changes while no device
-of the same model shows another firmware (Coverage, below), so a code change reruns only the suite's other cases.
-Mark only a test whose pass hangs on the device, not on the call the adapter sends: another case must prove the call.
+`firmware_fact: true` marks a test that proves how the device behaves (which of two calls wins, the bounds it takes, a
+timing it keeps), not a branch of the adapter's code. Its every case is a fact case (What runs, above), and it may also
+`observe`: its results, pass or fail, are facts in `_facts.md`, its suite's record lists its cases as `skipped`, and it
+runs only with `--facts`. Mark only a test whose pass hangs on the device, not on the call the adapter sends: another
+case must prove the call.
 
 The roles are listed in `ha_rig/profile.example.yaml`. `group_color` is a native group whose members all take
 color: color moves groupcast only to a group like that, so it runs the color cases a `group` can't. Everything this
@@ -262,7 +275,7 @@ A file with `entry` steps (`lifecycle.yaml`) tests DeviceSide's config entry thr
 the action refusing with `not_loaded` while it is disabled. It runs alone, holding HA exclusively, like an option
 file, and needs a top-level `name:`, which its record takes (`lifecycle.md`) and `--action` picks it by, so it never
 replaces the action's own. A file with no test for an integration (every test `only:` elsewhere, as `lifecycle.yaml`
-is for all but Hue) isn't selected there, so the record, the dry-run and `--coverage` don't show it.
+is for all but Hue) isn't selected there, so the record and the dry-run don't show it.
 
 An adapter with options runs each file for its action with them pinned through DeviceSide's options flow:
 `options: [<name>]` at the top of a file turns those on, and every other option in the adapter's scope runs off. Its
@@ -311,59 +324,26 @@ has never shown and a check can't measure: once watched on an integration, a beh
 
 Such a test runs twice, so you are asked only what a machine can't check:
 
-1. **Automated**, with every other test first: setup and steps, every check applied. It has no automated run if its
+1. **Automated**, with every other test first: setup and steps, every check applied. It runs in every run, as any
+   test's does (unless the test is a firmware fact), and its result is the record's. It has no automated run if its
    steps check nothing or its setup has a `do`.
-2. **Observed** (`<name>[<role>] observed`), after all automated runs. Setup runs and settles for 2 s, then the runner
-   prints `see` (in bold) and `watch` and waits for Enter. The steps run with their checks turned into waits, so the
-   timing matches. Then you answer `ask`: Enter or `y` if you saw it, `n` if not, which fails the test and asks what
-   you saw instead. It is skipped if its automated run failed, and if a step fails after Enter it prints
-   `nothing to observe` and the reason.
+2. **Observed** (`<name>[<role>] observed`), a fact case, so only with `--facts`, after all automated runs. Setup runs
+   and settles for 2 s, then the runner prints `see` (in bold) and `watch` and waits for Enter. The steps run with their
+   checks turned into waits, so the timing matches. Then you answer `ask`: Enter or `y` if you saw it, `n` if not, which
+   fails the test and asks what you saw instead. It is skipped if its automated run failed, and if a step fails after
+   Enter it prints `nothing to observe` and the reason.
 
 `roles: [<role>]` in `observe:` limits the observed run to those roles, and `only: [<integration>]` to those
-integrations; the rest run automated only. `--unattended` doesn't ask, so an observed case is lent a pass where
-`_observed.md` covers its calls (below) and else reports `not observed`. Neither fails, but a test counts toward a test record only when both of its runs pass.
-
-**An observed pass proves a call pattern, not a test** (`ha_rig/observed.py`). It shows how a maker's devices,
-started from a state, respond to a sequence of calls, and to any sequence that sequence begins with: a device can't
-know which calls are still to come. Every attended answer adds a row per device to the integration's
-`_observed.md`, in its records directory: maker, model, firmware, starting state, the calls the observed case
-sent, the case it was seen in, the date and `pass` or `fail` (a `n`; a step that broke adds nothing). A row with the
-same device, state and calls is replaced unless it is newer; on one date a fail wins. Its Calls section maps each call's hash to the call.
-
-- **A call** is what DeviceSide's wire trace (the `deviceside_wire` event, on while its
-  `custom_components.deviceside.wire` logger is at DEBUG) says a transport sent: `(transport, command, params, options)`, with
-  no device addressing, plus the rig's own HA service calls in steps. The starting state is the case's `setup` as
-  written, with entities replaced by their slot. **A sequence** is, per slot (`target` for the case's role, another
-  role by name, `<slot>.member<n>` for a group's members), the calls in order, repeats collapsed; timing and
-  interleaving between slots don't count.
-  `options` is a transport setting that changes how the call is encoded (Z2M's `hue_native_control`); it is hashed only
-  when present, so calls without it hash as before, and `true` and `false` are different calls. A `null` option is
-  unknown: the case is never lent a pass and records none, and the run report's Calls section says so.
-- **Numbers count by sign.** A call is hashed with every number reduced to `+`, `-` or `0`, because values computed
-  from where a light was when stopped (a pinned brightness, the remaining transition) differ run to run, while the
-  shape of the call does not. Keys, strings and booleans stay exact, so `0` against a positive is a different call; the
-  Calls section and run reports keep the exact values of the latest call. One blind spot is accepted: ZHA's
-  EnhancedMoveHue carries direction as `move_mode` 1 (up) or 3 (down), which both read `+`, so an observed `lower_hue`
-  test that shares `raise_hue`'s setup on ZHA would be lent its pass. None does.
-- **Lent.** After the automated run of an observed test passes, its observed case is lent a pass, not run or asked,
-  when a `pass` row of the same starting state has calls the automated run's begin (or equal), every device in the
-  case has that row's maker, and no newer `fail` row on one of the case's models has calls the run's begin with. It
-  holds across tests, suites, roles, models and firmware of that maker, and across HA and DeviceSide versions: a
-  regression an upgrade brings is missed until someone reports it and an attended run records the failure. Its record
-  row reads `pass (observed <date>)`, with a footnote to `_observed.md`. A `fail` seen later in the same run that
-  blocks a lend takes it back at once (`not observed: a fail seen this run blocks its lend`), and the case is then
-  run if someone is there.
-- **Not lent**, and run (or `not observed` unattended), when the automated run sent calls no pass covers, or sent no
-  trace: the trace needs `HA_ADMIN_TOKEN` (HA lets only an admin subscribe to the event), and the run says so.
-- **`--reobserve`** runs every observed case regardless, as a spot check after a major firmware upgrade.
+integrations; the rest run automated only. `--unattended` doesn't ask, and reports each observed case `not observed`.
+What you saw is a fact for `_facts.md` (Facts, below), never the record's.
 
 ## After a run
 
 ### Run reports
 
 Every run, failed, partial or unattended, ends by writing a report to `deviceside-rig/` in the system temp folder and
-printing its path: each suite's results with the reason for every failure and skip, then, under Calls, each traced
-case's starting state and its calls per slot, by hash, as `_observed.md` keys them.
+printing its path: each suite's results with the reason for every failure and skip. What DeviceSide sent is in HA's
+log, one DEBUG line per call (`--debug-logs` keeps it).
 
 ### Run logs
 
@@ -372,6 +352,11 @@ a run that touches Z2M, or roams) to `<report>.z2m.log` as they arrive, and HA's
 `<report>.ha.log` when the run ends. A clean run deletes them; after a failure, a stopped move or a crash they stay
 and their paths are printed. When Z2M's coordinator crashed during the run (`ASH_NCP_FATAL_ERROR` or
 `Adapter disconnected`), the summary says so with each crash's time, and the logs stay even after a clean run.
+
+With `HA_ADMIN_TOKEN`, a Z2M case also watches Z2M's log for the coordinator's BUSY refusals, which Herdsman doesn't
+retry on a groupcast. One in a `call` step's window, timed by the rig from the call's send to its answer plus a second
+of log lag, means the call may not have reached the lights: the case runs again, once, after 10 s, and a second
+refusal leaves it `not run`, never saved. A refused `set` is sent once more.
 
 A run also reads HA's log for `WARNING`, `ERROR` and `CRITICAL` lines from `custom_components.deviceside`. Each one
 no step file of the run expects is listed in the summary, keeps the logs and fails the run, so a run that ends clean
@@ -387,33 +372,39 @@ rig never sets it.
 
 ### Test records
 
-When every test of an adapter passes, the run stages its record, `<action>.md` at its path in the checkout, in
-`<report>.records/` next to its report, and writes it to the integration's records directory in the deviceside
-checkout only when the run ends cleanly:
-exit 0 (no failure, not stopped, the bulbs home, no unexpected DeviceSide log line) with a result for every case it
-planned (an unreachable skip isn't one). Any other end, a crash included, leaves the checkout untouched and prints
-the one command that promotes the staged records, `scripts/rig.py --promote <dir>` (any checkout of this repo runs
-it), which copies them in and takes their suites out of the ledger. It never overwrites a record that changed since
-staging: it names it and keeps it staged. A staged suite stays in the ledger, so it reads `covered (saved; no record yet)`, and the next run that ends
-cleanly, running any case, writes its record too. The staged copy sits in the temp folder, which the OS may clear:
-when every selected suite is covered there is no such run, and only `--promote` or `--fresh` writes the record.
+When every default case of an adapter that applies passes, the run stages its record, `<action>.md` at its path in the
+checkout, in `<report>.records/` next to its report, and writes it to the integration's records directory in the
+deviceside checkout only when the run ends cleanly: exit 0 (no failure, not stopped, the bulbs home, no unexpected
+DeviceSide log line) with a result for every case it planned (an unreachable skip isn't one). Any other end, a crash
+included, leaves the checkout untouched and prints the one command that promotes the staged records, `scripts/rig.py
+--promote <dir>` (any checkout of this repo runs it), which copies them in and takes their suites out of the ledger. It
+never overwrites a record that changed since staging: it names it and keeps it staged. A staged suite stays in the
+ledger, and the next run at the same commit that ends cleanly, running any case, writes its record too. The staged copy
+sits in the temp folder, which the OS may clear: when every selected case is saved there is no such run, and only
+`--promote` or `--fresh` writes the record.
 
-A run that observed anything writes its integrations' `_observed.md` straight into the checkout, merged with the rows
-there, whether or not a suite record is written and however the run ends: observations stand whatever the code, and a
-`fail` row only blocks a lend once it is there. Review the diff before committing it.
+A record holds the date, a `Ran` row (`N passed, M skipped`), the Home Assistant version, the devices' model and
+firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row) and Result. It needs every
+default case that applies to pass. The only skips it allows are of fact cases, which it always lists as `skipped`,
+whatever they did in the run, and of cases that don't apply here: an action a test calls has no adapter, the profile
+lacks the role, or a group lacks the light the case targets. Any other skip, a failure, or a case not yet run (left out
+by `-k`, unreachable, or cut short) writes nothing until a later run at the same commit completes it (What runs, above).
+A record with fact cases ends with a line pointing to `_facts.md` and, for each, the latest row on file (``last on file
+2026-11-12, on Mini (`S3`), firmware `2.0`: fail``, or `none on file`), which only reports what is there. The record's
+Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
+off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's. A record never
+narrows to a profile: a run never overwrites one with a record that skips, as not applying (a role the profile lacks, a
+group without the light, no adapter), a case the record passed (Profiles, above). Facts live in `_facts.md`, never in a
+record.
 
-A record holds the date, the Home Assistant version, the devices' model and firmware, a `Covers` row, and each test's
-result. `Covers` is what DeviceSide's `deviceside_scope` events named for the suite's proven cases (only its own action
-and integration's): `domains`, `capabilities` and `fields`, plus each of the adapter's `options` on or off, as the run
-pinned them (`domains=light,switch; capabilities=Switch; fields=brightness; options=predicted_state:on`). All four keys
-are always there, empty when none. It needs the admin connection's scope trace: a suite whose proven cases drew no
-scope event (no `HA_ADMIN_TOKEN`, or the wire logger would not go to DEBUG) writes no record, and the run says so.
-deviceside's `check_release.py --records` holds the row against the adapter's Verified scope. A failed
-suite, or one with a case not yet run (left out by `-k`, unreachable, or cut short), writes nothing until a later run
-completes it (Coverage, above). The PR that clears an adapter's `experimental` flag cites one, and
-`cut-release-candidate` and `cut-release` refuse a head where a released adapter's code (its module and the modules it
-imports from its integration package) differs from the commit one of its records cites: deviceside's
-`scripts/check_release.py --records`. The record's Source row names `scripts/rig.py` and the deviceside commit HA
-loaded, never one of this repo's. So every adapter changed since its last run needs a new run before the next RC:
-`scripts/rig.py --coverage` lists them. A run never overwrites a record with one that skips, for a role its profile
-lacks, a case the record passed (Profiles, above); `--coverage` says `won't write a record` for such a suite.
+### Facts
+
+`_facts.md`, in each integration's records directory (`ha_rig/facts.py`), holds what the fact cases found: one row per
+firmware fact's automated case that passed or failed, and per watched case a person answered (`pass` if you saw it,
+`fail` for a `n`; a step that broke, or nobody there, adds nothing). A row holds the date, the suite (case ids repeat
+across suites), the case, its kind, which says how the fact was seen (`automated` or `observed`), the devices it ran on
+with their firmware (a group's members included, as a record's Device row names them) and the result. The file is only
+ever appended to, a row as each case ends, straight into the checkout, whether or not a record is written and however
+the run ends, except while the step files are uncommitted (The ledger, above): a fact stands whatever the code, until evidence contradicts it, and a line the rig can't read stays as it
+is. Nothing reruns a fact case by itself, and the rig decides nothing from the rows. Review the diff before committing
+it.

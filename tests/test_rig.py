@@ -15,13 +15,13 @@ from pathlib import Path
 import pytest
 from custom_components.deviceside.core.registry import AdapterRegistry
 
-from ha_rig import baseline, engine, observed, target
-from ha_rig.client import WIRE_LOGGER
+from ha_rig import baseline, engine, facts, target
 from ha_rig.engine import load_step_file, load_step_files
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import EXAMPLE, Profile, RigEntity, load_env, main_checkout, profile_paths
 from tests import rig_fakes as fakes
-from tests.rig_fakes import gate_scripts, records_at, write
+from tests.conftest import REAL_INTEGRATION_STEPS_DIRS, REAL_STEPS_DIR
+from tests.rig_fakes import STEPS, records_at, write
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("rig", RIG_HOME / "scripts" / "rig.py")
@@ -152,7 +152,9 @@ def test_load_env_reads_command_vars(tmp_path, monkeypatch):
 
 
 def test_select_plan_lines_and_estimate(profile):
-    step_files = [step_file for step_file in load_step_files() if step_file.action in ("turn_off_for", "turn_on_for")]
+    step_files = [
+        step_file for step_file in load_step_files(STEPS) if step_file.action in ("turn_off_for", "turn_on_for")
+    ]
     suites = rig.select(step_files, profile, None)
     assert [(suite.integration, suite.action) for suite in suites] == [
         ("shelly", "turn_off_for"),
@@ -597,7 +599,7 @@ def test_main_checkout_falls_back_outside_a_repo(tmp_path, monkeypatch):
 
 def test_check_tokens_stops_a_zha_run_without_an_admin_token():
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files() if f.action == "turn_on_for")
+    step_file = next(f for f in load_step_files(STEPS) if f.action == "turn_on_for")
     zha, shelly = rig.Suite(step_file, "zha"), rig.Suite(step_file, "shelly")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok"}
     with pytest.raises(SystemExit, match="HA_URL and HA_TOKEN"):
@@ -695,7 +697,7 @@ def test_check_tokens_stops_a_hue_bridge_step_without_the_bridge_settings(tmp_pa
 def test_check_tokens_stops_a_run_of_an_adapter_with_options_without_an_admin_token():
     # Its options are pinned through DeviceSide's options flow, which is admin only.
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files() if f.action == "raise_brightness")
+    step_file = next(f for f in load_step_files(STEPS) if f.action == "raise_brightness")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok", "HUE_BRIDGE_HOST": "bridge", "HUE_APP_KEY": "key"}
     with pytest.raises(SystemExit, match="hue needs HA_ADMIN_TOKEN"):
         rig.check_tokens(env, [rig.Suite(step_file, "hue")], registry)
@@ -752,9 +754,7 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
     assert set(journal.sections) == {"profile", "options", "cases"}
     assert json.loads((tmp_path / baseline.NAME).read_text()) == {
         "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]},
-        f"logger_level:{WIRE_LOGGER}": {"original": "NOTSET", "holders": [f"{journal.name}#debug"]},
     }
-    assert ha.logger_levels == {WIRE_LOGGER: "DEBUG"}
     assert set(journal.get("cases")) == {"serial"}
 
     os.kill(os.getpid(), signum)
@@ -763,7 +763,6 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
 
     assert "Aborting: putting devices back" in capsys.readouterr().out
     assert put_back(ha)
-    assert ha.logger_levels == {WIRE_LOGGER: "NOTSET"}
     assert not journal.path.exists()
     assert not (tmp_path / baseline.NAME).exists()
 
@@ -780,7 +779,7 @@ async def test_records_cite_the_commit_ha_loaded_not_head_at_the_end(tmp_path, m
 
     written = []
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None):
         written.append(source)
         return [], []
 
@@ -946,7 +945,7 @@ async def test_recover_without_an_admin_token_leaves_the_entry_disabled_in_the_j
 
 def test_check_tokens_stops_a_run_with_entry_steps_without_an_admin_token():
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files() if f.name == "lifecycle")
+    step_file = next(f for f in load_step_files(STEPS) if f.name == "lifecycle")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok"}
     with pytest.raises(SystemExit, match="shelly needs HA_ADMIN_TOKEN"):
         rig.check_tokens(env, [rig.Suite(step_file, "shelly")], registry)
@@ -954,28 +953,18 @@ def test_check_tokens_stops_a_run_with_entry_steps_without_an_admin_token():
 
 
 def test_action_picks_a_named_file_by_its_name_not_its_action():
-    step_files = load_step_files()
+    step_files = load_step_files(STEPS)
     profile = fakes.profile("hue", light_color="light.lamp")
     assert {suite.name for suite in rig.select(step_files, profile, None, ["lifecycle"])} == {"lifecycle"}
     assert {suite.name for suite in rig.select(step_files, profile, None, ["get_attributes"])} == {"get_attributes"}
 
 
 def test_a_file_with_no_test_for_an_integration_is_not_selected_there(profile, tmp_path, monkeypatch):
-    """lifecycle's tests are both `only: [hue]`: shelly has no cases, so no suite, and so no uncovered coverage line."""
-    step_files = load_step_files()
+    """lifecycle's tests are both `only: [hue]`: shelly has no cases, so no suite."""
+    step_files = load_step_files(STEPS)
     suites = rig.select(step_files, profile, None, ["lifecycle"])
     assert [(suite.integration, suite.name) for suite in suites] == [("hue", "lifecycle")]
     assert rig.select(step_files, profile, ["shelly"], ["lifecycle"]) == []
-    monkeypatch.setattr(rig.coverage, "code", lambda suite, registry, repo: ())
-    found = rig.coverage.of(
-        rig.select(step_files, profile, None, ["lifecycle"]),
-        profile,
-        AdapterRegistry.discover(),
-        gate_scripts(tmp_path),
-        "c1",
-        None,
-    )
-    assert {(c.suite.integration, c.suite.name) for c in found} == {("hue", "lifecycle")}
 
 
 def test_main_recovers_before_the_plan_and_recover_alone_stops_there(tmp_path, monkeypatch, capsys):
@@ -1332,21 +1321,20 @@ def run_args(**kwargs) -> types.SimpleNamespace:
         "unattended": True,
         "dry_run": False,
     }
-    return types.SimpleNamespace(**(defaults | {"fresh": False, "no_deploy": False, "roam_check": False} | kwargs))
+    defaults |= {"observed": False, "facts": False, "fresh": False, "no_deploy": False, "roam_check": False}
+    return types.SimpleNamespace(**(defaults | kwargs))
 
 
 ENTITY = {"shelly": "light.a", "zha": "light.b"}
 
 
-def planned(tmp_path, monkeypatch, suites, profile, **kwargs) -> rig.Setup:
-    """plan_coverage() on HA 2026.10.1 at commit c1, with tmp_path as the deviceside checkout: no record anywhere,
-    and each suite's code no files, so its fingerprint is its step file's."""
-    monkeypatch.setattr(rig, "REPO", gate_scripts(tmp_path))
-    monkeypatch.setattr(rig.coverage, "code", lambda suite, registry, repo: ())
+def planned(tmp_path, monkeypatch, suites, profile, commit="c1", **kwargs) -> rig.Setup:
+    """plan_resume() on HA 2026.10.1 at `commit`, with tmp_path as the deviceside checkout."""
+    monkeypatch.setattr(rig, "REPO", tmp_path)
     monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
-    deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
+    deploy = rig.Deploy(commit, "tree1", "tree1", "tree1", "wt/x")
     setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
-    rig.plan_coverage(run_args(**kwargs), setup, tmp_path)
+    rig.plan_resume(run_args(**kwargs), setup, tmp_path)
     return setup
 
 
@@ -1373,7 +1361,6 @@ def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypa
     assert rig.estimate(setup.suites, fakes.OPTION_REGISTRY, False, done=setup.done, resumed=setup.profile) == 30
     rig.print_resume(types.SimpleNamespace(budget=None, keyword=None), setup)
     out = capsys.readouterr().out
-    assert "shelly / raise_brightness: covered (saved; no record yet), skipped" in out
     assert "Resuming: 1 of the 2 cases of the suites to run are saved" in out
 
 
@@ -1385,13 +1372,201 @@ def test_a_selection_or_keyword_shares_the_saved_cases(tmp_path, monkeypatch):
     assert [suite.integration for suite in done_only.suites] == ["shelly"]  # zha's -k cases are all saved
 
 
-def test_covered_suites_are_left_out_and_fresh_reruns_them(tmp_path, monkeypatch, capsys):
+def test_finished_suites_are_left_out_and_pending_and_fresh_reruns_them(tmp_path, monkeypatch, capsys):
     every = ["t[light_ct]", "u[light_ct]"]
     setup = resumed(tmp_path, monkeypatch, {"shelly": every, "zha": every})
-    assert setup.suites == [] and [str(c) for c in setup.coverage] == ["covered (saved; no record yet)"] * 2
+    assert setup.suites == [] and rig.pending(setup) == {("shelly", "raise_brightness"), ("zha", "raise_brightness")}
     again = planned(tmp_path, monkeypatch, *reversed(resumable(tmp_path)), fresh=True)
-    assert again.suites == again.selected and not again.done
-    assert [str(c) for c in again.coverage] == ["uncovered (no record)"] * 2
+    assert again.suites == again.selected and not again.done and rig.pending(again) == set()
+
+
+def test_a_record_in_the_checkout_never_leaves_a_suite_out(tmp_path, monkeypatch):
+    """Whether a suite needs testing is deviceside's to say: the rig runs what it is asked, records or not."""
+    profile, suites = resumable(tmp_path)
+    for integration in ("shelly", "zha"):
+        (path := tmp_path / record_path(integration)).parent.mkdir(parents=True)
+        path.write_text("# a passing record\n| Source | rig run, commit `c1` |\n")
+    assert planned(tmp_path, monkeypatch, suites, profile).suites == suites
+
+
+def withheld_run(tmp_path, monkeypatch, loaded_at: str, committed: bool, deploy_commit: str) -> tuple[rig.Setup, dict]:
+    """prepare() and run_approved() with a pass saved at c1, after step files loaded at `loaded_at`, HEAD's or not
+    (`committed`), and the deploy state read at `deploy_commit`: what the run was given."""
+    resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})  # saved at c1
+    profile, suites = resumable(tmp_path)
+    monkeypatch.setattr(engine, "load_checkout_steps", lambda repo: ([suites[0].file], loaded_at, committed))
+    monkeypatch.setattr(rig, "load_env", dict)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: None)
+    monkeypatch.setattr(rig.Profile, "load", lambda path: profile)
+    monkeypatch.setattr(rig, "run_suites", lambda args, profile, registry, step_files: suites)
+    deploy = rig.Deploy(deploy_commit, "tree1", "tree1", "tree1", "wt/x")
+    monkeypatch.setattr(rig, "deploy_state", lambda cmd: deploy)
+    monkeypatch.setattr(rig, "check_tokens", lambda *args: None)
+    setup = rig.prepare(run_args(check=False, profile=None), tmp_path)
+    seen = {"suites": setup.suites}
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda cmd, deploy, deploying: deploy.commit)
+    monkeypatch.setattr(
+        rig,
+        "run_rig",
+        lambda *args, **kwargs: seen.update(commit=args[6], progress=kwargs["progress"], facts=kwargs["facts"]),
+    )
+    monkeypatch.setattr(rig, "run_tests", lambda coro, aborted=None: 0)
+    held = types.SimpleNamespace(share_ha=lambda: None, claim=None)
+    args = types.SimpleNamespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, held, None, False, False) == 0
+    return setup, seen
+
+
+def test_committed_step_files_write_records(tmp_path, monkeypatch, capsys):
+    setup, seen = withheld_run(tmp_path, monkeypatch, "c1", True, "c1")
+    assert seen["commit"] == "c1" and seen["progress"] is not None and seen["facts"]
+    assert len(seen["suites"]) == 2 and setup.done  # the saved pass resumes
+    assert "Uncommitted step files" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("loaded_at", "committed", "deploy_commit"),
+    [("c1", False, "c1"), ("c0", True, "c1")],
+    ids=["uncommitted", "head_moved_between_the_load_and_the_deploy_read"],
+)
+def test_uncommitted_step_files_withhold_records(tmp_path, monkeypatch, capsys, loaded_at, committed, deploy_commit):
+    """The run goes ahead, but reads and saves no ledger and writes no record or fact row: a pass saved at the commit,
+    made before the edit, doesn't resume, and none made with the edit is saved to resume once it is reverted."""
+    setup, seen = withheld_run(tmp_path, monkeypatch, loaded_at, committed, deploy_commit)
+    assert setup.withholds and not setup.done and seen["suites"] == resumable(tmp_path)[1]
+    assert seen == seen | {"commit": None, "progress": None, "facts": False}
+    out = capsys.readouterr().out
+    assert "this run writes no test record or fact row and saves no progress" in out
+    assert "--dry-run" not in out
+
+
+def test_head_moving_while_the_run_waited_withholds_records(tmp_path, monkeypatch, capsys):
+    """take() reads the deploy state again; HEAD moved since the load, so the files that ran have no commit."""
+    setup, _ = withheld_run(tmp_path, monkeypatch, "c1", True, "c1")
+    assert not setup.withholds
+    setup.deploy = rig.Deploy("c2", "tree1", "tree1", "tree1", "wt/x")
+    assert setup.withholds
+
+
+REAL_LOAD_CHECKOUT_STEPS = engine.load_checkout_steps  # as imported, before the autouse fixture swaps it
+
+
+def steps_checkout(tmp_path: Path, monkeypatch) -> Path:
+    """A git checkout in tmp_path with one committed step file; its steps directory."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(target, "steps_dir", REAL_STEPS_DIR)
+    monkeypatch.setattr(target, "integration_steps_dirs", REAL_INTEGRATION_STEPS_DIRS)
+    (steps := tmp_path / target.STEPS).mkdir(parents=True)
+    (steps / "stop.yaml").write_text((STEPS / "stop.yaml").read_text())
+    run_git("init", "-q", str(tmp_path))
+    run_git("-C", str(tmp_path), "add", ".")
+    run_git("-C", str(tmp_path), "commit", "-q", "-m", "steps")
+    return steps
+
+
+def test_step_files_as_committed_are_heads(tmp_path, monkeypatch):
+    steps_checkout(tmp_path, monkeypatch)
+    files, head, committed = REAL_LOAD_CHECKOUT_STEPS(tmp_path)
+    assert committed and head == target.head_commit(tmp_path) and [f.action for f in files] == ["stop"]
+
+
+@pytest.mark.parametrize("hidden", ["", "status.showUntrackedFiles=no", "excluded"])
+def test_an_untracked_step_file_isnt_heads(tmp_path, monkeypatch, hidden):
+    """git status may not show it, but the loader reads it."""
+    steps = steps_checkout(tmp_path, monkeypatch)
+    if hidden == "excluded":
+        (tmp_path / ".git" / "info").mkdir(exist_ok=True)
+        (tmp_path / ".git" / "info" / "exclude").write_text("turn_on_for.yaml\n")
+    elif hidden:
+        run_git("-C", str(tmp_path), "config", *hidden.split("="))
+    (steps / "turn_on_for.yaml").write_text((STEPS / "turn_on_for.yaml").read_text())
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+
+
+@pytest.mark.parametrize("hidden", ["", "--assume-unchanged", "--skip-worktree"])
+def test_a_modified_or_removed_step_file_isnt_heads(tmp_path, monkeypatch, hidden):
+    steps = steps_checkout(tmp_path, monkeypatch)
+    if hidden:
+        run_git("-C", str(tmp_path), "update-index", hidden, f"{target.STEPS}/stop.yaml")
+    (steps / "stop.yaml").write_text((steps / "stop.yaml").read_text() + "# edited\n")
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+    (steps / "stop.yaml").unlink()
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+
+
+def test_an_integrations_own_step_file_is_checked_against_head_too(tmp_path, monkeypatch):
+    steps_checkout(tmp_path, monkeypatch)
+    (own := tmp_path / target.INTEGRATIONS / "shelly" / "rig").mkdir(parents=True)
+    (own / "turn_on_for.yaml").write_text(
+        "action: turn_on_for\nrig_seconds: 1\ntests:\n  - name: o\n    roles: [switch_plug]\n    steps: [{wait: 0}]\n"
+    )
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # untracked
+    run_git("-C", str(tmp_path), "add", ".")
+    run_git("-C", str(tmp_path), "commit", "-q", "-m", "own")
+    files, _, committed = REAL_LOAD_CHECKOUT_STEPS(tmp_path)
+    assert committed and {(f.action, f.owned_by) for f in files} == {
+        ("stop", frozenset()),
+        ("turn_on_for", frozenset({"shelly"})),
+    }
+    (own / "turn_on_for.yaml").write_text((own / "turn_on_for.yaml").read_text() + "# edited\n")
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # modified
+    (own / "turn_on_for.yaml").unlink()
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # removed
+    (tmp_path / target.INTEGRATIONS / "shelly" / "x.yaml").write_text("not a step file\n")
+    run_git("-C", str(tmp_path), "commit", "-q", "-am", "gone")
+    assert REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]  # only *.yaml directly in rig/ counts
+
+
+def test_committing_the_step_files_moves_the_ledger_key(tmp_path, monkeypatch):
+    """Committing an edit moves HEAD, the ledger's key, so a pass saved before it never resumes into a record."""
+    steps = steps_checkout(tmp_path, monkeypatch)
+    before = target.head_commit(tmp_path)
+    (steps / "stop.yaml").write_text((steps / "stop.yaml").read_text() + "# edited\n")
+    assert not REAL_LOAD_CHECKOUT_STEPS(tmp_path)[2]
+    run_git("-C", str(tmp_path), "commit", "-q", "-am", "edit")
+    _, head, committed = REAL_LOAD_CHECKOUT_STEPS(tmp_path)
+    assert committed and head != before
+    # A suite saved at the old HEAD starts afresh at the new one (test_another_commit_starts_the_suites_afresh).
+
+
+def test_a_head_that_moved_while_the_run_waited_stops_it(tmp_path, monkeypatch):
+    profile, suites = resumable(tmp_path)
+    setup = planned(tmp_path, monkeypatch, suites, profile)
+    closed = []
+    held = types.SimpleNamespace(claim=types.SimpleNamespace(covers=lambda claim: True), close=lambda: closed.append(1))
+    monkeypatch.setattr(rig.locks, "hold", lambda claim, holder, directory: held)
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt/x")
+    monkeypatch.setattr(rig, "deploy_state", lambda cmd: rig.Deploy("c2", "tree1", "tree1", "tree1", "wt/x"))
+    with pytest.raises(SystemExit, match="HEAD moved while this run waited"):
+        rig.take(types.SimpleNamespace(no_deploy=False, roam_check=False), setup, tmp_path)
+    assert closed == [1]
+
+
+def test_a_run_saves_no_progress_when_ha_loaded_another_tree(tmp_path, monkeypatch, capsys):
+    profile, suites = resumable(tmp_path)
+    setup = planned(tmp_path, monkeypatch, suites, profile)
+    seen = {}
+
+    def run_rig(*args, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda cmd, deploy, deploying: None)
+    monkeypatch.setattr(rig, "run_rig", run_rig)
+    monkeypatch.setattr(rig, "run_tests", lambda coro, aborted=None: seen.update(aborted=aborted) or 0)
+    held = types.SimpleNamespace(share_ha=lambda: None, claim=None)
+    args = types.SimpleNamespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, held, None, True, False) == 0
+    assert seen["progress"] is None and seen["aborted"] is None and seen["pending"] == set()
+    assert "saves no progress" in capsys.readouterr().out
+
+
+def test_another_commit_starts_the_suites_afresh(tmp_path, monkeypatch):
+    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
+    assert setup.done
+    profile, suites = resumable(tmp_path)
+    assert not planned(tmp_path, monkeypatch, suites, profile, commit="c2").done
 
 
 def test_a_saved_case_on_other_entities_or_unobserved_doesnt_hold(tmp_path, monkeypatch):
@@ -1405,7 +1580,7 @@ def test_a_saved_case_on_other_entities_or_unobserved_doesnt_hold(tmp_path, monk
     assert set(planned(tmp_path, monkeypatch, suites, profile).done) == {("shelly", "raise_brightness", "u[light_ct]")}
 
 
-def test_a_case_unreachable_now_keeps_what_it_saved_and_a_record_outlives_an_ha_upgrade(tmp_path, monkeypatch):
+def test_a_case_unreachable_now_keeps_what_it_saved_and_an_ha_upgrade_drops_it(tmp_path, monkeypatch):
     profile, suites = resumable(tmp_path)
     earlier = planned(tmp_path, monkeypatch, suites, profile).progress
     earlier.record(
@@ -1414,14 +1589,11 @@ def test_a_case_unreachable_now_keeps_what_it_saved_and_a_record_outlives_an_ha_
     profile.offline = frozenset({"light.a"})  # were the plan made with it down, the saved pass would still stand
     assert set(planned(tmp_path, monkeypatch, suites, profile).done) == {("shelly", "raise_brightness", "t[light_ct]")}
     profile.offline = frozenset()
-    fresh = rig.coverage.Freshness(rig.coverage.Record(tmp_path / "r.md", "c0", "2026-11-01", frozenset()), None)
-    monkeypatch.setattr(rig.coverage, "freshness", lambda *args: fresh)
     monkeypatch.setattr(rig, "ha_version", lambda env: "2027.1.0")
     deploy = rig.Deploy("c1", "tree1", "tree1", "tree1", "wt/x")
     setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
-    rig.plan_coverage(run_args(), setup, tmp_path)
+    rig.plan_resume(run_args(), setup, tmp_path)
     assert not setup.done  # the saved case ran on another HA
-    assert setup.suites == [] and all(c.covered for c in setup.coverage)  # the records still cover both
 
 
 def test_a_saved_failure_reruns_its_whole_suite(tmp_path, monkeypatch):
@@ -1434,14 +1606,6 @@ def test_a_saved_failure_reruns_its_whole_suite(tmp_path, monkeypatch):
         suites[0], engine.CaseResult("u[light_ct]", "light_ct", "light", engine.Outcome.FAIL, "x", ("light.a",))
     )
     assert planned(tmp_path, monkeypatch, suites, profile).done == {}
-
-
-def test_an_edited_step_file_stales_its_saved_cases(tmp_path, monkeypatch):
-    setup = resumed(tmp_path, monkeypatch, {"shelly": ["t[light_ct]"]})
-    assert setup.done
-    profile, suites = resumable(tmp_path)
-    (tmp_path / "steps.yaml").write_text(TWO_SUITES + "# edited\n")  # the fingerprint reads it at the plan
-    assert not planned(tmp_path, monkeypatch, suites, profile).done
 
 
 def staged(directory: Path) -> list[str]:
@@ -1458,7 +1622,7 @@ def record_path(integration: str, name: str = "raise_brightness") -> str:
 def recording(written: list[list[str]]):
     """A write_records that notes each call's recordable suites and writes a stub record for each, where it is told."""
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None):
         paths = []
         for part in result.suites:
             if part.recordable:
@@ -1567,7 +1731,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
     progress = planned(tmp_path, monkeypatch, suites, profile).progress
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
-    monkeypatch.setattr(rig, "REPO", gate_scripts(tmp_path))
+    monkeypatch.setattr(rig, "REPO", tmp_path)
     for suite in suites:
         for case_id in ("t[light_ct]", "u[light_ct]"):
             result = engine.CaseResult(
@@ -1576,7 +1740,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
             progress.record(suite, result)
         progress.facts(suite, "2026.10.1", [])
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None):
         path = into("zha") / "raise_brightness.md"
         path.parent.mkdir(parents=True)
         path.write_text("zha\n")
@@ -1611,7 +1775,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
     written: list[list[str]] = []
 
-    async def write_records(result, registry, records, date, source, into=None, untraced=None):
+    async def write_records(result, registry, records, date, source, into=None):
         written.append([part.suite.integration for part in result.suites if part.recordable])
         return [], []
 
@@ -1642,7 +1806,7 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     assert session(frozenset({"light.b"})) == (0, ["light.a"])
     assert written == [[]]  # partial: light.b's case skipped as unreachable
     saved = rig.Progress.load(tmp_path, "house")
-    saved.track(suites[0], planned(tmp_path, monkeypatch, suites, profile).coverage[0].fingerprint)
+    saved.track(suites[0], "c1")
     assert set(saved.done()) == {("shelly", "raise_brightness", "t[light_ct]")}  # the skip isn't saved
 
     ha.states["light.b"] = {"entity_id": "light.b", "state": "on", "attributes": {"brightness": 90}}
@@ -1652,52 +1816,31 @@ def test_an_unreachable_run_then_a_completion_run_writes_the_record_running_only
     assert {call[2].get("entity_id") for call in ha.calls if call[0] == "light"} == {"light.b"}
 
 
-def test_coverage_lists_each_suite_the_missing_cases_and_the_devices_they_need(tmp_path, monkeypatch):
-    entities = [
-        RigEntity("light.a", frozenset({"light_ct"}), powered_by="switch.p"),
-        RigEntity("switch.p", frozenset({"switch_plug"})),
-    ]
-    profile = Profile({"shelly": entities, "zha": [RigEntity("light.b", frozenset({"light_ct"}))]}, {}, name="house")
-    step_file = load_step_file(write(tmp_path, "steps.yaml", TWO_SUITES))
-    suites = [rig.Suite(step_file, "shelly"), rig.Suite(step_file, "zha")]
-    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
-    earlier.record(
-        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.a",))
-    )
-    plan = planned(tmp_path, monkeypatch, suites, profile).coverage
-    assert rig.coverage_lines(plan, profile) == [
-        "  shelly / raise_brightness: partial 1/2",
-        "      u[light_ct]: light.a, switch.p",
-        "  zha / raise_brightness: uncovered (no record)",
-        "0 of 2 suites covered; 3 cases missing.",
-        "The missing cases need: light.a, light.b, switch.p",
-    ]
+@pytest.mark.parametrize(("flags", "facts"), [([], False), (["--facts"], True), (["--facts", "--unattended"], True)])
+def test_facts_opts_each_selected_suite_in(flags, facts, monkeypatch):
+    seen = []
+
+    def capture(args):
+        profile = fakes.profile("shelly", switch_plug="switch.plug")
+        seen.extend(rig.run_suites(args, profile, AdapterRegistry.discover()))
+        return 0
+
+    monkeypatch.setattr(rig, "wait_or_run", capture)
+    assert rig.main(["--dry-run", "--integration", "shelly", "--action", "set_auto_off", *flags]) == 0
+    assert seen and {suite.facts for suite in seen} == {facts}
 
 
-def test_coverage_changes_nothing_not_even_a_stale_ledger(tmp_path, monkeypatch, capsys):
-    profile, suites = resumable(tmp_path)
-    earlier = planned(tmp_path, monkeypatch, suites, profile).progress
-    earlier.record(
-        suites[0], engine.CaseResult("t[light_ct]", "light_ct", "light", engine.Outcome.FAIL, "x", ("light.a",))
-    )
-    ledger = rig.Progress.load(tmp_path, "house").path
-    before = ledger.read_text()
-    monkeypatch.setattr(rig, "load_env", dict)
-    monkeypatch.setattr(rig, "choose_profile", lambda name, env: None)
-    monkeypatch.setattr(rig.Profile, "load", lambda path: profile)
-    monkeypatch.setattr(rig, "run_suites", lambda args, profile, registry: suites)
-    monkeypatch.setattr(rig, "git", lambda *args, check=True: "" if "status" in args else "c1")
-    monkeypatch.setattr(rig.AdapterRegistry, "discover", lambda: fakes.OPTION_REGISTRY)
-    assert rig.coverage_only(run_args(profile=None), tmp_path) == 1
-    assert ledger.read_text() == before  # its failed suite would drop, but only a run saves
-    assert "0 of 2 suites covered; 4 cases missing." in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("extra", [["--check"], ["--dry-run"], ["--fresh"], ["--ignore-unreachables"], ["--serial"]])
-def test_coverage_is_read_only_and_takes_only_a_selection(extra, capsys):
+@pytest.mark.parametrize("mode", [["--recover"], ["--roam-check"], ["--wait-free"]])
+def test_facts_is_for_a_run_or_check(mode, capsys):
     with pytest.raises(SystemExit):
-        rig.main(["--coverage", *extra])
-    assert "--coverage takes only" in capsys.readouterr().err
+        rig.main([*mode, "--facts"])
+    assert "--facts is for a test run or --check" in capsys.readouterr().err
+
+
+def test_observed_is_gone(capsys):
+    with pytest.raises(SystemExit):
+        rig.main(["--dry-run", "--observed"])
+    assert "unrecognized arguments: --observed" in capsys.readouterr().err
 
 
 def test_a_signal_stops_a_run_with_progress_resumable(capsys):
@@ -1793,7 +1936,7 @@ def test_the_dry_run_plan_lists_no_option_case_for_shelly(tmp_path, capsys):
 
 def one_staged(tmp_path: Path) -> rig.Staging:
     """A run's staging holding one record, for the checkout at tmp_path/repo."""
-    repo = gate_scripts(tmp_path / "repo")
+    repo = tmp_path / "repo"
     staging = rig.Staging(tmp_path / "reports" / "run.records", repo)
     path = staging.test_records_dir("shelly") / "raise_brightness.md"
     path.parent.mkdir(parents=True)
@@ -1877,16 +2020,13 @@ def observing_run(tmp_path, monkeypatch):
     """rig.observing's on_result over a checkout in tmp_path; returns it, the suite and the checkout's records
     directory for an integration."""
     _, suites = resumable(tmp_path)
-    monkeypatch.setattr(rig, "REPO", gate_scripts(tmp_path))
+    monkeypatch.setattr(rig, "REPO", tmp_path)
     records = rig.checkout_records
     registry = types.SimpleNamespace(integrations={"shelly": types.SimpleNamespace(title="Shelly")})
     return rig.observing(registry, None), suites[0], records
 
 
 def watched(passed: bool) -> engine.CaseResult:
-    trace = observed.Trace(
-        "s0", (("slot", ("h1",)),), {"h1": ("t", "c", {}, {})}, (observed.Device("Acme", "S3", "2.0"),)
-    )
     return engine.CaseResult(
         "t[light_ct] observed",
         "light_ct",
@@ -1894,12 +2034,12 @@ def watched(passed: bool) -> engine.CaseResult:
         engine.Outcome.PASS if passed else engine.Outcome.FAIL,
         detail="" if passed else engine.NOT_SEEN + "it stayed dark",
         twin="t[light_ct]",
-        trace=trace,
+        devices=(engine.Device("Mini", "S3", "2.0"),),
     )
 
 
 def observed_rows(records) -> list[tuple[str, str]]:
-    return [(row.date, row.result) for row in observed.ObservedFile.read(records("shelly") / "_observed.md", "").rows]
+    return [(row.date, row.result) for row in facts.FactsFile.read(records("shelly") / "_facts.md").rows]
 
 
 def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_then(tmp_path, monkeypatch, capsys):
@@ -1907,28 +2047,22 @@ def test_each_observed_case_is_written_into_the_checkout_as_it_ends_and_dated_th
     today = rig.datetime.date.today().isoformat()
     on_result(suite, watched(False))  # no report, no commit, a run that dies here: the row is there
     assert observed_rows(records) == [(today, "fail")]
-    assert "_observed.md" in capsys.readouterr().out
+    assert "_facts.md" in capsys.readouterr().out
 
 
 def test_a_report_leaves_a_rows_date_alone(tmp_path, monkeypatch):
     on_result, suite, records = observing_run(tmp_path, monkeypatch)
     on_result(suite, watched(True))
-    path = records("shelly") / "_observed.md"
+    path = records("shelly") / "_facts.md"
     path.write_text(path.read_text().replace(rig.datetime.date.today().isoformat(), "2026-01-01"))
     result = engine.RunResult([engine.SuiteResult(suite, [watched(True)], True)])
     asyncio.run(rig.report(result, fakes.OPTION_REGISTRY, None, resumable(tmp_path)[0], None))
     assert observed_rows(records) == [("2026-01-01", "pass")]
 
 
-def test_an_old_pass_does_not_replace_a_newer_fail_and_a_same_day_fail_beats_a_pass(tmp_path, monkeypatch):
+def test_each_answer_appends_a_row_even_the_same_one_again(tmp_path, monkeypatch):
     on_result, suite, records = observing_run(tmp_path, monkeypatch)
     on_result(suite, watched(False))
-    [row] = observed.ObservedFile.read(records("shelly") / "_observed.md", "").rows
-    older = observed.ObservedFile("Shelly", [replace(row, date="2026-01-01", result="pass")], {})
-    older.add([replace(row, date="2026-01-01", result="pass")], {})
-    assert [(r.date, r.result) for r in older.rows] == [("2026-01-01", "pass")]
-    older.add([row], {})
-    older.add([replace(row, date="2026-01-01", result="pass")], {})
-    assert [r.result for r in older.rows] == ["fail"]  # the newer fail stays against the old pass
-    on_result(suite, watched(True))  # the same day, a pass after a fail
-    assert [result for _, result in observed_rows(records)] == ["fail"]
+    on_result(suite, watched(True))
+    on_result(suite, watched(True))  # each case ends once: another row is another answer
+    assert [result for _, result in observed_rows(records)] == ["fail", "pass", "pass"]

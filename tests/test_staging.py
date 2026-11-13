@@ -8,7 +8,7 @@ import pytest
 
 from ha_rig.progress import Progress
 from ha_rig.staging import Staging
-from tests.rig_fakes import gate_scripts, records_at
+from tests.rig_fakes import records_at
 
 KEY = ("shelly", "raise_brightness", "f1")
 RECORD = f"{records_at('shelly')}/raise_brightness.md"  # in the checkout, and in a staging
@@ -21,7 +21,7 @@ def now() -> str:
 def ledger(tmp_path: Path) -> Progress:
     """The `lab` ledger in tmp_path, holding one entry at KEY."""
     progress = Progress.load(tmp_path, "lab")
-    entry = {"integration": KEY[0], "suite": KEY[1], "fingerprint": KEY[2], "cases": [], "touched": now()}
+    entry = {"integration": KEY[0], "suite": KEY[1], "at": KEY[2], "cases": [], "touched": now()}
     progress.entries[KEY] = entry
     progress.changed.add(KEY)
     progress.save()
@@ -31,7 +31,7 @@ def ledger(tmp_path: Path) -> Progress:
 
 def staging(tmp_path: Path) -> Staging:
     """A run's staging in tmp_path/reports with one record, for the checkout at tmp_path/repo."""
-    repo = gate_scripts(tmp_path / "repo")
+    repo = tmp_path / "repo"
     found = Staging(tmp_path / "reports" / "run.records", repo, tmp_path, "lab")
     path = found.test_records_dir("shelly") / "raise_brightness.md"
     path.parent.mkdir(parents=True)

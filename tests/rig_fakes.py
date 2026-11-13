@@ -1,5 +1,6 @@
 """Fakes shared by the rig's tests: a fake HAClient (and its admin twin, with DeviceSide's options flow), a
-registry whose adapters all take options, and the step files that tests/test_rig.py reuses."""
+registry whose adapters all take options, and the step files that tests/test_rig.py reuses. STEPS holds the rig's
+own fixture step files: the tests never depend on deviceside's test plan, only tests/test_rig_steps.py reads it."""
 
 import asyncio
 import contextlib
@@ -12,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ha_rig.bridge import BridgeError, HueBridge, normalize_ieee
-from ha_rig.client import SCOPE_EVENT, HAClient, HAError, device_ieee
+from ha_rig.client import HAClient, HAError, device_ieee
 from ha_rig.profile import Profile, RigEntity, colon_ieee, hex_ieee
 from ha_rig.roam import Z2M_GROUP_IDENTIFIER, ZHA_GROUP_UNIQUE_ID, Bulb
 from ha_rig.target import deviceside_repo, test_records_dir
@@ -149,14 +150,6 @@ class FakeHA(HAClient):
         self.z2m_restart_s = 0.01
         self._z2m_responses: list[asyncio.Queue[str]] = []  # live bridge/response/device/remove subscriptions
         self._z2m_device_topics: dict[str, asyncio.Queue[str]] = {}  # live zigbee2mqtt/<name> subscriptions
-        # DeviceSide's wire trace, once subscribed (subscribe_wire): each DeviceSide call is one `fake` call on the
-        # entity, with the call's data, unless `wire_for` gives the (transport, command, params[, options]) it sends
-        # instead.
-        self._taps: list[tuple[str, frozenset[str], list[dict]]] = []
-        self._wire_events: int | None = None
-        self.wire_for: Callable[[str, dict], list[tuple]] | None = None
-        # The deviceside_scope events a call fires, as (integration, domain, capability, fields) rows: None fires none.
-        self.scope_for: Callable[[str, dict], list[tuple]] | None = None
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
@@ -369,7 +362,6 @@ class FakeHA(HAClient):
     async def call_service(self, domain: str, service: str, data: dict | None = None, return_response=False):
         self.calls.append((domain, service, dict(data or {})))
         if domain == "deviceside":
-            self._trace(service, data)
             return self.respond(self, service, data)
         if domain == "zha":
             if service == "permit":
@@ -397,32 +389,6 @@ class FakeHA(HAClient):
         if members:
             self.states[entity_id]["attributes"]["entity_id"] = members
         return None
-
-    async def subscribe_wire(self) -> None:
-        self._wire_events = 1
-
-    def _trace(self, action: str, data: dict) -> None:
-        """DeviceSide's wire trace of a call to `action`, once subscribed."""
-        if self._wire_events is None:
-            return
-        params = {key: value for key, value in data.items() if key != "entity_id"}
-        for transport, command, sent, *options in (
-            self.wire_for(action, data) if self.wire_for else [("fake", action, params)]
-        ):
-            event = {"entity_id": data["entity_id"], "transport": transport, "command": command, "params": sent}
-            self.wire(event | ({"options": options[0]} if options else {}))
-        for integration, domain, capability, fields in self.scope_for(action, data) if self.scope_for else ():
-            self.wire(
-                {
-                    "entity_id": data["entity_id"],
-                    "action": action,
-                    "integration": integration,
-                    "domain": domain,
-                    "capability": capability,
-                    "fields": sorted(fields),
-                },
-                SCOPE_EVENT,
-            )
 
     def _mqtt_publish(self, topic: str, payload: dict) -> None:
         """A Z2M bridge request, or a device's `/get`, answered while the device is there."""
@@ -569,6 +535,8 @@ class FakeBridge(HueBridge):
 
 # The lab's two roaming bulbs, as a Roamer and as a profile file.
 LAB_A, LAB_B = "0x001788010abcdef0", "0x001788010abcdef1"
+STEPS = Path(__file__).parent / "steps"  # fixture step files, in place of the checkout's tests/rig/steps
+
 LAB_OPTIONS = {"hue_native_control": True}
 LAB_BULBS = [Bulb(LAB_A[2:], "light.lab_a", LAB_OPTIONS), Bulb(LAB_B[2:], "light.lab_b")]
 
@@ -871,20 +839,8 @@ class ShellyAuto:
         PENDING.remove(asyncio.current_task())  # done: nothing for a test's teardown to cancel
 
 
-GATE = deviceside_repo() / "scripts" / "check_release.py"
-
-
-def gate_scripts(repo: Path) -> Path:
-    """Give a deviceside-shaped `repo` the target checkout's scripts/check_release.py, linked, so
-    target.test_records_dir and adapter_code answer for it as for the target."""
-    (repo / "scripts").mkdir(parents=True, exist_ok=True)
-    if not (link := repo / "scripts" / "check_release.py").is_symlink():
-        link.symlink_to(GATE)
-    return repo
-
-
 @functools.cache  # read before a test swaps target.is_deviceside
 def records_at(integration: str) -> str:
-    """The integration's test records directory relative to a checkout, as the target's check_release lays it out."""
+    """The integration's test records directory relative to a checkout, as target.test_records_dir lays it out."""
     target = deviceside_repo()
     return test_records_dir(target, integration).relative_to(target).as_posix()

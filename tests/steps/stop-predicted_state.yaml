@@ -1,5 +1,3 @@
-# stop.yaml's halts with predicted_state on: HA's state shows where the stop halted the light at once, and keeps it.
-# Brightness in 0-255; 10 % climbing at 10 % a second for 3 s halts near 40 %, 102.
 action: stop
 rig_seconds: 120
 options: [predicted_state]

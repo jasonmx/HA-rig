@@ -6,23 +6,23 @@ this one named deviceside (the repo's name) or device-side (so the rig's own tes
 and baseline live in the target's git common dir, shared by every worktree of it; the profiles and .env.rig live in
 this rig's main checkout.
 
-The target's own `scripts/check_release.py` says where its test records live (`test_records_dir`) and which files are an
-adapter's code (`adapter_code`), so the rig follows the gate's layout and staleness rule rather than restating them.
+Its step files, the test plan, live in `tests/rig/steps/` (STEPS, shared) and `tests/integrations/<x>/rig/` (an
+integration's own, integration_steps_dirs), and its test records in
+`docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out.
 
 Pure file and git reading: the household check and the runner's preflight load it before anything mutates.
 """
 
-import hashlib
-import importlib.util
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
-from types import ModuleType
 
 RIG_HOME = Path(__file__).resolve().parents[1]
 COMPONENT = "custom_components/deviceside"
+STEPS = "tests/rig/steps"  # deviceside's shared step files, one per action
+INTEGRATIONS = "tests/integrations"  # deviceside's integration test packages: each one's own step files are in its rig/
+RECORDS = "docs/integrations/{integration}/test-records"  # deviceside's test records directory, per integration
 SIBLINGS = ("deviceside", "device-side")
 UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner
 
@@ -47,28 +47,57 @@ def main_checkout(repo: Path) -> Path:
     return common.parent if common else repo
 
 
-def check_release(repo: Path) -> ModuleType:
-    """deviceside's `scripts/check_release.py` in `repo`, loaded once per checkout. Loading it puts its checkout first
-    on sys.path, which is put back, so the rig's own `tests` package still wins."""
-    script = (repo / "scripts" / "check_release.py").resolve()
-    name = f"check_release_{hashlib.sha256(str(script).encode()).hexdigest()[:8]}"
-    if (loaded := sys.modules.get(name)) is None:
-        spec = importlib.util.spec_from_file_location(name, script)
-        loaded = importlib.util.module_from_spec(spec)
-        saved = list(sys.path)
-        try:
-            spec.loader.exec_module(loaded)
-        finally:
-            sys.path[:] = saved
-        sys.modules[name] = loaded
-    return loaded
+def steps_dir(repo: Path) -> Path:
+    """The step files' directory in `repo`."""
+    return repo / STEPS
+
+
+def integration_steps_dirs(repo: Path) -> dict[str, Path]:
+    """Each integration's own step files' directory in `repo`, by integration, for those that have one."""
+    return {path.parent.name: path for path in sorted((repo / INTEGRATIONS).glob("*/rig")) if path.is_dir()}
+
+
+def is_step_path(path: str) -> bool:
+    """Whether `path`, relative to the checkout, is a step file: `*.yaml` directly in STEPS or in an integration's
+    rig/."""
+    parts = Path(path).parts
+    shared = Path(path).parent.as_posix() == STEPS
+    own = len(parts) == 5 and Path(*parts[:2]).as_posix() == INTEGRATIONS and parts[3] == "rig"
+    return path.endswith(".yaml") and (shared or own)
+
+
+def head_commit(repo: Path) -> str | None:
+    """`repo`'s HEAD commit; None outside a checkout or without git."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except OSError, subprocess.CalledProcessError:
+        return None
+
+
+def committed_step_sources(repo: Path, commit: str) -> dict[str, bytes]:
+    """The step files at `commit` (is_step_path), by path relative to the checkout, as committed; none where git can't
+    say."""
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True).stdout
+
+    sources = {}
+    try:
+        for entry in filter(None, git("ls-tree", "-r", "-z", commit, "--", STEPS, INTEGRATIONS).split(b"\0")):
+            meta, _, raw = entry.partition(b"\t")
+            if meta.split()[1] == b"blob" and is_step_path(path := raw.decode()):
+                sources[path] = git("cat-file", "blob", f"{commit}:{path}")
+    except OSError, subprocess.CalledProcessError:
+        return {}
+    return sources
 
 
 def test_records_dir(repo: Path, integration: str, root: Path | None = None) -> Path:
-    """The integration's test records directory in `repo`, as its `check_release.test_records_dir` says, laid out under
-    `root` instead when given (a run's staging mirrors the checkout)."""
-    loaded = check_release(repo)
-    return (root or repo) / loaded.test_records_dir(integration).relative_to(loaded.REPO)
+    """The integration's test records directory in `repo`, laid out under `root` instead when given (a run's staging
+    mirrors the checkout)."""
+    return (root or repo) / RECORDS.format(integration=integration)
 
 
 def is_deviceside(path: Path) -> bool:

@@ -17,9 +17,10 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 - `scripts/rig.py`: the runner; `scripts/deploy.sh`: its deploy, through `.env.rig`'s commands
 - `ha_rig/`: the engine, HA and Hue clients, locks, journal, baseline, roaming, run logs, profiles, the target
   checkout (`target.py`) and the household terms for deviceside's check (`terms.py`)
-- `ha_rig/steps/`: one step file per action, named as deviceside's action modules are
-- `tests/`: the rig's own tests, with fakes; they import deviceside's registry and actions from the target checkout; the
-  engine tests take adapters from a declared roster over that registry (`tests/rig_fakes.py`, `Roster`)
+- `tests/`: the rig's own tests, with fakes and fixture step files (`tests/steps/`); they import deviceside's registry
+  and actions and read its step files from the target checkout, the step files only to check they parse
+  (`tests/test_rig_steps.py`); the engine tests take adapters from a declared roster over that registry
+  (`tests/rig_fakes.py`, `Roster`)
 
 ## Changes
 
@@ -33,10 +34,11 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
   fix it now unless it is genuinely out of scope, and then say where it is tracked.
 - A PR that changes `scripts/rig.py`'s options regenerates README's `--help` block (`COLUMNS=100 scripts/rig.py
   --help`); `tests/test_rig.py` fails until it does.
-- Before adding a case, name what it catches that no existing case or unit test does: a different call shape, a
-  live-reply branch, or a firmware fact. No name, no case.
-- A new or renamed deviceside action needs its step file here, landed with or before the deviceside PR it tests.
-  The rig PR's plan names it in Coordination, `Tests-with: DeviceSide/DeviceSide#N`, so CI tests the pair together
-  (`scripts/ci_deviceside.sh`). Nothing reruns it when that PR moves or merges, and `ci-green` counts every run at the
-  head: before merging, `gh run rerun` the PR's Tests runs, which read both afresh.
+- The step files are deviceside's (shared in `tests/rig/steps/` there, an integration's own in
+  `tests/integrations/<x>/rig/`, run on `<x>` alone, merged into the action's suite: `docs/rig.md`, Writing a step
+  file), landed in the deviceside PR for the action they test; a rig PR is needed only for an engine change. When one pairs with a deviceside PR (a step file using a new step
+  kind, say), the rig PR's plan names it in Coordination, `Tests-with: DeviceSide/DeviceSide#N`, so CI tests the
+  pair together (`scripts/ci_deviceside.sh`); merge the rig PR first, as the rig can't run a step kind its engine
+  lacks. Nothing reruns it when that PR moves or merges, and `ci-green` counts every run at the head: before merging,
+  `gh run rerun` the PR's Tests runs, which read both afresh.
 - Async throughout; American English, matching HA.

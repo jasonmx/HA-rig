@@ -1,25 +1,24 @@
-"""The ledger: each suite's saved cases at its fingerprint, kept on disk for later runs to build coverage on."""
+"""The ledger: each suite's saved cases at the commit planned at, kept on disk for an interrupted run to resume."""
 
 import datetime
 import json
-from dataclasses import asdict, replace
 from pathlib import Path
 
 from ha_rig import progress as progress_module
-from ha_rig.engine import CaseResult, Device, Outcome, Suite, load_step_file, load_step_files, merge
-from ha_rig.progress import Progress, path_for
-from tests.rig_fakes import Roster, profile
+from ha_rig.engine import Case, CaseResult, Device, Outcome, Suite, load_step_file, load_step_files, merge
+from ha_rig.progress import Progress, holds, path_for
+from tests.rig_fakes import STEPS, Roster, profile
 
-SUITE = Suite(next(f for f in load_step_files() if f.action == "turn_on_for" and not f.options), "shelly")
+SUITE = Suite(next(f for f in load_step_files(STEPS) if f.action == "turn_on_for" and not f.options), "shelly")
 HUE = Suite(SUITE.file, "hue")
 PASSED = CaseResult("a[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
 FAILED = CaseResult("b[switch_plug]", "switch_plug", "switch", Outcome.FAIL, "too slow", ("switch.plug",))
 
 
-def loaded(tmp_path: Path, fingerprint: str = "fp1", version: str = "2026.10.1", *suites: Suite) -> Progress:
+def loaded(tmp_path: Path, commit: str = "fp1", version: str = "2026.10.1", *suites: Suite) -> Progress:
     progress = Progress.load(tmp_path, "lab")
     for suite in suites or (SUITE,):
-        progress.track(suite, fingerprint)
+        progress.track(suite, commit)
     progress.check_ha(version, lambda _: None)
     return progress
 
@@ -63,7 +62,7 @@ def test_parts_rebuild_results_merge_joins(tmp_path):
     assert joined.cases[0].id in {PASSED.id, FAILED.id}
 
 
-def test_another_fingerprint_sees_none_of_the_saved_cases_and_keeps_them(tmp_path):
+def test_another_commit_sees_none_of_the_saved_cases_and_keeps_them(tmp_path):
     started(tmp_path)
     other = loaded(tmp_path, "fp2")
     assert not other and other.parts([SUITE]) == []
@@ -158,103 +157,6 @@ def test_an_unreadable_file_is_an_empty_ledger(tmp_path):
     assert not loaded(tmp_path)
 
 
-FACTS_YAML = """
-action: turn_on_for
-rig_seconds: 5
-tests:
-  - name: plain
-    roles: [switch_plug]
-    steps:
-      - wait: 0
-  - name: wins
-    roles: [switch_plug]
-    firmware_fact: true
-    steps:
-      - wait: 0
-"""
-WINS = CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
-PLUG = Device("Plug", "P1", "1.0")
-
-
-def facts_suite(tmp_path: Path, text: str = FACTS_YAML) -> Suite:
-    path = tmp_path / "turn_on_for.yaml"
-    path.write_text(text)
-    return Suite(load_step_file(path), "shelly")
-
-
-def ran_a_fact(tmp_path: Path, suite: Suite, devices=(PLUG,)) -> Progress:
-    progress = loaded(tmp_path, "fp1", "2026.10.1", suite)
-    progress.record(suite, WINS)
-    progress.facts(suite, "2026.10.1", list(devices))
-    return progress
-
-
-def test_a_firmware_facts_pass_outlives_its_fingerprint_and_ha_version(tmp_path):
-    suite = facts_suite(tmp_path)
-    ran_a_fact(tmp_path, suite).drop(suite)  # its record is written
-    later = loaded(tmp_path, "fp2", "2026.11.0", suite)
-    assert not later  # the new code's entry has nothing
-    assert later.fact_results(suite) == {WINS.id: (WINS, [PLUG])}
-    later.lend(suite, later.fact_results(suite).values())
-    [part] = later.parts([suite])
-    assert (part.cases, part.devices) == ([WINS], [PLUG])  # its record carries the fact and its firmware
-
-
-def test_a_firmware_fact_lends_nothing_until_its_devices_are_known(tmp_path):
-    suite = facts_suite(tmp_path)
-    progress = loaded(tmp_path, "fp1", "2026.10.1", suite)
-    progress.record(suite, WINS)  # the run ended before the part's facts
-    assert loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite) == {}
-
-
-def test_a_firmware_fact_goes_when_its_model_shows_another_firmware(tmp_path):
-    suite = facts_suite(tmp_path)
-    ran_a_fact(tmp_path, suite)
-    other = loaded(tmp_path, "fp2", "2026.10.1", suite)
-    other.record(suite, CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS))
-    other.facts(suite, "2026.10.1", [Device("Bulb", None, "9")])  # another model: the fact stands
-    assert WINS.id in loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite)
-    other.facts(suite, "2026.10.1", [Device("Plug", "P1", "1.1")])
-    assert loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite) == {}
-
-
-def test_a_firmware_fact_goes_when_it_fails_or_its_test_changes(tmp_path):
-    suite = facts_suite(tmp_path)
-    ran_a_fact(tmp_path, suite)
-    edited = facts_suite(tmp_path, FACTS_YAML.replace("      - wait: 0\n", "      - wait: 1\n"))
-    assert loaded(tmp_path, "fp2", "2026.10.1", edited).fact_results(edited) == {}
-    assert WINS.id in loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite)
-    failing = loaded(tmp_path, "fp2", "2026.10.1", suite)
-    failing.record(suite, CaseResult(WINS.id, "switch_plug", "switch", Outcome.FAIL, "lost", ("switch.plug",)))
-    assert loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite) == {}
-
-
-def test_a_plain_case_is_never_a_firmware_fact(tmp_path):
-    suite = facts_suite(tmp_path)
-    progress = loaded(tmp_path, "fp1", "2026.10.1", suite)
-    progress.record(suite, CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS))
-    progress.facts(suite, "2026.10.1", [PLUG])
-    assert progress.fact_results(suite) == {}
-    assert "firmware" not in json.loads(path_for(tmp_path, "lab").read_text())
-
-
-def test_a_lent_fact_whose_firmware_moved_leaves_the_entry_to_rerun(tmp_path):
-    suite = facts_suite(tmp_path)
-    ran_a_fact(tmp_path, suite).drop(suite)
-    later = loaded(tmp_path, "fp2", "2026.10.1", suite)
-    later.lend(suite, later.fact_results(suite).values())
-    later.facts(suite, "2026.10.1", [Device("Plug", "P1", "1.1")])  # a part of the new run reads newer firmware
-    assert later.parts([suite]) == []  # nothing left to carry: the fact reruns
-    assert later.entry(suite)["devices"] == [asdict(Device("Plug", "P1", "1.1"))]  # the old firmware is gone too
-    assert later.fact_results(suite) == {}
-
-
-def test_a_failed_device_lookup_leaves_the_fact_pending(tmp_path):
-    suite = facts_suite(tmp_path)
-    ran_a_fact(tmp_path, suite, devices=())  # rig_facts failed: no devices
-    assert loaded(tmp_path, "fp2", "2026.10.1", suite).fact_results(suite) == {}
-
-
 def test_a_saved_case_with_no_absent_key_still_loads(tmp_path):
     started(tmp_path)
     path = path_for(tmp_path, "lab")
@@ -273,12 +175,94 @@ def test_an_absent_skip_round_trips(tmp_path):
     assert loaded(tmp_path).done()[("shelly", SUITE.name, absent.id)].absent
 
 
-def test_a_cases_scope_round_trips_and_an_older_entry_loads_empty(tmp_path):
-    scope = (("turn_on_for", "shelly", "switch", "Switch", ("duration",)), ("turn_on_for", "shelly", "light", None, ()))
-    case = replace(PASSED, scope=scope)
-    progress = started(tmp_path)
-    progress.record(SUITE, case)
-    assert loaded(tmp_path).done()[("shelly", SUITE.name, case.id)].scope == scope
-    older = progress_module._saved(PASSED)
-    del older["scope"]  # saved before the scope was
-    assert progress_module._result(older).scope == ()
+def test_an_entry_from_before_commit_keys_is_left_out_and_said(tmp_path, capsys):
+    path = path_for(tmp_path, "lab")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"suites": [{"integration": "shelly", "suite": SUITE.name, "fingerprint": "f"}]}))
+    assert not loaded(tmp_path)
+    assert "unreadable or from an older rig" in capsys.readouterr().out
+
+
+FIRST, SECOND = SUITE.file.tests[:2]
+
+
+def planned(test=FIRST, entities=("switch.plug",), skip=None) -> Case:
+    return Case(SUITE, test, "switch_plug", {"switch_plug": entities[0]}, skip)
+
+
+def ran(case: Case, outcome: Outcome = Outcome.PASS, detail: str = "") -> CaseResult:
+    return CaseResult(case.id, case.role, "switch", outcome, detail, tuple(case.entities.values()))
+
+
+def test_resume_keeps_the_saved_results_that_hold_and_forgets_the_rest(tmp_path):
+    progress = loaded(tmp_path)
+    for case in (planned(FIRST), planned(SECOND)):
+        progress.record(SUITE, ran(case))
+    again = Progress.load(tmp_path, "lab")
+    again.resume(SUITE, "fp1", [planned(FIRST), planned(SECOND, ("switch.other",))])
+    assert set(again.saved(SUITE)) == {planned(FIRST).id}  # the second now moves another entity
+
+
+def test_resume_at_another_commit_starts_afresh(tmp_path):
+    started(tmp_path)
+    again = Progress.load(tmp_path, "lab")
+    again.resume(SUITE, "fp2", [])
+    assert not again
+
+
+def test_resume_drops_a_suite_with_a_saved_failure_or_when_fresh(tmp_path):
+    started(tmp_path)  # holds FAILED
+    again = Progress.load(tmp_path, "lab")
+    again.resume(SUITE, "fp1", [])
+    assert not again
+    loaded(tmp_path).record(SUITE, ran(planned()))
+    fresh = Progress.load(tmp_path, "lab")
+    fresh.resume(SUITE, "fp1", [planned()], fresh=True)
+    assert not fresh
+
+
+def test_a_saved_skip_holds_only_for_the_same_reason_and_not_observed_only_unattended():
+    why = "fact test: runs with --facts"
+    skipped = ran(planned(), Outcome.SKIPPED, why)
+    assert holds(planned(skip=why), skipped, False)
+    assert not holds(planned(), skipped, False)  # asked for now: it runs
+    unwatched = ran(planned(), Outcome.NOT_OBSERVED)
+    assert holds(planned(), unwatched, True) and not holds(planned(), unwatched, False)
+
+
+FACT_FILE = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: plain
+    roles: [switch_plug]
+    steps:
+      - wait: 0
+  - name: wins
+    roles: [switch_plug]
+    firmware_fact: true
+    steps:
+      - wait: 0
+"""
+
+
+def test_a_fact_tests_failure_never_drops_the_suite(tmp_path):
+    (path := tmp_path / "steps.yaml").write_text(FACT_FILE)
+    suite = Suite(load_step_file(path), "shelly", facts=True)
+    progress = loaded(tmp_path, "c1", "2026.10.1", suite)
+    passed = CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
+    progress.record(suite, passed)
+    progress.record(
+        suite, CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.FAIL, "x", ("switch.plug",))
+    )
+    assert progress.drop_failed() == []
+    again = Progress.load(tmp_path, "lab")
+    planned = [Case(suite, test, "switch_plug", {"switch_plug": "switch.plug"}) for test in suite.file.tests]
+    again.resume(suite, "c1", planned)
+    assert set(again.saved(suite)) == {"plain[switch_plug]", "wins[switch_plug]"}  # resumed, the fact's fail kept
+    progress.record(suite, replace_failed(passed))
+    assert progress.drop_failed() == [("shelly", "turn_on_for")]  # a default case's failure does
+
+
+def replace_failed(result: CaseResult) -> CaseResult:
+    return CaseResult(result.id, result.role, result.domain, Outcome.FAIL, "x", result.entity_ids)
