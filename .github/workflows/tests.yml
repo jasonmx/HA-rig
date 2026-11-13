@@ -19,6 +19,8 @@ permissions:
 
 jobs:
   pytest:
+    # An edit reruns only when the body (it holds Tests-with) or the base changed; a title edit is skipped.
+    if: github.event.action != 'edited' || github.event.changes.body != null || github.event.changes.base != null
     runs-on: ubuntu-latest
     permissions:
       contents: read
