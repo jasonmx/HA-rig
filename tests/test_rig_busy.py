@@ -3,6 +3,7 @@ Z2M group cases paced, the log feed that renews itself and a group made only onc
 the fakes, whose Z2M log is a feed the test writes BUSY lines into."""
 
 import asyncio
+import contextlib
 import datetime
 import json
 from pathlib import Path
@@ -219,35 +220,45 @@ async def test_only_a_z2m_group_case_waits_after_a_restore_that_put_nothing_back
 
 
 class Dropping(FakeHA):
-    """A broker that quietly drops the first subscription to Z2M's log: nothing reaches it, and nothing says so."""
+    """A broker that quietly drops the first subscription to Z2M's log: nothing reaches it, and nothing says so.
+    `live` is set once a later subscription is in place, so a test writes its line when one can hear it."""
 
     def __init__(self):
         super().__init__({})
         self.subscriptions = 0
+        self.live = asyncio.Event()
 
     def _mqtt_messages(self, topic):
         if not topic.endswith("/logging"):
             return super()._mqtt_messages(topic)
         self.subscriptions += 1
-        return self.dead() if self.subscriptions == 1 else super()._mqtt_messages(topic)
+        return self.dead() if self.subscriptions == 1 else self.renewed(topic)
 
-    def dead(self):
-        import contextlib  # noqa: PLC0415
+    @contextlib.asynccontextmanager
+    async def dead(self):
+        yield asyncio.Queue()
 
-        @contextlib.asynccontextmanager
-        async def feed():
-            yield asyncio.Queue()
+    @contextlib.asynccontextmanager
+    async def renewed(self, topic):
+        async with FakeHA._mqtt_messages(self, topic) as queue:
+            self.live.set()
+            yield queue
 
-        return feed()
+
+async def until(done, timeout_s: float = 5) -> None:
+    """Yield to the loop until `done()`; the deadline only stops a hang."""
+    async with asyncio.timeout(timeout_s):
+        while not done():
+            await asyncio.sleep(0)
 
 
 async def test_a_quiet_feed_subscribes_afresh_and_gets_what_came_after():
     ha = Dropping()
     async with ha.mqtt_feed("zigbee2mqtt/bridge/logging", quiet_s=0.01) as feed:
         getting = asyncio.create_task(feed.get())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ha.live.wait(), 5)
         ha.z2m_logging.put_nowait("after the drop")
-        assert await asyncio.wait_for(getting, 1) == "after the drop"
+        assert await asyncio.wait_for(getting, 5) == "after the drop"
         assert feed.renewed >= 1 and isinstance(feed, MQTTFeed)
 
 
@@ -257,12 +268,38 @@ async def test_the_z2m_log_capture_goes_on_after_its_subscription_dropped(tmp_pa
     ha = Dropping()
     logs = RunLogs(tmp_path, "rig run", datetime.datetime.now(), out=lambda _: None)
     await logs.start_z2m(ha)
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(ha.live.wait(), 5)
     ha.z2m_logging.put_nowait('{"level":"info","namespace":"z2m","message":"later"}')
-    await asyncio.sleep(0.05)
+    await until(lambda: "later" in logs.z2m_path.read_text())
     await logs.stop_z2m()
     text = logs.z2m_path.read_text()
     assert "later" in text and "renewed its Z2M log subscription" in text
+
+
+@pytest.mark.parametrize(
+    ("old", "fresh", "joined"),
+    [
+        (["a", "b"], [], ["a", "b"]),  # the quiet wait ran out on lines the old subscription held
+        (["a", "b", "c"], ["b", "c", "d"], ["a", "b", "c", "d"]),  # both live for b and c
+        ([], ["d"], ["d"]),  # the old one was dead
+        (["a"], ["b"], ["a", "b"]),  # it died before the new one went live
+    ],
+)
+def test_a_renewal_keeps_each_line_once(old, fresh, joined):
+    """Catches the swap: a line only the replaced subscription held is kept, and one both held is not doubled."""
+    assert client._join(old, fresh) == joined
+
+
+async def test_a_line_waiting_when_the_quiet_wait_runs_out_is_not_lost():
+    """Catches the renewal race: a line already queued on the old subscription when it was replaced still arrives."""
+    ha = FakeHA({})
+    async with ha.mqtt_feed("zigbee2mqtt/bridge/logging", quiet_s=60) as feed:
+        ha.z2m_logging.put_nowait("queued")
+        await feed.renew()
+        ha.z2m_logging.put_nowait("after")
+        async with asyncio.timeout(5):  # a lost line leaves the second get waiting out the quiet minute
+            assert [await feed.get(), await feed.get()] == ["queued", "after"]
+        assert feed.renewed == 1
 
 
 async def test_a_busy_line_is_noted_with_the_target_and_its_time():
