@@ -56,11 +56,15 @@ Each seam names the failure it prevents now and what it keeps possible. Code acr
    Prevents: household data leaking into a checkout, and two checkouts on one HA missing each other's locks.
 4. **Every change is journaled before it is made.** The HA, Hue and MQTT clients' mutating calls are reachable only
    through the journal's write-ahead wrapper; the raw clients are read-only outside it. Prevents: a change the next
-   run can't put back because a new code path forgot to journal it.
+   run can't put back because a new code path forgot to journal it. Probes get the same clients (Stage 1), so the
+   rig puts back what a probe changed through them, even when the probe crashes or forgets; a probe that calls a
+   device directly (Shelly RPC, the Hue bridge) outside them still puts back its own changes.
 5. **Credentials load in one place.** `rig.env` is read once, refused unless it is mode 0600, and tokens go to the
    clients that need them: the non-admin token by default, the admin token only for suites that declare the need.
-   No token, host or entity ID reaches a log line, run report or record. Prevents: a token or household detail in
-   a public record or a shared log.
+   No token, host or entity ID reaches a log line, run report or record. A probe is a client that declares its
+   need: `ha-rig probe` passes `HA_URL` and the non-admin token in the probe's environment, and the admin token only
+   with `--admin`; nothing is written to disk for it. Prevents: a token or household detail in a public record or a
+   shared log, and probes each finding `rig.env` on their own.
 6. **Deploy is one interface with one implementation.** `status`, `sync(tree)`, `restart`, behind the existing
    shell-hook protocol (`RIG_SYNC_CMD`, `RIG_STATUS_CMD`, `RIG_RESTART_CMD`). The docs describe the protocol; the rig
    ships no deploy backends it would have to maintain.
@@ -109,6 +113,8 @@ they belong with the target.
   is pending; until then any command refuses, naming it (replacing `refuse_moved_files`, whose earlier move is done).
 - `terms.py` reads the profiles from the new home; it still writes `.private-terms.rig` into deviceside (a manifest
   entry from Stage 1).
+- Probes that read `.env.rig` themselves break with the move; 0.3 gives them their credentials instead, and 0.2 and
+  0.3 land before any rig run depends on the new home.
 
 **0.3 Take the personal workflow out of the code.**
 
@@ -119,6 +125,8 @@ they belong with the target.
   maintainer's process, not something a new user's first run should stop on.
 - `RIG_BLOCKER_ENTITY`, the restricted sensor's old name, stops being read.
 - Credentials load in one place, with the 0600 check and the admin token only for suites that need it (Seam 5).
+- `ha-rig probe` (still `--hold … --` until 0.4) passes `HA_URL` and `HA_TOKEN` to the probe's environment, and
+  `HA_ADMIN_TOKEN` only with `--admin` (Seam 5).
 
 **0.4 Subcommands for the 22 flags.** One mode per subcommand, so flags valid only in one mode can't be combined
 wrongly, and `--help` per subcommand stays short. Run options keep their names.
@@ -136,6 +144,10 @@ wrongly, and `--help` per subcommand stays short. Run options keep their names.
 | `--wait-free` | `ha-rig wait [--integration …]` |
 | `--hold X --exclusive --visual V -- cmd` | `ha-rig probe [--hold X] [--exclusive] [--visual V] -- cmd` |
 
+- `ha-rig probe --python script.py` runs the script with the rig's own interpreter, so a probe can import the rig's
+  HA, Hue and MQTT clients once the rig is installed as a tool rather than run from a checkout.
+- `ha-rig probe`, `check`, `wait` and `recover` need no target: they run from any directory, with no deviceside
+  checkout or manifest, so probing an unknown device is the first thing a new user can do.
 - `--integration` takes the target's integration keys instead of a hardcoded list (the registry supplies them now,
   the manifest from Stage 1).
 - `scripts/rig.py` becomes the `ha-rig` console script in `pyproject.toml`; `scripts/rig.py` stays as a shim for one
@@ -204,7 +216,7 @@ runs without any engine change specific to it, and the DeviceSide target's recor
 0's for the same run.
 
 **Stage 1 PRs:** 1.0 (after the transfer); 1.1 (deviceside + rig, `Tests-with`); the executor's results file and
-render-after-run (Seam 2); mutations only through the journal (Seam 4); 1.2, moving deviceside's record and coverage
+render-after-run (Seam 2); mutations only through the journal, probes' included (Seam 4); 1.2, moving deviceside's record and coverage
 logic behind its commands without changing a record; 1.3; 1.4.
 
 ### Stage 2: split and publish
