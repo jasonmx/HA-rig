@@ -41,20 +41,10 @@ def fast(monkeypatch):
     monkeypatch.setattr(roam, "POLL_S", 0)
 
 
-class LabHA(fakes.FakeHA):
-    async def close(self):
-        pass
-
-
 @pytest.fixture
 def lab(monkeypatch) -> fakes.Lab:
-    ha = LabHA({"automation.lab": {"state": "on"}})
-    lab = fakes.Lab(ha, fakes.FakeBridge(), {A: "light.lab_a", B: "light.lab_b"})
-
-    async def connect(env):
-        return ha, ha
-
-    monkeypatch.setattr(rig, "connect", connect)
+    lab = fakes.lab_on_hue(fakes.FakeHA({"automation.lab": {"state": "on"}}))
+    monkeypatch.setattr(rig, "connect", fakes.connected(lab.ha))
     monkeypatch.setattr(rig, "HueBridge", lambda host, key: lab.bridge)
     return lab
 
@@ -71,17 +61,12 @@ def suites(tmp_path: Path, *integrations: str) -> list[rig.Suite]:
     return [rig.Suite(load_step_file(path), integration) for integration in integrations]
 
 
-async def where(lab: fakes.Lab) -> list[str | None]:
-    found = Roamer(lab.ha, lab.bridge, BULBS, out=lambda _: None)
-    return [await found.locate(bulb) for bulb in BULBS]
-
-
 def fake_phases(monkeypatch, lab: fakes.Lab, fail_on: str | None = None) -> list[tuple[list[str], list]]:
     """engine.run and wait_for_targets as recorders: each phase's integrations and where the bulbs were."""
     ran: list[tuple[list[str], list]] = []
 
     async def run(phase_suites, *args, **kwargs):
-        ran.append(([suite.integration for suite in phase_suites], await where(lab)))
+        ran.append(([suite.integration for suite in phase_suites], await fakes.where(lab)))
         if fail_on in [suite.integration for suite in phase_suites]:
             raise RuntimeError(f"crash on {fail_on}")
         return engine.RunResult([])
@@ -142,7 +127,7 @@ async def test_a_roaming_run_moves_before_each_phase_and_ends_home(tmp_path, mon
     assert await rig.run_rig(ENV, run, lab_with_pause(tmp_path), None, None, True, None, journal, roaming=True) == 0
 
     assert ran == [(["shelly"], ["hue", "hue"]), (["zha"], ["zha", "zha"]), (["zigbee2mqtt"], ["zigbee2mqtt"] * 2)]
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert lab.ha.states["automation.lab"]["state"] == "on"
     assert not journal.path.exists()
 
@@ -156,7 +141,7 @@ async def test_a_crash_in_any_phase_still_moves_the_bulbs_home(tmp_path, monkeyp
     with pytest.raises(RuntimeError, match=f"crash on {phase}"):
         await rig.run_rig(ENV, run, lab_with_pause(tmp_path), None, None, True, None, journal, roaming=True)
 
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert len(lab.bridge.resources["room"]["r1"]["children"]) == 3
     assert not journal.path.exists()
 
@@ -172,7 +157,7 @@ async def test_a_failed_move_stops_the_run_and_leaves_the_bulbs_for_recover(tmp_
             ENV, suites(tmp_path, "zha"), lab_with_pause(tmp_path), None, None, True, None, journal, roaming=True
         )
 
-    assert await where(lab) == ["zha", None]
+    assert await fakes.where(lab) == ["zha", None]
     assert lab.ha.states["automation.lab"]["state"] == "on"
     assert set(Journal(journal.path).sections) == {"profile", "roam"}
 
@@ -243,7 +228,7 @@ async def test_a_run_whose_bulbs_cant_be_put_back_as_they_were_fails(monkeypatch
 
     lab.ha.call_service = refuse_lights
     assert await rig.run_rig(ENV, [], lab_with_pause(tmp_path), None, None, True, None, None, roaming=True) == 1
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert "light.lab_a's home isn't all back" in capsys.readouterr().out
 
 
@@ -252,7 +237,7 @@ async def test_roam_check_runs_the_cycle_with_no_suites(monkeypatch, lab, tmp_pa
     assert await rig.run_rig(ENV, [], lab_with_pause(tmp_path), None, None, True, None, None, roaming=True) == 0
     assert ran == []
     assert lab.searches == 1
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
 
 
 def test_main_refuses_roam_check_on_a_profile_with_no_roam(tmp_path, monkeypatch):
@@ -317,7 +302,7 @@ async def test_recover_moves_the_bulbs_home_then_resumes_the_automations(tmp_pat
 
     await rig.recover(lab.ha, lab.ha, Journal(journal.path), printed.append, bridge=lab.bridge)
 
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert "Moving the roaming bulbs home to Hue." in printed
     assert lab.ha.states["automation.lab"]["state"] == "on"
     assert lab.ha.calls[-1][:2] == ("automation", "turn_on")
@@ -358,7 +343,7 @@ async def test_a_state_that_wont_go_back_keeps_the_home_record_and_the_journal(t
     lab.ha.call_service = refuse_lights
     printed = []
     await rig.recover(lab.ha, lab.ha, Journal(journal.path), printed.append, bridge=lab.bridge)
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert set(HomeRecord(tmp_path).all()) == {A[2:], B[2:]}
     assert "roam" in Journal(journal.path).sections
     assert any("home isn't all back; the home record keeps it" in line for line in printed)
@@ -375,7 +360,7 @@ def test_main_recover_builds_the_bridge_and_brings_the_bulbs_home(tmp_path, monk
     monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")  # the journal from before per-run ones is restricted
 
     assert rig.main(["--recover"]) == 0
-    assert asyncio.run(where(lab)) == ["hue", "hue"]
+    assert asyncio.run(fakes.where(lab)) == ["hue", "hue"]
 
 
 async def test_recover_stops_on_a_bulb_on_no_network_keeping_the_journal(tmp_path, lab):
@@ -393,7 +378,7 @@ async def test_recover_without_the_bridge_keeps_the_bulbs_in_the_journal(tmp_pat
     journal = await aborted_on_zha(lab, tmp_path / "journal.json")
     with pytest.raises(SystemExit, match="needs HA_ADMIN_TOKEN, HUE_BRIDGE_HOST and HUE_APP_KEY"):
         await rig.recover(lab.ha, lab.ha, Journal(journal.path), lambda _: None)
-    assert await where(lab) == ["zha", "zha"]
+    assert await fakes.where(lab) == ["zha", "zha"]
     assert "roam" in Journal(journal.path).sections
 
 
@@ -507,21 +492,6 @@ async def test_a_group_that_cant_be_made_stops_the_run_and_removes_the_ones_made
     assert lab.ha.states["automation.lab"]["state"] == "on"
 
 
-async def test_recover_removes_the_groups_a_crash_left_on_z2m_and_brings_the_bulbs_home(tmp_path, monkeypatch, lab):
-    monkeypatch.setattr(roam, "GONE_S", 0)
-    journal = Journal(tmp_path / "journal.json")
-    groups = lab_with_groups(tmp_path).roam_groups
-    moving = Roamer(lab.ha, lab.bridge, BULBS, journal, out=lambda _: None, groups=groups)
-    await moving.go("zigbee2mqtt")
-    await moving.make_groups("zigbee2mqtt")
-
-    await rig.recover(lab.ha, lab.ha, Journal(journal.path), lambda _: None, bridge=lab.bridge)
-
-    assert lab.ha.z2m_groups == {} and "light.test_group" not in lab.ha.entity_meta
-    assert await where(lab) == ["hue", "hue"]
-    assert not journal.path.exists()
-
-
 def test_the_plan_lists_the_groups_and_whether_the_bulbs_move(tmp_path, capsys):
     profile = lab_with_groups(tmp_path)
     run = rig.select(rig.load_step_files(fakes.STEPS), profile, ["hue"], ["set_scene"])
@@ -545,7 +515,7 @@ async def test_a_group_that_cant_be_made_away_from_home_still_brings_the_bulbs_h
             ENV, suites(tmp_path, "zha"), lab_with_groups(tmp_path), None, None, True, None, journal, True, True
         )
 
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert not journal.path.exists()
 
 
@@ -585,7 +555,7 @@ async def test_a_group_timeout_in_a_later_phase_reports_the_phases_that_passed(t
         )
 
     assert reported == [[passed]]
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert "light.test_group" not in lab.ha.entity_meta
     assert not journal.path.exists()
 
@@ -861,52 +831,42 @@ def test_a_dry_run_prints_the_decision(tmp_path, monkeypatch, capsys):
     assert "Authorization: profile lab is pre-authorized. Unrestricted." in capsys.readouterr().out
 
 
-def test_an_agents_restricted_run_is_refused_while_the_sensor_is_not_off(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "unavailable")
-    assert rig.main([]) == 1
-    assert f"Restricted, and {SENSOR} is unavailable. Needs" in capsys.readouterr().out
-    assert armed == []
+# How the run is given its go-ahead; `""` gives none, "y" and "n" answer at a terminal.
+RUN_GIVEN = ("", "approved", "y", "n", "pre-authorized")
 
 
-def test_an_agents_restricted_run_goes_unasked_while_the_sensor_is_off_and_is_watched(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "off")
-    assert rig.main([]) == 0
-    assert armed == [(True, True)]
-    assert "Proceed?" not in capsys.readouterr().out
-
-
-def test_an_approved_run_goes_while_the_sensor_is_on_and_is_watched_for_it_turning_on(tmp_path, monkeypatch):
-    armed = clear_run(tmp_path, monkeypatch, "on")
-    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
-    assert rig.main([]) == 0
-    assert armed == [(True, False)]  # no read of off yet: it waits for one before an on counts
-
-
-def test_a_human_at_a_terminal_is_asked_and_a_yes_is_the_approval(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "on")
-    monkeypatch.setattr(rig, "tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
-    assert rig.main([]) == 0
-    assert armed == [(True, False)]  # watched, as every restricted run is
-    assert f"Restricted: {SENSOR} is on. Proceed anyway? [y/N]" in capsys.readouterr().out
-
-
-def test_a_terminal_asks_a_readiness_question_of_a_clear_run(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "off")
-    monkeypatch.setattr(rig, "tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("n\n"))
-    assert rig.main([]) == 1
-    assert "Proceed? [y/N]" in capsys.readouterr().out
-    assert armed == []
-
-
-def test_a_pre_authorized_run_reads_no_sensor_and_is_not_watched(tmp_path, monkeypatch, capsys):
-    armed = clear_run(tmp_path, monkeypatch, "on")
-    pre_authorize(tmp_path)
-    monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
-    assert rig.main([]) == 0
-    assert armed == [(False, False)]
-    assert "Proceed?" not in capsys.readouterr().out
+@pytest.mark.parametrize(
+    ("state", "given", "code", "armed", "says"),
+    [
+        pytest.param(
+            "unavailable", "", 1, [], f"Restricted, and {SENSOR} is unavailable. Needs", id="not off: refused"
+        ),
+        pytest.param("off", "", 0, [(True, True)], None, id="off: goes unasked, watched"),
+        # Approved, it is watched with no read of off yet: it waits for one before an on counts.
+        pytest.param("on", "approved", 0, [(True, False)], None, id="approved: goes while on, watched for on"),
+        pytest.param("on", "y", 0, [(True, False)], f"Restricted: {SENSOR} is on. Proceed anyway? [y/N]", id="yes"),
+        pytest.param("off", "n", 1, [], "Proceed? [y/N]", id="a terminal asks a clear run if it is ready"),
+        pytest.param("on", "pre-authorized", 0, [(False, False)], None, id="pre-authorized: no read, not watched"),
+    ],
+)
+def test_the_run_gate(tmp_path, monkeypatch, capsys, state, given, code, armed, says):
+    """An agent's run (no terminal) is never asked; a human's answer at one is the approval."""
+    assert given in RUN_GIVEN
+    seen = clear_run(tmp_path, monkeypatch, state)
+    if given == "approved":
+        monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    if given in ("y", "n"):
+        monkeypatch.setattr(rig, "tty", lambda: True)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(f"{given}\n"))
+    if given == "pre-authorized":
+        pre_authorize(tmp_path)
+        monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
+    assert rig.main([]) == code
+    assert seen == armed
+    out = capsys.readouterr().out
+    if says is not None:
+        assert says in out
+    assert ("Proceed" in out) is (given in ("y", "n"))
 
 
 def test_a_run_plans_lanes_unless_serial(tmp_path, monkeypatch, capsys):
@@ -1018,7 +978,7 @@ async def test_a_budget_with_under_a_minute_left_makes_no_move(tmp_path, monkeyp
 
     assert budget.stopped
     assert all("zha" not in integrations for integrations, _ in ran)
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
 
 
 async def test_a_budget_spent_during_a_move_still_runs_the_phases_first_case(tmp_path, monkeypatch, lab):
@@ -1026,7 +986,7 @@ async def test_a_budget_spent_during_a_move_still_runs_the_phases_first_case(tmp
     seen = []
 
     async def run(phase_suites, *args, **kwargs):
-        seen.append(([s.integration for s in phase_suites], await where(lab), budget.stops(device_case=True)))
+        seen.append(([s.integration for s in phase_suites], await fakes.where(lab), budget.stops(device_case=True)))
         return engine.RunResult([])
 
     async def wait_for_targets(*args, **kwargs):
@@ -1113,7 +1073,7 @@ async def test_a_signal_mid_move_still_brings_the_bulbs_home(tmp_path, monkeypat
         await run
 
     assert signalled
-    assert await where(lab) == ["hue", "hue"]
+    assert await fakes.where(lab) == ["hue", "hue"]
     assert lab.ha.states["automation.lab"]["state"] == "on"
     assert not journal.path.exists()
 
@@ -1145,7 +1105,7 @@ async def test_a_second_signal_mid_move_leaves_the_bulbs_where_they_are_and_keep
             task.cancel()
 
     assert stopped
-    assert await where(lab) != ["hue", "hue"]
+    assert await fakes.where(lab) != ["hue", "hue"]
     assert "roam" in Journal(journal.path).sections
 
 

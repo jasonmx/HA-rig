@@ -704,28 +704,19 @@ def test_check_tokens_stops_a_run_of_an_adapter_with_options_without_an_admin_to
     rig.check_tokens({**env, "HA_ADMIN_TOKEN": "admin"}, [rig.Suite(step_file, "hue")], registry)
 
 
-class RigHA(fakes.FakeAdmin):
-    async def close(self):
-        pass
-
-
-def rig_ha(monkeypatch, light: str, opt: bool, automation: str) -> RigHA:
+def rig_ha(monkeypatch, light: str, opt: bool, automation: str) -> fakes.FakeAdmin:
     """One fake for both connections, with a light, DeviceSide's options and an automation to pause."""
     monkeypatch.setattr(engine, "OPTIONS_RELOAD_S", 0)
-    ha = RigHA(
+    ha = fakes.FakeAdmin(
         {"light.a": {"state": light, "attributes": {"brightness": 200}}, "automation.motion": {"state": automation}},
         options={"opt": opt},
     )
     ha.respond = lambda ha, action, data: {data["entity_id"]: {"status": "sent", "integration": "shelly"}}
-
-    async def connect(env):
-        return ha, ha
-
-    monkeypatch.setattr(rig, "connect", connect)
+    monkeypatch.setattr(rig, "connect", fakes.connected(ha))
     return ha
 
 
-def put_back(ha: RigHA) -> bool:
+def put_back(ha: fakes.FakeAdmin) -> bool:
     return (
         ha.states["light.a"] == {"entity_id": "light.a", "state": "on", "attributes": {"brightness": 200}}
         and ha.states["automation.motion"]["state"] == "on"

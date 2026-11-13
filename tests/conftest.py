@@ -1,5 +1,6 @@
 """Fixtures every rig test shares: no real cmux, no settle waits, no wait between a Z2M bulb's first reads, no timers
-left running, and no household terms written into the deviceside checkout the tests import."""
+left running, and no household terms written into the deviceside checkout the tests import; plus the roaming tests'
+lab."""
 
 import asyncio
 import sys
@@ -9,7 +10,7 @@ import pytest
 
 from ha_rig import engine, locks, roam, target, terms
 from ha_rig.target import deviceside_repo
-from tests.rig_fakes import PENDING, STEPS
+from tests.rig_fakes import PENDING, STEPS, Lab, lab_on_hue
 
 # The rig imports deviceside's registry and actions; appended, so this repo's own `tests` package wins.
 sys.path.append(str(deviceside_repo()))
@@ -52,9 +53,11 @@ def quick_prime(monkeypatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_settle(monkeypatch) -> None:
-    """No settle wait before a run's first case or after it puts a device back; a test that needs one sets its own."""
+    """No settle wait before a run's first case or after it puts a device back, and no lag after a Z2M call before
+    its busy check; a test that needs one sets its own."""
     monkeypatch.setattr(engine, "SETUP_SETTLE_S", 0)
     monkeypatch.setattr(engine, "RESTORE_SETTLE_S", 0)
+    monkeypatch.setattr(engine, "BUSY_LAG_S", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -96,3 +99,9 @@ def no_approval(monkeypatch) -> None:
     """No test inherits an approval for restricted work, or the variable it replaced, from the shell running it."""
     monkeypatch.delenv("DEVICE_SIDE_RIG_RESTRICTED", raising=False)
     monkeypatch.delenv("DEVICE_SIDE_RIG_APPROVED", raising=False)
+
+
+@pytest.fixture
+def lab() -> Lab:
+    """The lab's two bulbs on Hue, with an empty FakeHA; a module whose lab needs more defines its own."""
+    return lab_on_hue()

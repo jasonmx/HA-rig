@@ -9,17 +9,14 @@ from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestServer
 
 from ha_rig.client import HAClient, HAError
+from tests.rig_fakes import ws_handshake
 
 BRIDGE_INFO = json.dumps({"config": {"devices": {"0x01": {"hue_native_control": True}}}})
 STATES = {"switch.plug": {"entity_id": "switch.plug", "state": "off", "attributes": {}}}
 
 
 async def websocket(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    await ws.send_json({"type": "auth_required"})
-    auth = await ws.receive_json()
-    await ws.send_json({"type": "auth_ok" if auth["access_token"] == "token" else "auth_invalid"})
+    ws = await ws_handshake(request)
     subscription = None
     async for message in ws:
         if message.type != WSMsgType.TEXT:
@@ -53,17 +50,13 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
 async def vanishing(request: web.Request, end: str) -> web.WebSocketResponse:
     """Answers the state subscription, then ends the connection on the next command: by closing, or with a frame that
     isn't JSON when `end` is `garbage`."""
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    await ws.send_json({"type": "auth_required"})
-    await ws.receive_json()
-    await ws.send_json({"type": "auth_ok"})
+    ws = await ws_handshake(request)
     subscribe = await ws.receive_json()
     await ws.send_json({"id": subscribe["id"], "type": "result", "success": True, "result": None})
     await ws.receive_json()
     if end == "garbage":
         await ws.send_str("not json")
-        await asyncio.sleep(1)
+        await ws.receive()  # until the client, failing on the frame, closes
     await ws.close()
     return ws
 

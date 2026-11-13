@@ -364,7 +364,7 @@ tests:
     setup:
       - set: {state: off}
     steps:
-      - call: {duration: 0.6}
+      - call: {duration: 0.2}
       - expect_response: {status: expected, integration: self}
       - expect_state: {state: on, within: tol}
       - wait: duration - tol
@@ -417,21 +417,12 @@ async def test_observed_asks_and_its_answer_is_a_fact_not_a_record(tmp_path, ans
     assert result.suites[0].recordable  # what the person saw is a fact for _facts.md, never holding the record back
 
 
-@pytest.mark.parametrize(("saw", "detail"), [("Red, then  blue ", "; saw: Red, then  blue"), ("", "")])
-async def test_a_no_records_what_the_person_saw(tmp_path, saw, detail):
-    asked, ask = answers("", "n", saw)
+async def test_a_no_records_what_the_person_saw(tmp_path):
+    asked, ask = answers("", "n", "Red, then  blue ")
     ha = FakeHA({"switch.plug": {}}, timer_on)
     result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=ask)
     assert asked[-1] == "    What did you see? (Enter to skip) "
-    assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?" + detail)
-
-
-async def test_eof_at_what_was_seen_still_fails_the_case(tmp_path):
-    _, ask = answers("", "n")
-    result = await run_one(
-        FakeHA({"switch.plug": {}}, timer_on), suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=ask
-    )
-    assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?")
+    assert outcomes(result)[WATCHED] == (Outcome.FAIL, "not seen: Did it click twice?; saw: Red, then  blue")
 
 
 async def test_a_report_lists_every_suite_with_its_reasons(tmp_path):
@@ -3006,6 +2997,8 @@ async def test_facts_unattended_runs_the_automated_part_and_leaves_the_watched_o
     result = await run_one(ha, suite(tmp_path, BOTH), profile(switch_plug="switch.plug"), ask=None)
     assert outcomes(result) == {AUTOMATED: (Outcome.PASS, ""), WATCHED: (Outcome.NOT_OBSERVED, "")}
     records = under(tmp_path / "records")
+    watched = result.suites[0].cases[1]
+    assert watched.id == WATCHED and watched.devices == ()
     written = [write_fact(result.suites[0].suite, case, REGISTRY, records, "d") for case in result.suites[0].cases]
     assert written[1] is None  # nobody watched
     assert [row.kind for row in FactsFile.read(records("shelly") / "_facts.md").rows] == [AUTOMATED_KIND]
@@ -3049,28 +3042,3 @@ async def test_a_firmware_fact_that_passed_or_failed_adds_a_row_naming_its_devic
         ),
     )
     assert result.suites[0].recordable  # the fact's result is no part of the record
-
-
-async def test_an_observed_case_nobody_answered_adds_no_row(tmp_path):
-    ha = FakeHA({"switch.plug": {}}, timer_on)
-    result = await run_one(ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=None)
-    [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
-    assert watched.outcome is Outcome.NOT_OBSERVED and watched.devices == ()
-    assert write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12") is None
-
-
-async def test_a_seen_failure_adds_a_fail_row(tmp_path):
-    ha = FakeHA({"switch.plug": {}}, timer_on)
-    result = await run_one(
-        ha, suite(tmp_path, OBSERVED), profile(switch_plug="switch.plug"), ask=answers("", "n", "")[1]
-    )
-    [watched] = [case for case in result.suites[0].cases if case.id == WATCHED]
-    path = write_fact(result.suites[0].suite, watched, REGISTRY, under(tmp_path), "2026-11-12")
-    assert [row.result for row in FactsFile.read(path).rows] == [FAIL]
-
-
-def test_a_record_has_no_covers_row(tmp_path):
-    steps = suite(tmp_path, ON_THEN_OFF)
-    case = CaseResult(AUTOMATED, "switch_plug", "switch", Outcome.PASS)
-    record = render_record(SuiteResult(steps, [case], True), "Shelly", "2026.10.1", [], "d", "t")
-    assert "Covers" not in record

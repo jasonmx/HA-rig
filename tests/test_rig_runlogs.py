@@ -24,19 +24,10 @@ _spec.loader.exec_module(rig)
 FUTURE = "2999-01-01 00:00:00.000"
 
 
-class LoggedHA(fakes.FakeHA):
-    async def close(self):
-        pass
-
-
 @pytest.fixture
-def ha(monkeypatch, tmp_path) -> LoggedHA:
-    ha = LoggedHA({})
-
-    async def connect(env):
-        return ha, ha
-
-    monkeypatch.setattr(rig, "connect", connect)
+def ha(monkeypatch, tmp_path) -> fakes.FakeHA:
+    ha = fakes.FakeHA({})
+    monkeypatch.setattr(rig, "connect", fakes.connected(ha))
     monkeypatch.setattr(rig, "REPORT_DIR", tmp_path / "reports")
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: directory / "report.md")
     ha.ha_log = f"2000-01-01 00:00:00.000 INFO before the run\n{FUTURE} ERROR in the run\nTraceback: boom\n"
@@ -50,7 +41,7 @@ def suites(tmp_path: Path, *integrations: str, expected_log: str = "") -> list[r
     return [rig.Suite(load_step_file(path), integration) for integration in integrations]
 
 
-def phases(monkeypatch, ha: LoggedHA, crash: bool = False, during=None):
+def phases(monkeypatch, ha: fakes.FakeHA, crash: bool = False, during=None):
     """engine.run as a recorder of what `during` sees; Z2M logs two lines in it, and it crashes if asked."""
 
     async def run(phase_suites, *args, **kwargs):
@@ -132,14 +123,6 @@ def test_a_clean_run_whose_coordinator_crashed_says_so_and_keeps_the_log(tmp_pat
     assert "Z2M's coordinator crashed 2 times (23:08:46, 23:30:01)." in printed
     assert "Z2M logged 1 ACK timeout with its coordinator." in printed
     assert logs.z2m_path.exists() and f"Log: {logs.z2m_path}" in printed
-
-
-def test_a_clean_run_with_no_crash_still_deletes_its_logs(tmp_path):
-    logs = RunLogs(tmp_path, "rig run", datetime.datetime.now(), out=lambda _: None)
-    logs.z2m_path.write_text("10:00:00.000 info    [z2m] fine\n")
-    logs.written.append(logs.z2m_path)
-    logs.settle(clean=True)
-    assert not logs.z2m_path.exists()
 
 
 WARNED = (

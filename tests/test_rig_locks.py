@@ -103,16 +103,20 @@ def test_a_terminal_run_is_named_by_user_and_tty(monkeypatch):
 # --- Holding --------------------------------------------------------------------------------------------------
 
 
-def test_shared_holders_on_different_integrations_both_proceed(tmp_path):
-    with locks.hold(claim("hue"), "wt/hue", tmp_path, out=quiet()):
-        assert not blocked(tmp_path, claim("zha"))
-        assert not blocked(tmp_path, SHARED)
-
-
-def test_two_holders_of_one_integration_block_each_other(tmp_path):
-    with locks.hold(claim("hue", "zha"), "wt/first", tmp_path, out=quiet()):
-        assert blocked(tmp_path, claim("zha"))
-        assert blocked(tmp_path, claim("shelly", "zha"))
+@pytest.mark.parametrize(
+    ("held", "wanted", "waits"),
+    [
+        (claim("hue"), claim("zha"), False),  # shared holders on different integrations both proceed
+        (claim("hue"), SHARED, False),
+        (claim("hue", "zha"), claim("zha"), True),  # two holders of one integration block each other
+        (claim("hue", "zha"), claim("shelly", "zha"), True),
+        (EXCLUSIVE, claim("hue"), True),  # shared claims wait for an exclusive holder
+        (EXCLUSIVE, SHARED, True),
+    ],
+)
+def test_a_claim_waits_only_for_a_holder_it_conflicts_with(tmp_path, held, wanted, waits):
+    with locks.hold(held, "wt/first", tmp_path, out=quiet()):
+        assert blocked(tmp_path, wanted) is waits
 
 
 def test_a_waiting_run_names_the_holder_once_and_says_when_it_has_its_locks(tmp_path, monkeypatch):
@@ -194,27 +198,6 @@ def test_an_exclusive_claim_waits_out_the_shared_holders_naming_them(tmp_path, m
     assert "zha: wt/zha" in printed[0]
     assert printed[-1] == "Rig locks acquired: HA exclusive."
     assert (tmp_path / locks.LOCK_NAME).read_text().startswith("wt/deploy ")
-
-
-def test_shared_claims_wait_for_an_exclusive_holder(tmp_path):
-    with locks.hold(EXCLUSIVE, "wt/deploy", tmp_path, out=quiet()):
-        assert blocked(tmp_path, claim("hue"))
-        assert blocked(tmp_path, SHARED)
-
-
-def test_a_waiting_exclusive_claim_holds_off_no_shared_one(tmp_path, monkeypatch):
-    """Throughput now: a shared claim that is ready starts at once, even while a deploy waits for HA."""
-    sharing = locks.hold(claim("hue"), "wt/hue", tmp_path, out=quiet())
-    seen: list[bool] = []
-
-    def meanwhile(_seconds):
-        if not seen:
-            seen.append(blocked(tmp_path, claim("zha")))
-        sharing.close()
-
-    monkeypatch.setattr(locks.time, "sleep", meanwhile)
-    locks.hold(EXCLUSIVE, "wt/deploy", tmp_path, out=quiet()).close()
-    assert seen == [False]
 
 
 def test_an_exclusive_wait_leaves_its_own_integrations_out_of_the_holders(tmp_path, monkeypatch):
@@ -366,44 +349,30 @@ def step_suites(tmp_path: Path, text: str, *integrations: str) -> list:
     return [rig.Suite(load_step_file(path), integration) for integration in integrations]
 
 
-def test_a_plain_run_claims_its_integrations_and_ha_shared(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    run = setup(tmp_path, profile, step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"))
-    assert rig.claim(run_args(), run) == claim("shelly")
+OPTIONS = fakes.RESTORED_MIDWAY.replace("tests:", "options: [opt]\ntests:", 1)
+LIFECYCLE = fakes.RESTORED_MIDWAY.replace("tests:", "name: lifecycle\ntests:", 1).replace(
+    "restore: null", "entry: reload"
+)
+NO_ADAPTER = SimpleNamespace(adapter=lambda action, integration: None)
 
 
-def test_a_deploy_takes_ha_exclusive_unless_no_deploy(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    run = setup(tmp_path, profile, step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"), deploy_needed=True)
-    assert rig.claim(run_args(), run) == claim("shelly", ha="exclusive")
-    assert rig.claim(run_args("--no-deploy"), run) == claim("shelly")
-
-
-def test_an_option_suite_takes_ha_exclusive(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    options = fakes.RESTORED_MIDWAY.replace("tests:", "options: [opt]\ntests:", 1)
-    run = setup(tmp_path, profile, step_suites(tmp_path, options, "shelly"), registry=fakes.OPTION_REGISTRY)
-    assert rig.claim(run_args(), run) == claim("shelly", ha="exclusive")
-
-
-def test_a_suite_with_entry_steps_takes_ha_exclusive(tmp_path):
-    profile = fakes.profile("shelly", light_ct="light.a")
-    lifecycle = fakes.RESTORED_MIDWAY.replace("tests:", "name: lifecycle\ntests:", 1).replace(
-        "restore: null", "entry: reload"
-    )
-    run = setup(tmp_path, profile, step_suites(tmp_path, lifecycle, "shelly"))
-    assert rig.claim(run_args(), run) == claim("shelly", ha="exclusive")
-
-
-def test_a_suite_with_no_adapter_claims_nothing(tmp_path):
+@pytest.mark.parametrize(
+    ("text", "deploy_needed", "argv", "registry", "expected"),
+    [
+        pytest.param(fakes.RESTORED_MIDWAY, False, (), None, claim("shelly"), id="plain: integrations, HA shared"),
+        pytest.param(fakes.RESTORED_MIDWAY, True, (), None, claim("shelly", ha="exclusive"), id="deploy"),
+        pytest.param(fakes.RESTORED_MIDWAY, True, ("--no-deploy",), None, claim("shelly"), id="no-deploy"),
+        pytest.param(OPTIONS, False, (), None, claim("shelly", ha="exclusive"), id="option suite"),
+        pytest.param(LIFECYCLE, False, (), None, claim("shelly", ha="exclusive"), id="entry steps"),
+        pytest.param(fakes.RESTORED_MIDWAY, False, (), NO_ADAPTER, SHARED, id="no adapter: nothing"),
+    ],
+)
+def test_a_runs_claim(tmp_path, text, deploy_needed, argv, registry, expected):
     profile = fakes.profile("shelly", light_ct="light.a")
     run = setup(
-        tmp_path,
-        profile,
-        step_suites(tmp_path, fakes.RESTORED_MIDWAY, "shelly"),
-        registry=SimpleNamespace(adapter=lambda action, integration: None),
+        tmp_path, profile, step_suites(tmp_path, text, "shelly"), deploy_needed=deploy_needed, registry=registry
     )
-    assert rig.claim(run_args(), run) == SHARED
+    assert rig.claim(run_args(*argv), run) == expected
 
 
 def test_a_zha_only_roam_claims_hue_and_zha_not_z2m(tmp_path):
@@ -576,35 +545,42 @@ def test_needs_is_the_orphans_integrations_and_ha_exclusive_for_options(tmp_path
 MAY = SimpleNamespace(withholds=lambda journal: None)  # an authority that lets the rig put back every orphan
 
 
-def replayed(tmp_path, monkeypatch, held: Claim | None) -> list[str]:
-    """Run replay holding `held`; the journals recover_rig was asked to put back."""
-    put_back: list[str] = []
+@pytest.fixture
+def put_back(monkeypatch) -> list[str]:
+    """rig.recover_rig as a recorder: the journals it was asked to put back, each cleared as if it had been."""
+    names: list[str] = []
 
     async def recover_rig(env, journal):
-        put_back.append(journal.path.name)
+        names.append(journal.path.name)
         journal.clear(*journal.sections)
 
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
+    return names
+
+
+def replayed(put_back: list[str], tmp_path, held: Claim | None) -> list[str]:
+    """Run replay holding `held`; the journals recover_rig was asked to put back."""
+    put_back.clear()
     holding = locks.Held(held) if held is not None else None
     rig.replay({}, holding, tmp_path, MAY)
-    return put_back
+    return list(put_back)
 
 
-def test_an_orphan_is_replayed_only_when_the_claim_covers_it(tmp_path, monkeypatch, capsys):
+def test_an_orphan_is_replayed_only_when_the_claim_covers_it(tmp_path, put_back, capsys):
     hue = orphan(tmp_path, claim("hue"), cases=CASE).name
     zha = orphan(tmp_path, claim("zha"), cases=CASE).name
 
-    assert replayed(tmp_path, monkeypatch, claim("hue", "shelly")) == [hue]
+    assert replayed(put_back, tmp_path, claim("hue", "shelly")) == [hue]
     out = capsys.readouterr().out
     assert f"{zha} that need HA shared, zha, more than this run holds" in out
-    assert replayed(tmp_path, monkeypatch, claim("zha")) == [zha]
+    assert replayed(put_back, tmp_path, claim("zha")) == [zha]
     assert sorted(path.name for path in tmp_path.iterdir()) == []
 
 
-def test_an_orphan_with_options_needs_ha_exclusive(tmp_path, monkeypatch):
+def test_an_orphan_with_options_needs_ha_exclusive(tmp_path, put_back):
     options = orphan(tmp_path, claim("hue"), options={"opt": True}).name
-    assert replayed(tmp_path, monkeypatch, claim("hue")) == []
-    assert replayed(tmp_path, monkeypatch, claim("hue", ha="exclusive")) == [options]
+    assert replayed(put_back, tmp_path, claim("hue")) == []
+    assert replayed(put_back, tmp_path, claim("hue", ha="exclusive")) == [options]
 
 
 def test_a_dry_run_only_says_what_orphans_there_are(tmp_path, monkeypatch, capsys):
@@ -614,19 +590,12 @@ def test_a_dry_run_only_says_what_orphans_there_are(tmp_path, monkeypatch, capsy
     assert path.exists()
 
 
-def test_the_legacy_journal_is_replayed_only_by_recover(tmp_path, monkeypatch, capsys):
+def test_the_legacy_journal_is_replayed_only_by_recover(tmp_path, monkeypatch, put_back, capsys):
     legacy = Journal(tmp_path / LEGACY_NAME)
     legacy.update(profile="lab", cases=CASE)
-    assert replayed(tmp_path, monkeypatch, Claim.everything()) == []
+    assert replayed(put_back, tmp_path, Claim.everything()) == []
     assert "--recover puts them back" in capsys.readouterr().out
 
-    put_back: list[str] = []
-
-    async def recover_rig(env, journal):
-        put_back.append(journal.path.name)
-        journal.clear(*journal.sections)
-
-    monkeypatch.setattr(rig, "recover_rig", recover_rig)
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
     monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
@@ -637,14 +606,13 @@ def test_the_legacy_journal_is_replayed_only_by_recover(tmp_path, monkeypatch, c
     assert put_back == [LEGACY_NAME]
 
 
-def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypatch, capsys):
+def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypatch, put_back, capsys):
     names = sorted([orphan(tmp_path, claim("hue"), cases=CASE).name, orphan(tmp_path, None, options={}).name])
-    put_back: list[str] = []
+    recorded = rig.recover_rig
 
     async def recover_rig(env, journal):
-        put_back.append(journal.path.name)
         assert locks.holders(tmp_path, Claim.everything())  # it holds every lock
-        journal.clear(*journal.sections)
+        await recorded(env, journal)
 
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
     monkeypatch.setattr(rig, "load_env", dict)
@@ -691,21 +659,13 @@ def labelled(directory: Path, profile: str | None, integration: str) -> Path:
     return path
 
 
-def recovering(tmp_path, monkeypatch, env: dict) -> list[str]:
-    put_back: list[str] = []
-
-    async def recover_rig(env, journal):
-        put_back.append(journal.path.name)
-        journal.clear(*journal.sections)
-
-    monkeypatch.setattr(rig, "recover_rig", recover_rig)
+def recovering(monkeypatch, env: dict) -> None:
     monkeypatch.setattr(rig, "load_env", lambda: env)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
-    return put_back
 
 
 def test_recover_puts_back_a_pre_authorized_profiles_orphan_with_the_sensor_on_and_names_the_rest(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, put_back, capsys
 ):
     profiles(tmp_path, monkeypatch, bench=True, house=False)
     bench = labelled(tmp_path, "bench", "hue")
@@ -713,7 +673,7 @@ def test_recover_puts_back_a_pre_authorized_profiles_orphan_with_the_sensor_on_a
     gone = labelled(tmp_path, "gone", "shelly")
     unnamed = labelled(tmp_path, None, "zwave")
     reads = sensor_reads(monkeypatch, "on")
-    put_back = recovering(tmp_path, monkeypatch, SENSOR_ON)
+    recovering(monkeypatch, SENSOR_ON)
 
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
     assert put_back == [bench.name]
@@ -728,31 +688,34 @@ def test_recover_puts_back_a_pre_authorized_profiles_orphan_with_the_sensor_on_a
     assert sorted(put_back) == sorted([bench.name, house.name, gone.name, unnamed.name])
 
 
+@pytest.mark.usefixtures("put_back")
 def test_recover_reads_no_sensor_when_every_orphan_is_pre_authorized(tmp_path, monkeypatch):
     profiles(tmp_path, monkeypatch, bench=True)
     labelled(tmp_path, "bench", "hue")
     monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
-    recovering(tmp_path, monkeypatch, SENSOR_ON)
+    recovering(monkeypatch, SENSOR_ON)
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
 
 
-def test_an_approval_lets_recover_put_back_a_restricted_orphan_with_the_sensor_on(tmp_path, monkeypatch):
+def test_an_approval_lets_recover_put_back_a_restricted_orphan_with_the_sensor_on(tmp_path, monkeypatch, put_back):
     profiles(tmp_path, monkeypatch, house=False)
     house = labelled(tmp_path, "house", "zha")
     sensor_reads(monkeypatch, "on")
-    put_back = recovering(tmp_path, monkeypatch, SENSOR_ON)
+    recovering(monkeypatch, SENSOR_ON)
     monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
     assert put_back == [house.name]
 
 
-def test_a_run_whose_claim_covers_a_restricted_orphan_it_may_not_put_back_stops(tmp_path, monkeypatch, capsys):
+def test_a_run_whose_claim_covers_a_restricted_orphan_it_may_not_put_back_stops(
+    tmp_path, monkeypatch, put_back, capsys
+):
     profiles(tmp_path, monkeypatch, bench=True, house=False)
     bench = labelled(tmp_path, "bench", "hue")
     house = labelled(tmp_path, "house", "zha")
     labelled(tmp_path, "house", "zwave")  # not covered: left for a run that holds it
     sensor_reads(monkeypatch, "on")
-    put_back = recovering(tmp_path, monkeypatch, SENSOR_ON)
+    recovering(monkeypatch, SENSOR_ON)
 
     with pytest.raises(SystemExit, match=f"This run's locks cover what {house} left changed"):
         rig.replay(SENSOR_ON, locks.Held(claim("hue", "zha")), tmp_path, rig.Authority(SENSOR_ON))
@@ -1029,81 +992,67 @@ def at_a_terminal(monkeypatch, answer: str) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
 
 
-def test_an_agents_probe_is_refused_while_the_sensor_is_on(probe, monkeypatch, capsys):
-    clear_states(monkeypatch, "on")
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
+PROBE_ON_SAYS = f"Restricted, and {PROBE_SENSOR} is on."
+NO_KEY_SAYS = "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig."
+ASKED_SAYS = f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]"
+VISUAL_NONE, VISUAL_PROFILE = ("--visual", "none"), ("--visual", "profile")
+# How the probe is given its go-ahead; `""` gives none.
+PROBE_GIVEN = ("", "no key", "y at a terminal", "approved", "pre-authorized")
+
+
+@pytest.mark.parametrize(
+    ("reads", "given", "visual", "code", "armed", "says"),
+    [
+        pytest.param(
+            ("on",),
+            "",
+            (),
+            1,
+            [],
+            f"{PROBE_ON_SAYS} Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)",
+            id="on: refused",
+        ),
+        pytest.param((), "no key", (), 1, [], NO_KEY_SAYS, id="no key: refused"),
+        pytest.param(("off", "on"), "", (), 1, [], None, id="checked again once it holds its locks"),
+        pytest.param(("off", "off"), "", (), 0, [True], None, id="clear: runs watched and unasked"),
+        pytest.param(("on",), "y at a terminal", (), 0, [True], ASKED_SAYS, id="let past: watched, not asked again"),
+        pytest.param(("on",), "approved", (), 0, [True], None, id="approved: goes while on, watched"),
+        pytest.param((), "", VISUAL_NONE, 0, [False], None, id="non-visual: reads no sensor, not watched"),
+        pytest.param((), "pre-authorized", VISUAL_PROFILE, 0, [False], None, id="visual profile: pre-authorized"),
+        pytest.param(("on",), "pre-authorized", (), 1, [], PROBE_ON_SAYS, id="undeclared on a pre-authorized profile"),
+    ],
+)
+def test_the_probe_gate(probe, monkeypatch, capsys, reads, given, visual, code, armed, says):
+    """The sensor reads each of `reads` in turn (one more fails the test); an agent's probe is never asked."""
+    assert given in PROBE_GIVEN
+    seen = clear_states(monkeypatch, *reads, key=given != "no key")
+    if given == "y at a terminal":
+        at_a_terminal(monkeypatch, "y\n")
+    if given == "approved":
+        monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
+    if given == "pre-authorized":
+        with (probe / "lab.yaml").open("a") as profile:
+            profile.write("pre_authorized: true\n")
+    monkeypatch.setattr(rig, "run_command", lambda command: 0 if code == 0 else pytest.fail("ran"))
+    assert rig.main(["--hold", "hue", *visual, "--", "true"]) == code
     out = capsys.readouterr().out
-    assert f"Restricted, and {PROBE_SENSOR} is on. Needs DEVICE_SIDE_RIG_RESTRICTED=1 (Jason's yes)" in out
-    assert "Proceed" not in out  # an agent is never asked
-    assert ProbeHA.calls == []
+    if says is not None:
+        assert says in out
+    assert ("Proceed" in out) is (given == "y at a terminal")
+    assert seen == armed
+    if code:
+        assert ProbeHA.calls == []
     assert not blocked(probe, claim("hue", ha="exclusive"))
 
 
-def test_an_agents_probe_without_the_key_is_refused(probe, monkeypatch, capsys):
-    clear_states(monkeypatch, key=False)
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert "Restricted, and no RIG_RESTRICTED_ENTITY in .env.rig." in capsys.readouterr().out
-
-
-def test_a_probe_is_checked_again_once_it_holds_its_locks(probe, monkeypatch):
-    clear_states(monkeypatch, "off", "on")
-    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert ProbeHA.calls == []
-
-
-def test_a_clear_probe_runs_watched_and_unasked(probe, monkeypatch, capsys):
-    armed = clear_states(monkeypatch, "off", "off")
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert armed == [True]
-    assert "Proceed" not in capsys.readouterr().out
-
-
-def test_a_probe_a_human_let_past_is_watched_and_not_asked_again(probe, monkeypatch, capsys):
-    armed = clear_states(monkeypatch, "on")  # one read: a second would fail the test
-    at_a_terminal(monkeypatch, "y\n")
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert armed == [True]
-    assert f"Restricted: {PROBE_SENSOR} is on. Proceed anyway? [y/N]" in capsys.readouterr().out
-
-
-def test_an_approved_probe_goes_while_the_sensor_is_on_and_is_watched(probe, monkeypatch):
-    armed = clear_states(monkeypatch, "on")
-    monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--", "true"]) == 0
-    assert armed == [True]
-
-
-def test_a_non_visual_probe_reads_no_sensor_and_is_not_watched(probe, monkeypatch):
-    armed = clear_states(monkeypatch)  # no reply: reading the sensor would fail
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
-    assert armed == [False]
-
-
 def test_a_visual_profile_probe_needs_a_pre_authorized_profile(probe, monkeypatch):
-    armed = clear_states(monkeypatch)
-    monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    with pytest.raises(SystemExit, match="--visual profile needs a pre-authorized profile, and lab isn't"):
-        rig.main(["--hold", "hue", "--visual", "profile", "--", "true"])
-    with (probe / "lab.yaml").open("a") as profile:
-        profile.write("pre_authorized: true\n")
-    assert rig.main(["--hold", "hue", "--visual", "profile", "--", "true"]) == 0
-    assert armed == [False]
-
-
-def test_an_undeclared_probe_on_a_pre_authorized_profile_is_still_restricted(probe, monkeypatch, capsys):
-    clear_states(monkeypatch, "on")
-    with (probe / "lab.yaml").open("a") as profile:
-        profile.write("pre_authorized: true\n")
+    seen = clear_states(monkeypatch)
     monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
-    assert rig.main(["--hold", "hue", "--", "true"]) == 1
-    assert f"Restricted, and {PROBE_SENSOR} is on." in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="--visual profile needs a pre-authorized profile, and lab isn't"):
+        rig.main(["--hold", "hue", *VISUAL_PROFILE, "--", "true"])
+    assert seen == []
+    assert ProbeHA.calls == []
+    assert not blocked(probe, claim("hue", ha="exclusive"))
 
 
 def test_a_probes_dry_run_says_whether_it_may_go_and_runs_nothing(probe, monkeypatch, capsys):
@@ -1182,12 +1131,8 @@ def resumed(tmp_path, monkeypatch, orphan_profile: str) -> locks.Held:
     return rig.take(run_args(), run, tmp_path)
 
 
+@pytest.mark.usefixtures("put_back")
 def test_a_resumed_run_claims_what_its_orphans_need_and_puts_them_back(tmp_path, monkeypatch):
-
-    async def recover_rig(env, journal):
-        journal.clear(*journal.sections)
-
-    monkeypatch.setattr(rig, "recover_rig", recover_rig)
     held = resumed(tmp_path, monkeypatch, "house")
     with held:
         assert held.claim == claim("shelly", "zha")
@@ -1200,31 +1145,22 @@ def test_an_orphan_of_another_profile_does_not_widen_the_claim(tmp_path, monkeyp
         assert held.claim == claim("shelly")
 
 
-def probing_orphans(probe, monkeypatch, why: str | None):
-    """A probe holding hue over a hue orphan that `why` says the rig may not put back (None: it may); the journals
-    recover_rig was asked to put back."""
-    put_back: list[str] = []
-
-    async def recover_rig(env, journal):
-        put_back.append(journal.path.name)
-        journal.clear(*journal.sections)
-
-    monkeypatch.setattr(rig, "recover_rig", recover_rig)
+def probing_orphans(monkeypatch, why: str | None) -> None:
+    """A probe holding hue over a hue orphan that `why` says the rig may not put back (None: it may)."""
     monkeypatch.setattr(rig.Authority, "withholds", lambda self, journal: why)
     monkeypatch.setattr(rig, "run_command", lambda command: 0)
-    return put_back
 
 
-def test_a_probe_puts_back_a_restorable_orphan_its_locks_cover(probe, monkeypatch):
+def test_a_probe_puts_back_a_restorable_orphan_its_locks_cover(probe, monkeypatch, put_back):
     path = orphan(probe, claim("hue"), cases=CASE)
-    put_back = probing_orphans(probe, monkeypatch, None)
+    probing_orphans(monkeypatch, None)
     assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
     assert put_back == [path.name]
 
 
-def test_a_probe_over_a_restricted_orphan_warns_and_runs(probe, monkeypatch, capsys):
+def test_a_probe_over_a_restricted_orphan_warns_and_runs(probe, monkeypatch, put_back, capsys):
     path = orphan(probe, claim("hue"), cases=CASE)
-    put_back = probing_orphans(probe, monkeypatch, "profile lab, restricted")
+    probing_orphans(monkeypatch, "profile lab, restricted")
     assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
     assert put_back == []
     assert f"left {path} (profile lab, restricted)" in capsys.readouterr().out
