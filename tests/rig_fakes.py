@@ -773,13 +773,17 @@ def profile(integration: str = "shelly", pause: tuple[str, ...] = (), **roles: s
     return Profile({integration: entities}, {"all": pause} if pause else {}, name="house")
 
 
-OPTION_REGISTRY = SimpleNamespace(
-    adapter=lambda action, integration: SimpleNamespace(
-        scope=SimpleNamespace(
-            confirmable=False, capabilities=None, fields=frozenset(), options=frozenset({"opt", "other"})
+def registry(options: frozenset[str]) -> SimpleNamespace:
+    """A registry whose every adapter has these DeviceSide options."""
+    return SimpleNamespace(
+        adapter=lambda action, integration: SimpleNamespace(
+            scope=SimpleNamespace(confirmable=False, capabilities=None, fields=frozenset(), options=options)
         )
     )
-)
+
+
+OPTION_REGISTRY = registry(frozenset({"opt", "other"}))
+PLAIN_REGISTRY = registry(frozenset())  # no adapter with options: a plain run holds HA shared
 
 
 class FakeAdmin(FakeHA):

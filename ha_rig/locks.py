@@ -1,10 +1,10 @@
 """The rig's locks, in the git common dir so every worktree shares them: one on HA, and one per integration.
 
-A run holds HA shared, unless it restarts HA or reloads DeviceSide's entry (a deploy, a suite with DeviceSide
-options, --recover), and then exclusively. A run that deploys but has no option suites steps HA down to shared once
-HA is back (Held.share_ha). It holds each integration it moves exclusively. So runs on different integrations go side
-by side. A deploy waits until HA is free and holds off no one meanwhile: a shared run that is ready goes ahead of it,
-for throughput now over a deploy's wait.
+A run holds HA shared, unless it restarts HA or may reload DeviceSide's entry (a deploy, a suite whose adapter has
+DeviceSide options or whose file moves the entry, --recover), and then exclusively. A run that deploys but runs no such
+suite steps HA down to shared once HA is back (Held.share_ha). It holds each integration it moves exclusively. So
+runs on different integrations go side by side. A deploy waits until HA is free and holds off no one meanwhile: a
+shared run that is ready goes ahead of it, for throughput now over a deploy's wait.
 
 flock drops a lock when its process dies, so nothing goes stale. A run takes all its locks at once or none, and holds
 nothing while it waits: no two runs each hold what the other waits for, and a run that is ready never queues behind
@@ -85,7 +85,7 @@ class Held:
 
     def share_ha(self, out: Out = print) -> None:
         """Step HA down from exclusive to shared, keeping the integrations: once a deploy's restart is done, a run with
-        no option suites needs HA shared only. Nothing changes for a claim that holds HA shared.
+        no suite that may reload the entry needs HA shared only. Nothing changes for a claim that holds HA shared.
 
         flock's conversion need not be atomic (it may drop the lock before taking the new one), so a run waiting for HA
         exclusively may slip in between; this then waits for it, saying who holds HA, as any shared claim does."""

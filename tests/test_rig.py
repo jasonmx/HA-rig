@@ -1325,7 +1325,7 @@ def planned(tmp_path, monkeypatch, suites, profile, commit="c1", **kwargs) -> ri
     monkeypatch.setattr(rig, "REPO", tmp_path)
     monkeypatch.setattr(rig, "ha_version", lambda env: "2026.10.1")
     deploy = rig.Deploy(commit, "tree1", "tree1", "tree1", "wt/x")
-    setup = rig.Setup({}, profile, fakes.OPTION_REGISTRY, suites, False, False, deploy, selected=suites)
+    setup = rig.Setup({}, profile, fakes.PLAIN_REGISTRY, suites, False, False, deploy, selected=suites)
     rig.plan_resume(run_args(**kwargs), setup, tmp_path)
     return setup
 
@@ -1350,7 +1350,7 @@ def test_a_resume_plans_holds_and_estimates_only_what_is_left(tmp_path, monkeypa
     assert rig.claim(types.SimpleNamespace(no_deploy=False, roam_check=False), setup) == rig.Claim(
         "shared", frozenset({"zha"})
     )
-    assert rig.estimate(setup.suites, fakes.OPTION_REGISTRY, False, done=setup.done, resumed=setup.profile) == 30
+    assert rig.estimate(setup.suites, fakes.PLAIN_REGISTRY, False, done=setup.done, resumed=setup.profile) == 30
     rig.print_resume(types.SimpleNamespace(budget=None, keyword=None), setup)
     out = capsys.readouterr().out
     assert "Resuming: 1 of the 2 cases of the suites to run are saved" in out
