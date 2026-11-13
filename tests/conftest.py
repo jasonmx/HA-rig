@@ -1,6 +1,6 @@
 """Fixtures every rig test shares: no real cmux, no settle waits, no wait between a Z2M bulb's first reads, no timers
-left running, and no household terms written into the deviceside checkout the tests import; plus the roaming tests'
-lab."""
+left running, no real speech, and no household terms written into the deviceside checkout the tests import; plus the
+roaming tests' lab."""
 
 import asyncio
 import sys
@@ -43,6 +43,19 @@ def fixture_steps(monkeypatch) -> None:
     monkeypatch.setattr(target, "steps_dir", lambda repo: STEPS)
     monkeypatch.setattr(target, "integration_steps_dirs", lambda repo: {})
     monkeypatch.setattr(engine, "load_checkout_steps", lambda repo: (engine.load_step_files(STEPS), None, True))
+
+
+@pytest.fixture(autouse=True)
+def spoken(monkeypatch) -> list[str]:
+    """Record the cues a watched case speaks, so no test runs the real `say`."""
+    texts: list[str] = []
+
+    async def say(text: str) -> None:
+        texts.append(text)
+
+    monkeypatch.setattr(engine, "say_exists", lambda: True)
+    monkeypatch.setattr(engine, "_say", say)
+    return texts
 
 
 @pytest.fixture(autouse=True)
