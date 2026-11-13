@@ -1,4 +1,17 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>jasonmx/dotfiles//renovate/default"]
+  "extends": ["github>jasonmx/dotfiles//renovate/default"],
+  "packageRules": [
+    {
+      "description": "ruff and its pre-commit hook move together in one PR, for review, so the linter CI runs never disagrees with the one in .venv.",
+      "matchDepNames": ["ruff", "astral-sh/ruff-pre-commit"],
+      "groupName": "ruff",
+      "automerge": false
+    },
+    {
+      "description": "aiohue must equal what HA's hue manifest requires in the HA build pytest-homeassistant-custom-component pins, which Renovate can't see: bump it by hand with that package, in step with deviceside.",
+      "matchDepNames": ["aiohue"],
+      "enabled": false
+    }
+  ]
 }
