@@ -345,7 +345,7 @@ Such a test runs twice, so you are asked only what a machine can't check:
 2. **Observed** (`<name>[<role>] observed`), a fact case, so only with `--facts`, after all automated runs. Setup runs
    and settles for 2 s, then the runner prints `see` (in bold) and `watch` and waits for Enter. The steps run with their
    checks turned into waits, so the timing matches. As each `call` goes out the runner prints, and speaks with macOS
-   `say` (when it exists), the action in words (`raise brightness`, `stop` for a bare `call: {}`), so you know when a
+   `say` (when it exists), the action in words (`raise brightness`; a bare `call: {}` speaks the suite's action), so you know when a
    move starts and stops; the speech never delays the call. Then you answer `ask`: Enter or `y` if you saw it, `n` if not, which
    fails the test and asks what you saw instead. It is skipped if its automated run failed, and if a step fails after
    Enter it prints `nothing to observe` and the reason.
