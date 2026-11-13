@@ -1,42 +1,24 @@
 name: Lint
 
+# Not wt/** pushes: pr-draft opens a branch's PR on its first push, so a push run would only repeat the PR's.
 on:
   pull_request:
   push:
     branches:
       - main
-      - "wt/**"
 
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes the run in flight. Only a push starts another PR run (bar a close and reopen
+# mid-run), so a cancelled run is never at the head, where ci-green would count it as failed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # One job, not two: each job bills a whole minute, and the history scan takes seconds.
   lint:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.14"
-
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-        with:
-          enable-cache: true
-
-      - name: Install pre-commit
-        run: uv pip install --system pre-commit
-
-      - name: Run pre-commit
-        run: pre-commit run --all-files
-
-  # The pre-commit hook only sees the working tree; this catches a secret committed and later deleted.
-  secrets-history:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,8 +32,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history, for the secrets scan.
           fetch-depth: 0
 
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install pre-commit
+        run: uv pip install --system pre-commit
+
+      # Installing the hook environments is most of the job's time; they change only with the config.
+      - name: Cache pre-commit environments
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+
+      # The pre-commit hook only sees the working tree; the steps below catch a secret committed and later deleted.
       - name: Check the hook pins the same betterleaks
         run: |
           grep -q "# frozen: v${BETTERLEAKS_VERSION}$" .pre-commit-config.yaml || {
