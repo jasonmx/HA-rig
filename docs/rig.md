@@ -143,8 +143,8 @@ you can try a branch's non-device features by hand. When HA already runs the che
   side by side, and the last one out puts them back (`ha_rig/baseline.py`).
 - **Locks.** Runs share the rig through one lock per integration and one on HA, so runs on different integrations go
   side by side (`ha_rig/locks.py`). A run takes all its locks at once and holds none while it waits. A deploy holds
-  HA exclusively, and a run with no option suites steps down to shared once HA is back. The plan prints a run's
-  locks. `--wait-free` waits until the rig is free, or with `--integration`, until those integrations are, without
+  HA exclusively, and a run with no suite that may reload the entry (one whose adapter has DeviceSide options, or
+  whose file moves the entry) steps down to shared once HA is back. The plan prints a run's locks. `--wait-free` waits until the rig is free, or with `--integration`, until those integrations are, without
   taking a lock.
 
 A probe takes the same locks through `--hold`, which runs a command while holding them and returns its exit code:
