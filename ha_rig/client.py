@@ -596,6 +596,24 @@ class HAClient:
                 return False
             return True
 
+    async def z2m_hue(self, name: str) -> float | None:
+        """The Z2M device `name`'s hue on its own wheel, in degrees, from a live color read (Z2M's `color.hue`, from
+        the bulb's EnhancedCurrentHue or CurrentHue); None if no reply with one comes within Z2M_ANSWER_S."""
+        async with self._mqtt_messages(f"zigbee2mqtt/{name}") as messages:
+            await asyncio.sleep(Z2M_SETTLE_S)  # its retained state comes first, and is no answer
+            while not messages.empty():
+                messages.get_nowait()
+            payload = json.dumps({"color": ""})
+            await self.call_service("mqtt", "publish", {"topic": f"zigbee2mqtt/{name}/get", "payload": payload})
+            try:
+                async with asyncio.timeout(Z2M_ANSWER_S):
+                    while True:
+                        hue = ((json.loads(await messages.get()) or {}).get("color") or {}).get("hue")
+                        if isinstance(hue, int | float):
+                            return float(hue)
+            except TimeoutError:
+                return None
+
     async def _retained_state(self, topic: str) -> str | None:
         """The `state` in a topic's retained message, or None if none comes within RETAINED_TIMEOUT_S."""
         async with self._mqtt_messages(topic) as messages:

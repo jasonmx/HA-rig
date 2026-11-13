@@ -144,6 +144,7 @@ class FakeHA(HAClient):
         self.on_open: Callable[[str], None] | None = None  # ZHA or Z2M joining opened (Lab joins its bulbs)
         self.on_leave: Callable[[str, str], None] | None = None  # (integration, IEEE) after a remove
         self.z2m_offline: set[str] = set()  # IEEEs Z2M lists that aren't there: availability offline, no reply
+        self.z2m_hues: dict[str, float] = {}  # IEEE -> the hue a `color` get reads off the bulb
         self.z2m_availability_on = True  # bridge/info's config.availability.enabled
         self.z2m_group_offline: set[str] = set()  # Z2M groups whose availability never says online
         self.z2m_bridge_state = "online"  # the retained bridge/state
@@ -400,7 +401,10 @@ class FakeHA(HAClient):
         if topic.endswith("/get"):
             name = topic.removeprefix("zigbee2mqtt/").removesuffix("/get")
             if normalize_ieee(name) not in self.z2m_offline and (queue := self._z2m_device_topics.get(name)):
-                queue.put_nowait(json.dumps({"state": "ON"}))
+                reply: dict = {"state": "ON"}
+                if "color" in payload and (hue := self.z2m_hues.get(normalize_ieee(name))) is not None:
+                    reply["color"] = {"hue": hue, "x": 0.15, "y": 0.22}
+                queue.put_nowait(json.dumps(reply))
             return
         self._z2m_handle(topic.removeprefix("zigbee2mqtt/bridge/request/"), payload)
 
