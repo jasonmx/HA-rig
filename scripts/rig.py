@@ -73,8 +73,8 @@ those on fixed groups whose members the profile doesn't list and on fixed scenes
 
 A run runs the suites it is asked for; what needs testing is deviceside's to say. --signoffs takes deviceside's list of
 the integrations still needing a sign-off (target.signoffs_needed) as the selection and runs each whole, as a sign-off
-is one whole passing run at one commit (so no --action or -k), naming those the profile lacks for a manual sign-off,
-and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
+is one whole passing run at one package tree (so no --action or -k), naming those the profile lacks for a manual
+sign-off, and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
 fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
 automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
 (ha_rig/progress.py), keyed by the suite and the commit, so one that stops part way, on a signal, the restricted sensor

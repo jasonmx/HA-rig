@@ -164,7 +164,7 @@ proven or stale, and a test record in the checkout never leaves a suite out.
 **`--signoffs`** runs what deviceside says needs a sign-off: the integrations its `scripts/check_release.py --signoffs
 --json` lists, run in the checkout with the interpreter the rig imports it with, in place of `--integration`. A record
 sign-off is one whole passing run of the integration at one package tree, so each is run whole, every suite it has, and
-`--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same package tree with `--integration <x>
+`--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same commit with `--integration <x>
 --action <a>` to complete the run. Those the profile has no entities for are named as needing a manual sign-off
 (`_manual.md`), and the run goes on with the rest; when the list is empty, or the profile has none of it, the run says
 so and exits 0 before touching HA. The check's exit code says whether the release gate fails, not whether the list is
@@ -402,7 +402,7 @@ sits in the temp folder, which the OS may clear: when every selected case is sav
 `--promote` or `--fresh` writes the record.
 
 A record holds the date, a `Ran` row (`N passed, M skipped`), the Home Assistant version, the devices' model and
-firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row) and Result. It needs every
+firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row), its Package row (the integration's package tree at that commit, which a sign-off is checked by) and Result. It needs every
 default case that applies to pass. The only skips it allows are of fact cases, which it always lists as `skipped`,
 whatever they did in the run, and of cases that don't apply here: an action a test calls has no adapter, the profile
 lacks the role, or a group lacks the light the case targets. Any other skip, a failure, or a case not yet run (left out
