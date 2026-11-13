@@ -1,6 +1,7 @@
 """A small Home Assistant client for rig tests: WebSocket for service calls and state events, REST for reads."""
 
 import asyncio
+import collections
 import contextlib
 import itertools
 import json
@@ -100,13 +101,18 @@ def _state_of(raw: str) -> str | None:
 class MQTTFeed:
     """The payloads on an MQTT topic with no retained message, from HAClient.mqtt_feed. HA can drop a subscription
     without a word, and a topic like Z2M's log is then silent for good: after `quiet_s` of nothing the feed
-    subscribes afresh, the new subscription live before the old one is dropped, so no payload falls between."""
+    subscribes afresh, the new subscription live before the old one is dropped, so no payload falls between.
+
+    What the old subscription still holds at the swap is kept: a payload that landed as the quiet wait ran out, or
+    while the new subscription was being made, reached the old one only. While both were live a payload reaches
+    both, so the old one's tail that the new one also holds is dropped once (`_join`)."""
 
     def __init__(self, ha: HAClient, topic: str, quiet_s: float):
         self.ha, self.topic, self.quiet_s = ha, topic, quiet_s
         self.renewed = 0  # how many times a quiet subscription was replaced
         self._stack = contextlib.AsyncExitStack()
         self._queue: asyncio.Queue[str] | None = None
+        self._held: collections.deque[str] = collections.deque()  # carried over from a replaced subscription
 
     async def open(self) -> None:
         self._queue = await self._stack.enter_async_context(self.ha._mqtt_messages(self.topic))
@@ -114,7 +120,9 @@ class MQTTFeed:
     async def get(self) -> str:
         assert self._queue is not None
         while True:
-            try:
+            if self._held:
+                return self._held.popleft()
+            try:  # a get the timeout cancels leaves its payload in the queue, for renew to carry over
                 return await asyncio.wait_for(self._queue.get(), self.quiet_s)
             except TimeoutError:
                 await self.renew()
@@ -126,12 +134,34 @@ class MQTTFeed:
         except BaseException:
             await fresh.aclose()
             raise
-        old, self._stack, self._queue = self._stack, fresh, queue
+        old, old_queue, self._stack, self._queue = self._stack, self._queue, fresh, queue
         self.renewed += 1
-        await old.aclose()
+        try:
+            await old.aclose()
+        finally:
+            # Taken once the old subscription is gone, with no await after: what reaches the new one later is later.
+            self._held.extend(_join(_drain(old_queue), _drain(queue)))
 
     async def close(self) -> None:
         await self._stack.aclose()
+
+
+def _drain(queue: asyncio.Queue[str] | None) -> list[str]:
+    """What `queue` holds, taken out in order."""
+    taken: list[str] = []
+    while queue is not None and not queue.empty():
+        taken.append(queue.get_nowait())
+    return taken
+
+
+def _join(old: list[str], fresh: list[str]) -> list[str]:
+    """The payloads of a replaced subscription (`old`) and its replacement (`fresh`), in order, each once. Every
+    payload since the replacement went live reached both while the old one lasted, so the longest tail of `old` that
+    `fresh` starts with is the overlap; a payload that reached only one is kept."""
+    for overlap in range(min(len(old), len(fresh)), 0, -1):
+        if old[-overlap:] == fresh[:overlap]:
+            return old[:-overlap] + fresh
+    return old + fresh
 
 
 class HAClient:
