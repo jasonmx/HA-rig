@@ -1,6 +1,7 @@
 # The rig as a standalone framework, with DeviceSide as its first target
 
-Starts after DeviceSide v0.1.0 ships (Jason, 2026-11-13), so v0.1.0's sign-off runs use today's rig. Builds on the
+Starts once DeviceSide v0.1.0 has shipped and an integration owner outside DeviceSide wants to use the rig (Jason,
+2026-11-13), so v0.1.0's sign-off runs use today's rig; see Before starting. Builds on the
 evidence-rules work on both `main`s (rig `docs/plans/2026-11-12-evidence-rules-rig.md`, DeviceSide
 `docs/plans/2026-11-12-evidence-rules.md`), whose principle it carries further: **the rig is a dumb executor**;
 DeviceSide decides what needs testing and what a record proves.
@@ -58,9 +59,18 @@ Settled with Jason, 2026-11-13:
    design.md's registry line changes to say the rig reads the manifest.
 3. **The target renders its records** (Seam 2, after a debate): DeviceSide owns a `render` command, and its record
    rules move with it; DeviceSide's CLAUDE.md "no rig code here" changes to keep only the engine out.
-4. **Timing:** all of it after v0.1.0.
+4. **Timing:** after v0.1.0, and only once an integration owner wants to use the rig.
 5. **Docs describe only what a run has exercised.** No example setups the rig hasn't run on.
-6. **The repo move and its history question wait for Stage 1.0.**
+6. **The repo move waits for Stage 1.0, and starts from fresh history:** `DeviceSide/ha-rig` is a new repo whose
+   first commit is the audited tree; `jasonmx/ha-rig` stays private and archived, keeping the history, issues and
+   PRs.
+
+## Before starting
+
+- Confirm both conditions hold: v0.1.0 has shipped, and an integration owner wants to use the rig.
+- Re-ask Jason which non-DeviceSide custom integration proves the seam (1.5), most likely the interested owner's,
+  and where it runs (the household HA or the owner's own). Record the answer here before Stage 0 starts.
+- Rebase this plan on both repos' `main` and refresh its Context if the code has moved.
 
 ## Seams
 
@@ -161,14 +171,17 @@ Each stage leaves the rig fully working for DeviceSide, and records unchanged by
 
 ### Stage 1: move the repo, then build the seam inside it
 
-**1.0 Move to `DeviceSide/ha-rig`, private; decide how its history goes public.**
+**1.0 Start `DeviceSide/ha-rig`, private, from fresh history** (decision 6).
 
-- Audit the full history for household details (the household check runs on today's tree, not old commits), then
-  choose: transfer as-is (keeps issues and PRs) or start the org repo from fresh history (open question 1).
-- Transfer: `gh api -X POST repos/jasonmx/ha-rig/transfer -f new_owner=DeviceSide`. Then check: the Claude GitHub
-  App is installed on it; the Tests workflow's token still reads DeviceSide PRs (`scripts/ci_deviceside.sh`);
-  Renovate and branch protection still apply. `git remote set-url origin
-  https://github.com/DeviceSide/ha-rig.git` in every checkout.
+- Audit the tree that will be the first commit: the household check, plus a read of every tracked file for household
+  details. The old history stays behind, so it needs no audit.
+- Create `DeviceSide/ha-rig` (private), push the audited tree as one commit, and archive `jasonmx/ha-rig` (private).
+  No transfer: it would carry the history.
+- Set up afresh what a transfer would have carried: the Tests workflow's secret that reads DeviceSide PRs
+  (`scripts/ci_deviceside.sh`), branch protection and `ci-green`, Renovate, and the Claude GitHub App. Point every
+  checkout's `origin` at `https://github.com/DeviceSide/ha-rig.git`.
+- Open issues on the old repo are copied over or closed with a pointer; old PR links in DeviceSide's history keep
+  pointing at the archived repo.
 - PR: the rig's docs name `DeviceSide/ha-rig`; DeviceSide's docs link it.
 
 **1.1 The manifest instead of the registry import.** DeviceSide gains `scripts/gen_rig_manifest.py`, beside its other
@@ -205,14 +218,14 @@ roles, so profiles stay valid. Per-integration lists key on the target's integra
 
 **1.5 A second target, to prove the seam.** A plain `ha` target: step files calling any HA service on any domain, no
 commands, the run report its only output, run on one real non-DeviceSide custom integration on the household HA
-(open question 2), with a few step files and at least one probe. **Exit criterion:** it runs with no engine change of
+(the integration chosen in Before starting), with a few step files and at least one probe. **Exit criterion:** it runs with no engine change of
 its own, and DeviceSide's records are byte-identical to Stage 0's for the same run.
 
 **Stage 1 PRs:** 1.0; 1.1 (DeviceSide + rig, `Tests-with`); 1.2 (DeviceSide + rig, `Tests-with`); 1.3; 1.4; 1.5.
 
 ### Stage 2: split and publish
 
-**2.1 Visibility.** Make `DeviceSide/ha-rig` public with the history chosen in 1.0. DeviceSide's CLAUDE.md, design.md
+**2.1 Visibility.** Make `DeviceSide/ha-rig` public; its history begins at 1.0's audited first commit. DeviceSide's CLAUDE.md, design.md
 and TODO 9b say the rig kit is ha-rig.
 
 **2.2 DeviceSide pins it.** DeviceSide's `dev` group pins the `ha-rig` version it was tested with. Each side tests its
@@ -245,12 +258,7 @@ lets the rig put back what it changed, and writes a dated note where the target 
 - **A wider contract:** the results file is wider than the three record rows DeviceSide parses. If it changes more
   often than the record format did while Stage 1 is built, revisit decision 3 (the rig renders, the record format
   becomes the contract).
-- **Repo move breaks automation:** 1.0's checks.
-
-## Open questions
-
-1. History: transfer as-is, or start `DeviceSide/ha-rig` from fresh history (1.0)?
-2. Which non-DeviceSide custom integration proves the seam (1.5)?
+- **A fresh repo misses a setting the old one had:** 1.0's setup list.
 
 ## Coordination
 
