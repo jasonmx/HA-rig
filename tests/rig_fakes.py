@@ -54,8 +54,8 @@ class Roster:
         self._declared = declared
         self.integrations = {
             key: SimpleNamespace(
-                **{field.name: getattr(info, field.name) for field in dataclasses.fields(info)},
-                capability=_never_called if key in classes else None,
+                **{field.name: getattr(info, field.name) for field in dataclasses.fields(info)}
+                | {"capability": _never_called if key in classes else None}
             )
             for key, info in _discovered().integrations.items()
         }

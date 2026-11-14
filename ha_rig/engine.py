@@ -1587,8 +1587,9 @@ class _CaseRun:
         self.baseline: Baseline | None = None
         self.journal, self.journal_key = journal, journal_key
         self.response: dict | None = None
-        # The response of each call on the case's own target that returned one, which its classes are read from.
-        self.answers: list[dict | None] = []
+        # For each call on the case's own target that returned a response, its entries for the target (else for the
+        # members it has): what the case's classes are read from.
+        self.answers: list[list[Any]] = []
         self.error: HAError | None = None
         self.last_action = case.suite.action
         self.query = False
@@ -1676,23 +1677,17 @@ class _CaseRun:
     async def reached_classes(self, outcome: Outcome) -> tuple[str, ...]:
         """The classes the case's target reached, sorted, each once, as DeviceSide's responses report them, when it
         passed: only a pass credits a class. Each call on the target that returned a response gives its entry for the
-        target, else its entries for the target's members (an HA group, which DeviceSide answers member by member, or
-        a native group that fell back to its members, a refused one absent). None for an integration that names no
-        classes, and none when any such entry reports no class, a call has no entry, no call returned a response, or
-        the members can't be read: a record writes that as a dash, which credits no class."""
+        target, else its entries for the target's members as they were when it answered (an HA group, which
+        DeviceSide answers member by member, or a native group that fell back to its members, a refused one absent).
+        None for an integration that names no classes, and none when any such entry reports no class, a call has no
+        entry, or no call returned a response: a record writes that as a dash, which credits no class."""
         if outcome is not Outcome.PASS or not names_classes(self.registry, self.case.suite) or not self.answers:
             return ()
-        target = self.case.entities[self.case.role]
         found: set[str] = set()
-        try:
-            for response in self.answers:
-                entries = await self.entries(response or {}, target)
-                if not entries or None in (classes := [reported_classes(entry) for entry in entries]):
-                    return ()
-                found.update(*classes)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Could not read the class %s reached, so its record shows none: %s", self.case.id, err)
-            return ()
+        for entries in self.answers:
+            if not entries or None in (classes := [reported_classes(entry) for entry in entries]):
+                return ()
+            found.update(*classes)
         return tuple(sorted(found))
 
     async def entries(self, response: dict, entity_id: str) -> list[Any]:
@@ -1978,8 +1973,8 @@ class _CaseRun:
             finally:
                 self.call_windows.append((sent_at, asyncio.get_running_loop().time()))
             self.call_times = self.call_windows[-1]
-            if entity_id == self.case.entities[self.case.role]:
-                self.answers.append(self.response)
+            if entity_id == self.case.entities[self.case.role] and self.response is not None:
+                self.answers.append(await self.entries(self.response, entity_id))
         except HAError as err:
             if following != "expect_error":
                 raise StepFailure(f"deviceside.{action} raised {err.translation_key}: {err}") from None
