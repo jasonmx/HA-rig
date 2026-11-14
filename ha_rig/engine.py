@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -804,6 +805,52 @@ class Case:
         return replace(self, observed=not self.observed).id
 
 
+def names_classes(registry: Any, suite: Suite) -> bool:
+    """Whether the suite's integration names classes: its adapter's scope lists capabilities (docs/evidence.md, in
+    deviceside: Sign-off format)."""
+    adapter = registry.adapter(suite.action, suite.integration)
+    return adapter is not None and adapter.scope.capabilities is not None
+
+
+def class_source(registry: Any, suite: Suite) -> Callable[[Any, Any], str | None]:
+    """What names a target's class: the integration's `capability`, once deviceside has it, else the adapter's."""
+    if (named := getattr(registry.integrations[suite.integration], "capability", None)) is not None:
+        return named
+    return registry.adapter(suite.action, suite.integration).capability
+
+
+async def target_class(
+    ha: HAClient, name: Callable[[Any, Any], str | None], entity_id: str, integration: str, devices: dict[str, dict]
+) -> str | None:
+    """The class `name` gives the entity, from a Target built of what HA's registries (`devices`: its device
+    registry, by ID) and state say about it. There is no hass here, so `name` gets None for it: a class is named from
+    the target alone."""
+    entry, state = await asyncio.gather(
+        ha.command({"type": "config/entity_registry/get", "entity_id": entity_id}), ha.get_state(entity_id)
+    )
+    return name(None, stand_in_target(entity_id, integration, entry, devices.get(entry.get("device_id")), state))
+
+
+def stand_in_target(entity_id: str, integration: str, entry: dict, device: dict | None, state: dict | None) -> Any:
+    """deviceside's Target (core/models.py), field for field, from HA's registry entry, device and state as the
+    websocket API gives them: no config entry's runtime data, which lives only in HA."""
+    return SimpleNamespace(
+        entity_id=entity_id,
+        domain=entity_id.partition(".")[0],
+        integration=integration,
+        entry=SimpleNamespace(**entry),
+        device=device and SimpleNamespace(**device),
+        config_entry=SimpleNamespace(
+            entry_id=entry.get("config_entry_id"), domain=entry.get("platform"), runtime_data=None
+        ),
+        state=state and SimpleNamespace(**state),
+        via_group=None,
+        via_wrapper=None,
+        is_group=False,
+        named=False,
+    )
+
+
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
     """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
@@ -1058,6 +1105,8 @@ class CaseResult:
     inapplicable: bool = False  # Case.inapplicable
     # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()
+    # The classes its target reached (reached_classes), for an integration that names them; empty for none.
+    classes: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1071,6 +1120,7 @@ class SuiteResult:
     ha_version: str | None = None
     devices: list[Device] = field(default_factory=list)
     planned: int | None = None  # how many cases the suite plans, once merge has joined it
+    classes: bool = False  # whether its integration names classes (names_classes): its table has a Capability column
 
     @property
     def unreachable(self) -> int:
@@ -1645,7 +1695,28 @@ class _CaseRun:
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
         elif fact_kind(case.suite, result):
             result.devices = await self.fact_devices()
+        result.classes = await self.reached_classes(result.outcome)
         return result
+
+    async def reached_classes(self, outcome: Outcome) -> tuple[str, ...]:
+        """The classes the case's target reached, a group's members' once each, sorted, when it passed: only a pass
+        credits a class. None for an integration that names no classes, and none when a member reached none or the
+        lookup fails, which a record writes as a dash and which credits no class."""
+        if outcome is not Outcome.PASS or not names_classes(self.registry, self.case.suite):
+            return ()
+        name = class_source(self.registry, self.case.suite)
+        try:
+            members = await self.members(self.case.entities[self.case.role])
+            devices = {
+                device["id"]: device for device in await self.ha.command({"type": "config/device_registry/list"})
+            }
+            found = await asyncio.gather(
+                *(target_class(self.ha, name, member, self.integration, devices) for member in members)
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not name the class %s reached, so its record shows none: %s", self.case.id, err)
+            return ()
+        return () if None in found else tuple(sorted(set(found)))
 
     async def fact_devices(self) -> tuple[Device, ...]:
         """The devices behind the case's entities, a group's members included, for its _facts.md row; none when the
@@ -2325,7 +2396,7 @@ async def _finished(
     for suite, suite_cases in planned:
         if not (finished := [result for case in suite_cases if (result := rig_run.results.get((id(suite), case.id)))]):
             continue
-        part = SuiteResult(suite, finished, complete=complete)
+        part = SuiteResult(suite, finished, complete=complete, classes=names_classes(rig_run.registry, suite))
         parts.append(part)
         await _capture_facts(part, ha, out)
         if on_facts is not None:
@@ -2572,7 +2643,12 @@ def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunR
             joined[key].ha_version = joined[key].ha_version or part.ha_version
         else:
             joined[key] = SuiteResult(
-                part.suite, list(part.cases), complete=False, ha_version=part.ha_version, devices=list(part.devices)
+                part.suite,
+                list(part.cases),
+                complete=False,
+                ha_version=part.ha_version,
+                devices=list(part.devices),
+                classes=names_classes(registry, part.suite),
             )
     for result in joined.values():
         planned = [case.id for case in cases(result.suite, profile, None, adapters_for(result.suite, registry))]
@@ -2590,13 +2666,22 @@ def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunR
 def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
     """The pass/fail table, by role and domain: a record is public, so it never names a household entity. With
     `details` (the run's report), each result has its reason, opt-in cases' included; without (a record), an opt-in
-    case reads `skipped` whatever it did, as its result is a fact in _facts.md, not the record's."""
-    lines = ["| Test | Target | Result |", "|---|---|---|"]
+    case reads `skipped` whatever it did, as its result is a fact in _facts.md, not the record's. An integration that
+    names classes has a Capability column between Target and Result: the classes each passing target reached, or a
+    dash for none and for every other case (docs/evidence.md, in deviceside: Sign-off format)."""
+    suite, classes = suite_result.suite, suite_result.classes
+    columns = ["Test", "Target", *(["Capability"] if classes else []), "Result"]
+    lines = [f"| {' | '.join(columns)} |", "|" + "---|" * len(columns)]
     for case in suite_result.cases:
         target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
         if not case.domain and not case.absent:  # skipped before planning entities: no adapter, or not opted in
             target = case.role
-        lines.append(f"| `{case.id}` | {target} | {_result_cell(suite_result.suite, case, details)} |")
+        cells = [f"`{case.id}`", target]
+        if classes:  # only a pass credits a class, and not an opt-in one in a record, where it reads skipped
+            credits = case.outcome is Outcome.PASS and (details or not opt_in(suite, case.id))
+            cells.append(", ".join(f"`{name}`" for name in case.classes) if credits and case.classes else "-")
+        cells.append(_result_cell(suite, case, details))
+        lines.append(f"| {' | '.join(cells)} |")
     return lines
 
 
