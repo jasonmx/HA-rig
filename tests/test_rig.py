@@ -2155,3 +2155,73 @@ def test_the_record_format_follows_the_checkout(tmp_path, monkeypatch):
     assert rig.record_schema() is None
     monkeypatch.setattr(rig, "REPO", json_checkout)
     assert rig.record_schema() is rig.record_schema() is not None
+
+
+async def test_report_writes_json_records_against_a_checkout_with_the_schema_and_stages_them(tmp_path, monkeypatch):
+    """report() hands write_records the checkout's schema and the run's abbreviated commit, and stages each JSON
+    record it writes with its suite's ledger entry, matched by folder and suite name."""
+    if not (paired := target.deviceside_repo() / target.SCHEMA).is_file():
+        pytest.skip(f"the paired deviceside checkout has no {target.SCHEMA}")
+    (tmp_path / target.SCHEMA).parent.mkdir(parents=True)
+    (tmp_path / target.SCHEMA).write_text(paired.read_text())  # before the plan, which asks for the format
+    profile, suites = resumable(tmp_path)
+    progress = planned(tmp_path, monkeypatch, suites, profile).progress
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
+    for case_id in ("t[light_ct]", "u[light_ct]"):
+        result = engine.CaseResult(case_id, "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.a",))
+        progress.record(suites[0], result)
+    progress.facts(suites[0], "2026.10.1", [])
+    called: list[dict] = []
+
+    async def write_records(result, registry, records, date, source, into=None, package=None, **kwargs):
+        called.append(kwargs)
+        path = into("shelly") / "raise_brightness.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        return [path], []
+
+    monkeypatch.setattr(rig, "write_records", write_records)
+    staging = rig.staging_for("2026-11-14 10:00:00", profile, progress)
+    await rig.report(
+        engine.RunResult(progress.parts(suites)), fakes.OPTION_REGISTRY, "c1", profile, staging, progress=progress
+    )
+    [kwargs] = called
+    assert kwargs["schema"] is rig.record_schema() is not None and kwargs["commit"] == "c1short"
+    [(staged, entry)] = staging.records.items()
+    assert staged == record_path("shelly").removesuffix(".md") + ".json"
+    assert tuple(entry["entry"]) == progress.key(suites[0])
+
+
+def test_the_preflight_loads_the_schema_before_anything_else_check_included(monkeypatch):
+    """A schema jsonschema can't load stops even --check, before the profile, the deploy state or HA."""
+    touched: list[str] = []
+
+    def refuse(repo):
+        raise SystemExit("no jsonschema")
+
+    monkeypatch.setattr(rig.RecordSchema, "load", refuse)
+    monkeypatch.setattr(rig, "load_env", lambda: touched.append("env") or {})
+    monkeypatch.setattr(rig, "deploy_state", lambda status: touched.append("deploy"))
+    monkeypatch.setattr(rig.target, "signoffs_needed", lambda repo: touched.append("signoffs") or [])
+    rig._schema.cache_clear()
+    for check in (True, False):
+        with pytest.raises(SystemExit, match="no jsonschema"):
+            rig.prepare(run_args(check=check, profile=None, signoffs=True))
+    rig._schema.cache_clear()
+    assert touched == []
+
+
+def test_promote_refuses_markdown_records_for_a_checkout_now_on_json(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    (repo / target.SCHEMA).parent.mkdir(parents=True)
+    (repo / target.SCHEMA).write_text("{}")
+    staging = rig.Staging(tmp_path / "staged", repo)
+    staged = tmp_path / "staged" / record_path("shelly")
+    staged.parent.mkdir(parents=True)
+    staged.write_text("# Shelly · raise_brightness\n")
+    staging.add(staged, None)
+    monkeypatch.setattr(rig.target, "is_deviceside", lambda path: path == repo)
+    with pytest.raises(SystemExit, match="rerun their suites"):
+        rig.promote_staged(staging.directory)
+    assert not (repo / record_path("shelly")).exists() and staged.exists()

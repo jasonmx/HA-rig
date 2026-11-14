@@ -72,7 +72,7 @@ def append(path: Path, title: str, fact: Fact) -> None:
 def append_json(path: Path, integration: str, row: dict, schema: RecordSchema) -> None:
     """Add `row` to the `_facts.json` at `path`, starting it when there is none, and rewrite the file once the schema
     takes it, every row already there as it was. Raises ValueError, writing nothing, when the file there isn't one
-    the rig can read, or the schema refuses the result (InvalidRecord)."""
+    the rig can read, or the schema refuses the result (InvalidRecord); OSError when it can't be read or written."""
     if path.is_file():
         document = json.loads(path.read_text())
         if not isinstance(document, dict) or not isinstance(document.get("facts"), list):

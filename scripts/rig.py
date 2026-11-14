@@ -975,6 +975,13 @@ def promote_staged(directory: Path) -> int:
     staging = Staging.load(directory.expanduser().resolve())
     if not target.is_deviceside(staging.repo):
         raise SystemExit(f"{staging.repo}, where these records were staged for, is no longer a deviceside checkout")
+    if (staging.repo / target.SCHEMA).is_file() and (
+        markdown := sorted(r for r in staging.records if r.endswith(".md"))
+    ):
+        raise SystemExit(
+            f"{staging.repo} keeps its test records as JSON ({target.SCHEMA}) now, and {directory} holds markdown ones "
+            f"({', '.join(markdown)}), staged before it did: rerun their suites, which write JSON"
+        )
     left = len(staging.records) - len(staging.promote())
     return 1 if left else 0
 
@@ -1017,6 +1024,7 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     """The profile, the suites, and, but for --check, the deploy state and the saved progress (in `directory`, for a
     run that can write records), which narrows the suites to those with cases left; a run also checks .env.rig has
     its tokens. --signoffs asks deviceside first, and stops, exit 0, when it lists nothing for the profile."""
+    record_schema()  # first, --check included: a schema jsonschema can't load would leave a run no record to write
     needed = target.signoffs_needed(REPO) if args.signoffs else None
     if needed == []:
         nothing_to_run("No integration needs a sign-off (deviceside's check_release.py --signoffs --json)")
@@ -1044,7 +1052,6 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     )
     if args.check:
         return setup
-    record_schema()  # before anything moves: a schema jsonschema can't load would leave the run no record to write
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
     if setup.withholds:
         print(UNCOMMITTED_STEPS)

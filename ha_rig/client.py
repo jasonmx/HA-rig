@@ -279,6 +279,15 @@ class HAClient:
             response.raise_for_status()
             return await response.json()
 
+    async def device_diagnostics(self, device: dict) -> dict:
+        """The diagnostics HA's integration gives for a device-registry entry (`data` of /api/diagnostics), under its
+        primary config entry; admin only. ZHA's hold zigpy's own Basic-cluster `manufacturer` and `model`, which a
+        quirks v2 friendly name hides from the registry."""
+        entry = device.get("primary_config_entry") or next(iter(device.get("config_entries") or []), None)
+        if entry is None:
+            raise LookupError(f"device {device.get('id')} belongs to no config entry")
+        return (await self.rest("get", f"/api/diagnostics/config_entry/{entry}/device/{device['id']}"))["data"]
+
     async def error_log(self) -> str:
         """HA's current session log as text (`/api/error_log`, admin only)."""
         async with self._session.get(f"{self.url}/api/error_log") as response:

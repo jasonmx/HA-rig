@@ -404,16 +404,19 @@ sits in the temp folder, which the OS may clear: when every selected case is sav
 **The format follows the checkout.** One with deviceside's record schema, `docs/test-records.schema.json`, gets JSON
 format 2, the schema's shape, and no markdown: the rig checks each record and `_facts.json` against that schema, from
 the checkout under test, and writes none it refuses, saying why (`ha_rig/schema.py`). It loads the schema before
-anything moves, so a checkout without `jsonschema` (`uv sync` there adds it) stops the run then. A checkout without the
-schema, deviceside `main` before its records moved to JSON, gets markdown as below.
+anything else, `--check` included, so a checkout without `jsonschema` (`uv sync` there adds it) stops the run before
+anything moves. `--promote` refuses markdown records staged for a checkout that has since moved to JSON: rerun their
+suites. A checkout without the schema, deviceside `main` before its records moved to JSON, gets markdown as below.
 
 A format 2 record holds its integration, action and any options, the date, the commit, the package tree, Home
-Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker string,
-firmware and class: on a Zigbee device the Zigbee model ID (Z2M's `bridge/devices` `model_id`, ZHA's registry model,
-Hue's registry model ID, which HA takes from the bridge), elsewhere HA's registry model ID; the maker string as the
-integration reports it (Z2M's `bridge/devices` `manufacturer`, such as `_TZ3000_…`, else HA's registry manufacturer,
-which on Hue is the bridge's), or null, and never a device name, as a Tuya `TS011F` is hundreds of makers' plug; the class as DeviceSide's response
-reported it for the target, or null where it reported none (an integration that names no classes, a device not placed
+Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker
+string, firmware and class. On a Zigbee device the model ID and maker string are the device's own Basic-cluster ones:
+Z2M's `bridge/devices` `model_id` and `manufacturer` (HA's registry holds Z2M's product code and vendor), ZHA's
+device diagnostics' `model` and `manufacturer` (the registry holds a quirks v2 device's friendly name; zha's
+`unk_model` and `unk_manufacturer` read as null), and Hue's registry model ID and manufacturer, which HA takes from the
+bridge. Elsewhere they are HA's registry model ID and manufacturer. Either is null where the integration reports none,
+and the maker string is never a device name: a Tuya `TS011F` is hundreds of makers' plug. The class is as DeviceSide's
+response reported it for the target, or null where it reported none (an integration that names no classes, a device not placed
 yet, or a native group listing several classes without saying whose is whose). A native group's test (`group`) lists
 its members, never the group. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
 read as it ends and saved in the ledger; a case that ran with none noted (the lookup failed, or an older rig saved it)

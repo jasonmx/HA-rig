@@ -79,8 +79,24 @@ DEVICES = {
     "zha_bulb": {
         "id": "zha_bulb",
         "identifiers": [["zha", "00:17:88:01:00:00:00:03"]],
+        "primary_config_entry": "zha_entry",
         "model": "LWA012",
         "manufacturer": "Signify Netherlands B.V.",
+    },
+    # A quirks v2 device: zha hands HA's registry its friendly name, never the Basic cluster's strings.
+    "zha_plug": {
+        "id": "zha_plug",
+        "identifiers": [["zha", "a4:c1:38:00:00:00:00:02"]],
+        "config_entries": ["zha_entry"],
+        "model": "Smart plug",
+        "manufacturer": "Tuya",
+    },
+    "zha_unread": {
+        "id": "zha_unread",
+        "identifiers": [["zha", "a4:c1:38:00:00:00:00:03"]],
+        "primary_config_entry": "zha_entry",
+        "model": "unk_model",
+        "manufacturer": "unk_manufacturer",
     },
     "hue_bulb": {
         "id": "hue_bulb",
@@ -98,6 +114,24 @@ ENTITIES = {
     "light.z2m_room": "z2m_group",
     "light.zha_bulb": "zha_bulb",
     "light.hue_bulb": "hue_bulb",
+    "light.hue_b": "hue_b",
+    "light.hue_room": "hue_room",
+    "scene.hue_relax": "hue_room",  # a Hue scene's entity sits on its room's device
+    "switch.zha_plug": "zha_plug",
+    "switch.zha_unread": "zha_unread",
+}
+DEVICES["hue_b"] = DEVICES["hue_bulb"] | {"id": "hue_b", "identifiers": [["hue", "def"]], "model_id": "LCA016"}
+DEVICES["hue_room"] = {"id": "hue_room", "identifiers": [["hue", "room"]], "model": "Room"}
+# ZHA's device diagnostics, by device: zigpy's own Basic-cluster strings, beside zha's friendly ones.
+DIAGNOSTICS = {
+    "zha_bulb": {"manufacturer": "Signify Netherlands B.V.", "model": "LWA012"},
+    "zha_plug": {
+        "manufacturer": "_TZ3000_okaz9tjs",
+        "model": "TS011F",
+        "friendly_manufacturer": "Tuya",
+        "friendly_model": "Smart plug",
+    },
+    "zha_unread": {"manufacturer": None, "model": None, "friendly_manufacturer": "unk_manufacturer"},
 }
 # Z2M's bridge/devices: each device's Zigbee model ID, the Basic cluster's.
 BRIDGE_DEVICES = [
@@ -121,6 +155,12 @@ class RegistryHA(FakeHA):
 
     async def z2m_device_list(self) -> list[dict]:
         return self.bridge_devices
+
+    async def rest(self, method: str, path: str, json: dict | None = None):
+        prefix = "/api/diagnostics/config_entry/zha_entry/device/"
+        if method == "get" and path.startswith(prefix):
+            return {"home_assistant": {}, "data": DIAGNOSTICS[path.removeprefix(prefix)]}
+        raise AssertionError(f"unexpected REST call {method} {path}")
 
 
 def answer(respond_keys: dict[str, dict]):
@@ -166,11 +206,13 @@ async def run_suite(ha, steps, inv: Profile) -> RunResult:
     return await run([steps], inv, REGISTRY, ha, admin=ha, tolerance=TOLERANCE, out=lambda _: None, json_records=True)
 
 
-async def write(result: RunResult, records: Path, printed: list[str] | None = None, **kwargs) -> list[Path]:
+async def write(
+    result: RunResult, records: Path, printed: list[str] | None = None, registry=REGISTRY, **kwargs
+) -> list[Path]:
     """write_records in format 2, from a run at commit abc1234 whose packages are each tree PACKAGE."""
     written, _ = await write_records(
         result,
-        REGISTRY,
+        registry,
         under(records),
         "2026-11-14",
         "rig run",
@@ -311,6 +353,66 @@ async def test_zha_and_hue_name_the_zigbee_model_id_and_no_class(tmp_path, integ
     [test] = held(path)["tests"]
     maker = "Signify Netherlands B.V."
     assert test["devices"] == [{"model": model, "manufacturer": maker, "firmware": firmware, "class": None}]
+
+
+async def test_a_zha_device_names_its_own_basic_cluster_strings_not_a_quirks_friendly_name():
+    ha = RegistryHA({})
+    found = await reached_devices(ha, ["switch.zha_plug", "switch.zha_unread"], {})
+    assert found == (Reached("TS011F", None, None, "_TZ3000_okaz9tjs"), Reached(None, None, None, None))
+
+
+async def test_a_zha_device_with_no_config_entry_or_diagnostics_names_nothing():
+    ha = RegistryHA({})
+    ha.devices = [device | {"primary_config_entry": None, "config_entries": []} for device in ha.devices]
+    with pytest.raises(LookupError, match="no config entry"):
+        await reached_devices(ha, ["light.zha_bulb"], {})
+
+
+SCENE = """
+action: set_scene
+rig_seconds: 5
+tests:
+  - name: applies
+    roles: [scene]
+    steps:
+      - call: {}
+      - expect_state: {target: group, state: off}
+      - expect_state: {target: light_ct, state: off}
+"""
+
+
+async def test_a_scene_case_lists_its_groups_lights_with_the_class_its_entry_reports(tmp_path):
+    """A scene has no device of its own: its case reaches its group's lights, a light a step targets once, and the
+    class the scene's entry reports covers each."""
+    registry = Roster({"hue": {"set_scene", "get_attributes", "set_attributes"}}, classes=frozenset({"hue"}))
+    responses = iter([{"scene.hue_relax": {"status": "sent", "capability": "hue"}}])
+
+    def respond(ha, action, data):
+        return {} if action == "get_attributes" else next(responses)
+
+    ha = RegistryHA({"scene.hue_relax": {}, "light.hue_room": {}, "light.hue_bulb": {}, "light.hue_b": {}}, respond)
+    room = RigEntity("light.hue_room", frozenset({"group"}), members=("light.hue_bulb", "light.hue_b"))
+    inv = Profile(
+        {
+            "hue": [
+                RigEntity("scene.hue_relax", frozenset({"scene"})),
+                room,
+                RigEntity("light.hue_bulb", frozenset({"light_ct"})),
+            ]
+        },
+        {},
+    )
+    steps = suite(tmp_path, SCENE, "hue")
+    result = await run([steps], inv, registry, ha, tolerance=TOLERANCE, out=lambda _: None, json_records=True)
+    assert outcomes(result) == {"applies[scene]": (Outcome.PASS, "")}
+    [case] = result.suites[0].cases
+    assert [device.as_json() for device in case.reached] == [
+        {"model": "LWA012", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.122.2", "class": "hue"},
+        {"model": "LCA016", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.122.2", "class": "hue"},
+    ]
+    [path] = await write(result, tmp_path / "records", registry=registry)
+    [test] = held(path)["tests"]
+    assert "group" not in test and test["domain"] == "scene"
 
 
 def test_the_model_id_follows_the_device_not_the_suite():
@@ -508,6 +610,67 @@ def test_a_fact_starts_facts_json_and_appends_leaving_every_row_as_it_was(tmp_pa
     rows = FactsFile.read(path).rows
     assert [(fact.suite, fact.test, fact.result) for fact in rows][-1] == ("turn_on_for", "wins[switch_plug]", "fail")
     assert str(rows[0]) == "last on file 2026-11-13, on `LTA009`, firmware `1.163.1`: pass"
+
+
+WATCHED = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: clicks
+    roles: [switch_plug]
+    setup:
+      - set: {state: off}
+    steps:
+      - call: {duration: 0.2}
+    observe: {see: It clicks., watch: A click., ask: 'Did it click?'}
+"""
+
+
+def test_a_watched_case_a_person_answered_is_an_observed_fact_row(tmp_path):
+    path = tmp_path / "steps.yaml"
+    path.write_text(WATCHED)
+    steps = engine.Suite(load_step_file(path), "shelly", facts=True)
+    seen = CaseResult(
+        "clicks[switch_plug] observed",
+        "switch_plug",
+        "switch",
+        Outcome.PASS,
+        reached=(Reached("S3SW-001X8EU", "1.7.4", "Switch", "Shelly"),),
+    )
+    facts = write_fact(steps, seen, REGISTRY, under(tmp_path / "records"), "2026-11-14", SCHEMA_OF)
+    assert held(facts)["facts"] == [
+        {
+            "date": "2026-11-14",
+            "suite": "turn_on_for",
+            "test": "clicks[switch_plug] observed",
+            "kind": "observed",
+            "result": "pass",
+            "devices": [{"model": "S3SW-001X8EU", "manufacturer": "Shelly", "firmware": "1.7.4", "class": "Switch"}],
+        }
+    ]
+    nobody = CaseResult(seen.id, "switch_plug", "switch", Outcome.NOT_OBSERVED, reached=seen.reached)
+    assert write_fact(steps, nobody, REGISTRY, under(tmp_path / "records"), "2026-11-15", SCHEMA_OF) is None
+    assert len(held(facts)["facts"]) == 1  # nobody there is no fact
+
+
+def test_a_facts_file_that_cant_be_written_is_said_not_raised(tmp_path):
+    steps, case = a_fact(tmp_path)
+    (tmp_path / "records").write_text("a file where the folder should be")
+    printed: list[str] = []
+    assert write_fact(steps, case, REGISTRY, under(tmp_path / "records"), "d", SCHEMA_OF, printed.append) is None
+    assert printed[0].startswith("Not written to _facts.json (")
+
+
+async def test_a_record_that_cant_be_written_is_said_and_the_rest_written(tmp_path):
+    halts = CaseResult(
+        "halts[light_ct]", "light_ct", "light", Outcome.PASS, reached=(Reached("LTA009", "1.163.1", "hue"),)
+    )
+    blocked = tmp_path / "records" / "zigbee2mqtt"
+    blocked.parent.mkdir()
+    blocked.write_text("a file where the folder should be")
+    printed: list[str] = []
+    assert await write(canned(OPTIONS, [halts], tmp_path, "zigbee2mqtt"), tmp_path / "records", printed) == []
+    assert printed[0].startswith("zigbee2mqtt / stop-predicted_state: ")
 
 
 def test_a_facts_file_the_rig_cant_read_is_left_alone_and_the_row_said(tmp_path):

@@ -21,9 +21,10 @@ This PR merges first: DeviceSide#430's records need a rig that writes format 2.
 1. **Choosing the format** (`target.py`): the checkout has `docs/test-records.schema.json` → JSON format 2 and no
    markdown; else markdown exactly as today. The runner decides once, before anything moves, and builds the validator
    then: a checkout with the schema but no `jsonschema` stops the run in its preflight, naming the fix (`uv sync` in
-   the project the rig runs in, the checkout's when run from there, whose dev group has it), rather than finding out after an hour of cases that no record can be
-   written. `jsonschema` is imported only then, so a run against `main` needs none. `--promote` copies files and
-   validates nothing.
+   the project the rig runs in, the checkout's when run from there, whose dev group has it), `--check` included,
+   rather than finding out after an hour of cases that no record can be written. `jsonschema` is imported only then,
+   so a run against `main` needs none. `--promote` copies files and validates nothing, but refuses markdown records
+   staged for a checkout that has the schema now.
 2. **Files**: `docs/integrations/<x>/test-records/<suite.name>.json`, and `_facts.json` beside it, indent 2 and a
    trailing newline. Staging, promotion and the never-narrow rule work on whichever file the format names.
 3. **What each test reached** (`engine.py`): every case that ran (pass, fail, not observed) now notes, as it ends, the
@@ -33,13 +34,15 @@ This PR merges first: DeviceSide#430's records need a rig that writes format 2.
    them (an older rig's, or a lookup that failed) reruns. A run against a markdown checkout reads no case's devices,
 and one against a JSON checkout no markdown fact's.
    - `model`: the Zigbee model ID on Zigbee devices: Z2M's `bridge/devices` `model_id` (HA's registry holds Z2M's
-     product code there), ZHA's registry `model`. Hue: HA's registry `model_id`, which HA's Hue integration takes from
+     product code there); ZHA's device diagnostics' `model` (admin only, as a ZHA suite runs): HA's registry takes
+     zha's `model`, a quirks v2 device's friendly name where one is set, and zha's `unk_model` reads as null. Hue: HA's registry `model_id`, which HA's Hue integration takes from
      the bridge's `product_data.model_id`, so the rig needn't ask the bridge. Elsewhere the registry `model_id`.
      A device is told by its registry identifiers (a Z2M or ZHA IEEE), not the suite's integration.
    - `firmware`: `sw_version`, null when empty or absent.
    - `manufacturer` (a spec change after the PR opened): the maker string as the integration reports it, as a Tuya
      plug's `TS011F` is hundreds of makers': Z2M's `bridge/devices` `manufacturer` (`_TZ3000_…`, not the definition's
-     vendor, which HA's registry holds), else HA's registry `manufacturer` (ZHA's device manufacturer; on Hue the
+     vendor, which HA's registry holds), ZHA's device diagnostics' `manufacturer` (zigpy's own, beside zha's
+     `friendly_manufacturer`; `unk_manufacturer` reads as null), else HA's registry `manufacturer` (on Hue the
      bridge's `product_data.manufacturer_name`, which HA copies). Null where it reports none; never a device name.
    - `class`: from each call of the tested action on the case's own target outside setup (as the Capability column
      reads them, #85): the target's `capability`; a member's own entry where the response answered member by member;

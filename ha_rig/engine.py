@@ -2841,8 +2841,8 @@ def record_model(device: dict, z2m_devices: dict[str, dict]) -> str | None:
     """The model ID a format 2 record names for a device-registry entry: a Zigbee device's own (the Basic cluster's,
     such as LWA012) on every integration, else HA's registry `model_id`. Z2M's is its bridge/devices `model_id`
     (`z2m_devices`, its entries by IEEE), as HA's registry holds Z2M's product code (9290018217); ZHA's is the registry
-    `model`. A Hue device's registry `model_id` is the bridge's product_data.model_id, which HA's Hue integration
-    copies."""
+    `model` here, and its diagnostics' in a record (zha_strings), as a quirks v2 friendly name replaces the registry's.
+    A Hue device's registry `model_id` is the bridge's product_data.model_id, which HA's Hue integration copies."""
     if (ieee := device_ieee(device, Z2M)) is not None:
         return z2m_devices.get(normalize_ieee(ieee), {}).get("model_id") or None
     if device_ieee(device, "zha") is not None:
@@ -2853,11 +2853,29 @@ def record_model(device: dict, z2m_devices: dict[str, dict]) -> str | None:
 def record_manufacturer(device: dict, z2m_devices: dict[str, dict]) -> str | None:
     """The maker string a format 2 record names for a device-registry entry, as its integration reports it, never a
     device name: Z2M's bridge/devices `manufacturer` (the Basic cluster's, such as `_TZ3000_…`, not the definition's
-    vendor, which HA's registry holds), else HA's registry `manufacturer`: ZHA's device manufacturer, and on Hue the
-    bridge's product_data.manufacturer_name, which HA's Hue integration copies. None where it reports none."""
+    vendor, which HA's registry holds), else HA's registry `manufacturer`: on Hue the bridge's
+    product_data.manufacturer_name, which HA's Hue integration copies. None where it reports none. A ZHA device's is
+    read from its diagnostics instead (zha_strings)."""
     if (ieee := device_ieee(device, Z2M)) is not None:
         return z2m_devices.get(normalize_ieee(ieee), {}).get("manufacturer") or None
     return device.get("manufacturer") or None
+
+
+ZHA_UNKNOWN = frozenset({"unk_manufacturer", "unk_model"})  # zha's stand-ins for a Basic cluster string it never read
+
+
+async def zha_strings(ha: HAClient, device: dict) -> tuple[str | None, str | None]:
+    """A ZHA device's own Basic-cluster model and manufacturer, as zigpy read them, from its diagnostics (admin only,
+    which a ZHA suite runs on): HA's registry takes zha's `model` and `manufacturer`, which are a quirks v2 device's
+    friendly name where one is set, and a Tuya plug's `_TZ3000_…` string is what tells its maker apart. zha's
+    stand-ins for a string never read, and an empty one, are None."""
+    diagnostics = await ha.device_diagnostics(device)
+
+    def own(name: str) -> str | None:
+        value = diagnostics.get(name)
+        return value if isinstance(value, str) and value and value not in ZHA_UNKNOWN else None
+
+    return own("model"), own("manufacturer")
 
 
 async def reached_devices(
@@ -2865,8 +2883,8 @@ async def reached_devices(
 ) -> tuple[Reached, ...]:
     """The devices behind the entities, each once in their order, with each entity's class from `classes`: two
     entities of one device that reached different classes give it none. Z2M's bridge/devices is read only for a Z2M
-    device, on a connection that may subscribe to MQTT (the admin one a Z2M suite runs on). Raises LookupError for an
-    entity HA's registry has no device for: a record can't name what it reached."""
+    device, and a ZHA device's diagnostics only for it, on a connection that may (the admin one Z2M and ZHA suites run
+    on). Raises LookupError for an entity HA's registry has no device for: a record can't name what it reached."""
     device_of = await devices_by_entity(ha)
     z2m_devices: dict[str, dict] | None = None  # bridge/devices' entries by IEEE, read for the first Z2M device
     found: dict[str, Reached] = {}
@@ -2876,12 +2894,11 @@ async def reached_devices(
         if z2m_devices is None and device_ieee(device, Z2M) is not None:
             z2m_devices = {normalize_ieee(entry.get("ieee_address", "")): entry for entry in await ha.z2m_device_list()}
         z2m = z2m_devices or {}
-        reached = Reached(
-            record_model(device, z2m),
-            device.get("sw_version") or None,
-            classes.get(entity_id),
-            record_manufacturer(device, z2m),
-        )
+        if device_ieee(device, "zha") is not None:
+            model, manufacturer = await zha_strings(ha, device)
+        else:
+            model, manufacturer = record_model(device, z2m), record_manufacturer(device, z2m)
+        reached = Reached(model, device.get("sw_version") or None, classes.get(entity_id), manufacturer)
         if (known := found.get(device["id"])) is None:
             found[device["id"]] = reached
         elif known.capability != reached.capability:
@@ -3114,16 +3131,20 @@ async def write_records(
                 continue
             try:
                 schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree))
-            except ValueError as err:  # InvalidRecord
+            except (OSError, ValueError) as err:  # InvalidRecord, or a file that couldn't be written
                 out(f"{suite.integration} / {suite.name}: {err}")
                 continue
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
             facts = FactsFile.read(records(suite.integration) / FACTS_FILE)
             record = render_record(
                 suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts, tree
             )
-            path.write_text(record)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(record)
+            except OSError as err:
+                out(f"{suite.integration} / {suite.name}: {path.name} couldn't be written: {err}")
+                continue
         written.append(path)
     return written, kept
 
@@ -3176,7 +3197,7 @@ def write_fact(
         row["devices"] = [device.as_json() for device in case.reached]
         try:
             append_json(path, suite.integration, row, schema)
-        except ValueError as err:
+        except (OSError, ValueError) as err:
             out(f"Not written to {path.name} ({err}); add the row by hand: {json.dumps(row)}")
             return None
         return path
