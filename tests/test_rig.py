@@ -2140,3 +2140,18 @@ def test_signoffs_picks_the_integrations_itself_so_it_takes_no_other_selection_o
     with pytest.raises(SystemExit):
         rig.main(["--signoffs", *extra])
     assert error in capsys.readouterr().err
+
+
+def test_the_record_format_follows_the_checkout(tmp_path, monkeypatch):
+    """A checkout with deviceside's record schema gets JSON records, one without markdown; the runner asks once per
+    checkout."""
+    if not (paired := target.deviceside_repo() / target.SCHEMA).is_file():
+        pytest.skip(f"the paired deviceside checkout has no {target.SCHEMA}")
+    markdown, json_checkout = tmp_path / "markdown", tmp_path / "json"
+    markdown.mkdir()
+    (json_checkout / target.SCHEMA).parent.mkdir(parents=True)
+    (json_checkout / target.SCHEMA).write_text(paired.read_text())
+    monkeypatch.setattr(rig, "REPO", markdown)
+    assert rig.record_schema() is None
+    monkeypatch.setattr(rig, "REPO", json_checkout)
+    assert rig.record_schema() is rig.record_schema() is not None

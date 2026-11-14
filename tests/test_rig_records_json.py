@@ -145,7 +145,7 @@ tests:
 
 
 async def run_suite(ha, steps, inv: Profile) -> RunResult:
-    return await run([steps], inv, REGISTRY, ha, admin=ha, tolerance=TOLERANCE, out=lambda _: None)
+    return await run([steps], inv, REGISTRY, ha, admin=ha, tolerance=TOLERANCE, out=lambda _: None, json_records=True)
 
 
 async def write(result: RunResult, records: Path, printed: list[str] | None = None, **kwargs) -> list[Path]:
@@ -325,7 +325,12 @@ async def test_reached_devices_reads_bridge_devices_only_for_a_z2m_device():
 async def test_a_record_naming_a_device_with_no_model_id_is_not_written(tmp_path):
     ha, inv = z2m_group({"light.z2m_room": {"status": "sent", "capabilities": ["hue"]}})
     ha.bridge_devices = BRIDGE_DEVICES[:1]  # bridge/devices lacks light.z2m_b's bulb
-    result = await run_suite(ha, suite(tmp_path, ONE_CALL.format(roles="group"), "zigbee2mqtt"), inv)
+    said_then: list[str] = []
+    steps = suite(tmp_path, ONE_CALL.format(roles="group"), "zigbee2mqtt")
+    result = await run(
+        [steps], inv, REGISTRY, ha, admin=ha, tolerance=TOLERANCE, out=said_then.append, json_records=True
+    )
+    assert "zigbee2mqtt / called[group]: a device it reached has no model ID in HA's registry" in "\n".join(said_then)
     printed: list[str] = []
     assert await write(result, tmp_path / "records", printed) == []
     assert not (tmp_path / "records" / "zigbee2mqtt" / "turn_on_for.json").exists()
@@ -342,7 +347,7 @@ async def test_a_case_that_ran_with_no_devices_noted_writes_no_record(tmp_path):
     assert await write(result, tmp_path / "records", printed) == []
     assert printed == [
         "shelly / turn_on_for: no record, as no devices were noted for called[light_ct] (the registry lookup failed, "
-        "or an older rig saved them): rerun it with --fresh"
+        "or an older rig saved them): a run at this commit reruns those cases"
     ]
 
 
@@ -494,12 +499,15 @@ def test_a_fact_with_no_devices_noted_or_a_row_the_schema_refuses_is_not_written
     steps, case = a_fact(tmp_path)
     records = under(tmp_path / "records")
     case.reached = ()
-    assert write_fact(steps, case, REGISTRY, records, "2026-11-14", SCHEMA_OF) is None
-    case.reached = (Reached(None, "1.7.4", "Switch"),)
     printed: list[str] = []
     assert write_fact(steps, case, REGISTRY, records, "2026-11-14", SCHEMA_OF, printed.append) is None
+    assert printed == [
+        "Not written to _facts.json: turn_on_for / wins[switch_plug] found fail, but its devices couldn't be read"
+    ]
+    case.reached = (Reached(None, "1.7.4", "Switch"),)
+    assert write_fact(steps, case, REGISTRY, records, "2026-11-14", SCHEMA_OF, printed.append) is None
     assert not (tmp_path / "records" / "shelly" / "_facts.json").exists()
-    assert "facts/0/devices/0/model" in printed[0]
+    assert "facts/0/devices/0/model" in printed[1]
 
 
 def test_the_ledger_saves_what_each_case_reached(tmp_path):
@@ -514,6 +522,30 @@ def test_the_ledger_saves_what_each_case_reached(tmp_path):
     again = progress.Progress.load(tmp_path, "lab")
     again.track(steps, "c1")
     assert again.saved(steps)["wins[switch_plug]"].reached == case.reached
+
+
+def test_a_resume_for_json_records_reruns_a_case_saved_with_no_devices(tmp_path):
+    path = tmp_path / "steps.yaml"
+    path.write_text(FACT.replace("    firmware_fact: true\n", ""))
+    steps = engine.Suite(load_step_file(path), "shelly")
+    [case] = engine.cases(steps, profile(switch_plug="switch.plug"))
+    blind = CaseResult(case.id, "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
+    assert progress.holds(case, blind, unattended=False)  # markdown records name no case's devices
+    assert not progress.holds(case, blind, unattended=False, devices=True)
+    blind.reached = (Reached("S3SW-001X8EU", None, "Switch"),)
+    assert progress.holds(case, blind, unattended=False, devices=True)
+
+
+async def test_a_markdown_run_reads_no_case_devices(tmp_path):
+    ha = RegistryHA({"switch.plug": {}}, answer({"switch.plug": {"switch.plug": {"status": "sent"}}}))
+    steps = suite(tmp_path, ONE_CALL.format(roles="switch_plug"))
+    result = await run([steps], profile(switch_plug="switch.plug"), REGISTRY, ha, tolerance=TOLERANCE, out=print)
+    assert [case.reached for case in result.suites[0].cases] == [()]
+
+
+async def test_json_records_need_the_runs_commit(tmp_path):
+    with pytest.raises(ValueError, match="commit"):
+        await write_records(RunResult([]), REGISTRY, under(tmp_path), "d", "rig run", schema=SCHEMA_OF)
 
 
 def test_a_checkout_without_the_schema_writes_markdown(tmp_path):

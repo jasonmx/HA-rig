@@ -1094,7 +1094,9 @@ def plan_resume(args: argparse.Namespace, setup: Setup, directory: Path) -> None
     profile, registry = setup.profile, setup.registry
     for suite in runnable_suites(setup.selected, registry):
         planned = cases(suite, profile, None, adapters_for(suite, registry))
-        progress.resume(suite, commit, planned, fresh=args.fresh, unattended=args.unattended)
+        progress.resume(
+            suite, commit, planned, fresh=args.fresh, unattended=args.unattended, devices=record_schema() is not None
+        )
     done = setup.done
     remaining = [
         suite
@@ -2172,6 +2174,7 @@ async def run_phases(
         "budget": budget,
         **saving(progress),
         "on_result": observing(registry, progress, facts),
+        "json_records": record_schema() is not None,
     }
     only = tail(profile) if lanes else None
     for number, (network, phase_suites) in enumerate(phases(suites, profile, roaming)):

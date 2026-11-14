@@ -10,6 +10,7 @@ unreadable schema stops the run then, not after its cases, when no record could 
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,9 @@ class RecordSchema:
             from jsonschema.exceptions import best_match  # noqa: PLC0415
         except ImportError:
             raise SystemExit(
-                f"{repo} keeps its test records as JSON ({SCHEMA}), which the rig validates with jsonschema, and this "
-                "interpreter has none: run `uv sync` in the checkout, whose dev group has it"
+                f"{repo} keeps its test records as JSON ({SCHEMA}), which the rig validates with jsonschema, and "
+                f"{sys.executable} has none: `uv sync` the project it runs in (the deviceside checkout's, which the "
+                "shebang's `uv run` picks when run from there, and whose dev group has it)"
             ) from None
         try:
             schema = json.loads(path.read_text())

@@ -21,7 +21,7 @@ This PR merges first: DeviceSide#430's records need a rig that writes format 2.
 1. **Choosing the format** (`target.py`): the checkout has `docs/test-records.schema.json` → JSON format 2 and no
    markdown; else markdown exactly as today. The runner decides once, before anything moves, and builds the validator
    then: a checkout with the schema but no `jsonschema` stops the run in its preflight, naming the fix (`uv sync` in
-   the checkout, whose dev group has it), rather than finding out after an hour of cases that no record can be
+   the project the rig runs in, the checkout's when run from there, whose dev group has it), rather than finding out after an hour of cases that no record can be
    written. `jsonschema` is imported only then, so a run against `main` needs none. `--promote` copies files and
    validates nothing.
 2. **Files**: `docs/integrations/<x>/test-records/<suite.name>.json`, and `_facts.json` beside it, indent 2 and a
@@ -30,7 +30,8 @@ This PR merges first: DeviceSide#430's records need a rig that writes format 2.
    devices behind its target: a native group's members (`group: true`), else the target's own device and any light a
    step targets (always one of the case's group in today's step files); a scene has no device of its own, so a scene
    case lists its group's members and lights. The ledger saves them, so a resumed suite has them; a saved case without
-   them (an older rig's) reruns.
+   them (an older rig's, or a lookup that failed) reruns. A run against a markdown checkout reads no case's devices,
+and one against a JSON checkout no markdown fact's.
    - `model`: the Zigbee model ID on Zigbee devices: Z2M's `bridge/devices` `model_id` (HA's registry holds Z2M's
      product code there), ZHA's registry `model`. Hue: HA's registry `model_id`, which HA's Hue integration takes from
      the bridge's `product_data.model_id`, so the rig needn't ask the bridge. Elsewhere the registry `model_id`.

@@ -414,8 +414,8 @@ registry model ID, which HA takes from the bridge), elsewhere HA's registry mode
 reported it for the target, or null where it reported none (an integration that names no classes, a device not placed
 yet, or a native group listing several classes without saying whose is whose). A native group's test (`group`) lists
 its members, never the group. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
-read as it ends and saved in the ledger; a suite with a case that ran with none noted (the lookup failed, or an older
-rig saved it) writes no record until `--fresh` reruns it.
+read as it ends and saved in the ledger; a case that ran with none noted (the lookup failed, or an older rig saved it)
+keeps its suite's record back, and a run at the same commit reruns just that case.
 
 A markdown record holds the date, a `Ran` row (`N passed, M skipped`), the Home Assistant version, the devices' model and
 firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row), its Package row (the integration's package tree at that commit, which a sign-off is checked by) and Result. It needs every
