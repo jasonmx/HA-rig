@@ -1478,6 +1478,25 @@ async def test_an_integration_naming_no_classes_keeps_three_columns(tmp_path):
     ]
 
 
+async def test_a_failed_class_lookup_writes_a_dash_and_leaves_the_pass(tmp_path, caplog):
+    ha = shelly_ha(switch_plug="aabbcc-switch:0")
+    command = ha.command
+
+    async def no_device_registry(payload: dict):
+        if payload["type"] == "config/device_registry/list":
+            raise HAError({"code": "unknown_error", "message": "device registry unavailable"})
+        return await command(payload)
+
+    ha.command = no_device_registry
+    result = await run_one(ha, suite(tmp_path, WAITS.format(roles="switch_plug")), profile(switch_plug="switch.plug"))
+    assert outcomes(result) == {"idle[switch_plug]": (Outcome.PASS, "")}
+    assert table(result.suites[0])[-1] == "| `idle[switch_plug]` | `switch` (switch_plug) | - | pass |"
+    assert (
+        "Could not name the class idle[switch_plug] reached, so its record shows none: device registry unavailable"
+        in caplog.text
+    )
+
+
 def test_the_stand_in_target_has_every_field_of_deviceside_s():
     from custom_components.deviceside.core.models import Target
 
