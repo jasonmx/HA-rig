@@ -383,7 +383,7 @@ tests:
 
 async def test_a_scene_case_lists_its_groups_lights_with_the_class_its_entry_reports(tmp_path):
     """A scene has no device of its own: its case reaches its group's lights, a light a step targets once, and the
-    class the scene's entry reports covers each."""
+    class the scene's entry reports covers each. Its test carries `group`, as a native group's does."""
     registry = Roster({"hue": {"set_scene", "get_attributes", "set_attributes"}}, classes=frozenset({"hue"}))
     responses = iter([{"scene.hue_relax": {"status": "sent", "capability": "hue"}}])
 
@@ -412,7 +412,7 @@ async def test_a_scene_case_lists_its_groups_lights_with_the_class_its_entry_rep
     ]
     [path] = await write(result, tmp_path / "records", registry=registry)
     [test] = held(path)["tests"]
-    assert "group" not in test and test["domain"] == "scene"
+    assert (test["group"], test["domain"]) == (True, "scene")  # a scene's test lists its lights, as a group's
 
 
 def test_the_model_id_follows_the_device_not_the_suite():

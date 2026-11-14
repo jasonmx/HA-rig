@@ -418,7 +418,7 @@ bridge. Elsewhere they are HA's registry model ID and manufacturer. Either is nu
 and the maker string is never a device name: a Tuya `TS011F` is hundreds of makers' plug. The class is as DeviceSide's
 response reported it for the target, or null where it reported none (an integration that names no classes, a device not placed
 yet, or a native group listing several classes without saying whose is whose). A native group's test (`group`) lists
-its members, never the group. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
+its members, never the group, and a scene's (`group` too) its group's lights. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
 read as it ends and saved in the ledger; a case that ran with none noted (the lookup failed, or an older rig saved it)
 keeps its suite's record back, and a run at the same commit reruns just that case.
 

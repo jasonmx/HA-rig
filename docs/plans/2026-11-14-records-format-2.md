@@ -30,7 +30,7 @@ This PR merges first: DeviceSide#430's records need a rig that writes format 2.
 3. **What each test reached** (`engine.py`): every case that ran (pass, fail, not observed) now notes, as it ends, the
    devices behind its target: a native group's members (`group: true`), else the target's own device and any light a
    step targets (always one of the case's group in today's step files); a scene has no device of its own, so a scene
-   case lists its group's members and lights. The ledger saves them, so a resumed suite has them; a saved case without
+   case lists its group's members and lights, and carries `group: true` as a native group's does (decided in the pair review). The ledger saves them, so a resumed suite has them; a saved case without
    them (an older rig's, or a lookup that failed) reruns. A run against a markdown checkout reads no case's devices,
 and one against a JSON checkout no markdown fact's.
    - `model`: the Zigbee model ID on Zigbee devices: Z2M's `bridge/devices` `model_id` (HA's registry holds Z2M's

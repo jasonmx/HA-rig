@@ -3045,7 +3045,7 @@ def _test_json(suite: Suite, case: CaseResult) -> dict:
     if case.outcome is Outcome.SKIPPED:
         return {"id": case.id, "role": case.role, "result": str(Outcome.SKIPPED), "reason": case.detail}
     test: dict[str, Any] = {"id": case.id, "domain": case.domain, "role": case.role, "result": str(case.outcome)}
-    if case.role in GROUP_ROLES:
+    if case.role in GROUP_ROLES or case.role == "scene":  # a scene's test, as a group's, lists the lights behind it
         test["group"] = True
     test["devices"] = [device.as_json() for device in case.reached]
     return test
