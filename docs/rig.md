@@ -408,9 +408,11 @@ anything moves, so a checkout without `jsonschema` (`uv sync` there adds it) sto
 schema, deviceside `main` before its records moved to JSON, gets markdown as below.
 
 A format 2 record holds its integration, action and any options, the date, the commit, the package tree, Home
-Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, firmware
-and class: on a Zigbee device the Zigbee model ID (Z2M's `bridge/devices` `model_id`, ZHA's registry model, Hue's
-registry model ID, which HA takes from the bridge), elsewhere HA's registry model ID; the class as DeviceSide's response
+Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker string,
+firmware and class: on a Zigbee device the Zigbee model ID (Z2M's `bridge/devices` `model_id`, ZHA's registry model,
+Hue's registry model ID, which HA takes from the bridge), elsewhere HA's registry model ID; the maker string as the
+integration reports it (Z2M's `bridge/devices` `manufacturer`, such as `_TZ3000_…`, else HA's registry manufacturer,
+which on Hue is the bridge's), or null, and never a device name, as a Tuya `TS011F` is hundreds of makers' plug; the class as DeviceSide's response
 reported it for the target, or null where it reported none (an integration that names no classes, a device not placed
 yet, or a native group listing several classes without saying whose is whose). A native group's test (`group`) lists
 its members, never the group. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are

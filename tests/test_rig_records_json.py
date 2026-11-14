@@ -17,6 +17,7 @@ from ha_rig.engine import (
     SuiteResult,
     load_step_file,
     reached_devices,
+    record_manufacturer,
     record_model,
     run,
     write_fact,
@@ -48,15 +49,23 @@ REGISTRY = Roster(
 )
 PACKAGE = "0123456789ab"  # a package's git tree, abbreviated as the runner does
 HUE_BULB = "0x0017880100000001"
+TUYA_PLUG = "0xa4c1380000000001"
 OTHER_BULB = "0x0017880100000002"
 # HA's device registry as each integration fills it: Z2M's model_id is its product code, ZHA's model the bulb's own.
 DEVICES = {
-    "plug": {"id": "plug", "model": "Shelly 1 Mini Gen3", "model_id": "S3SW-001X8EU", "sw_version": "1.7.4"},
+    "plug": {
+        "id": "plug",
+        "model": "Shelly 1 Mini Gen3",
+        "model_id": "S3SW-001X8EU",
+        "sw_version": "1.7.4",
+        "manufacturer": "Shelly",
+    },
     "z2m_a": {
         "id": "z2m_a",
         "identifiers": [["mqtt", f"zigbee2mqtt_{HUE_BULB}"]],
         "model": "Hue White A60 B22",
         "model_id": "9290018217",
+        "manufacturer": "Philips",  # the definition's vendor, never written
         "sw_version": "1.116.3",
     },
     "z2m_b": {
@@ -67,12 +76,18 @@ DEVICES = {
         "sw_version": "",  # Z2M has read none
     },
     "z2m_group": {"id": "z2m_group", "identifiers": [["mqtt", "zigbee2mqtt_1"]], "model": "Group", "sw_version": "2.1"},
-    "zha_bulb": {"id": "zha_bulb", "identifiers": [["zha", "00:17:88:01:00:00:00:03"]], "model": "LWA012"},
+    "zha_bulb": {
+        "id": "zha_bulb",
+        "identifiers": [["zha", "00:17:88:01:00:00:00:03"]],
+        "model": "LWA012",
+        "manufacturer": "Signify Netherlands B.V.",
+    },
     "hue_bulb": {
         "id": "hue_bulb",
         "identifiers": [["hue", "abc"]],
         "model": "Hue white lamp",
         "model_id": "LWA012",
+        "manufacturer": "Signify Netherlands B.V.",
         "sw_version": "1.122.2",
     },
 }
@@ -85,7 +100,10 @@ ENTITIES = {
     "light.hue_bulb": "hue_bulb",
 }
 # Z2M's bridge/devices: each device's Zigbee model ID, the Basic cluster's.
-BRIDGE_DEVICES = [{"ieee_address": HUE_BULB, "model_id": "LWA012"}, {"ieee_address": OTHER_BULB, "model_id": "LCA016"}]
+BRIDGE_DEVICES = [
+    {"ieee_address": HUE_BULB, "model_id": "LWA012", "manufacturer": "Signify Netherlands B.V."},
+    {"ieee_address": OTHER_BULB, "model_id": "LCA016"},  # Z2M reports no maker string for it
+]
 
 
 class RegistryHA(FakeHA):
@@ -210,7 +228,7 @@ async def test_a_record_lists_each_case_kind_and_holds_to_deviceside_schema(tmp_
             "domain": "switch",
             "role": "switch_plug",
             "result": "pass",
-            "devices": [{"model": "S3SW-001X8EU", "firmware": "1.7.4", "class": "Switch"}],
+            "devices": [{"model": "S3SW-001X8EU", "manufacturer": "Shelly", "firmware": "1.7.4", "class": "Switch"}],
         },
         {
             "id": "called[light_ct]",
@@ -258,8 +276,8 @@ async def test_a_native_groups_test_lists_its_members_with_their_zigbee_model_id
         "group": True,
         # Z2M's bridge/devices model IDs, never the registry's product codes, and never the group's own device.
         "devices": [
-            {"model": "LWA012", "firmware": "1.116.3", "class": "hue"},
-            {"model": "LCA016", "firmware": None, "class": "hue"},
+            {"model": "LWA012", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.116.3", "class": "hue"},
+            {"model": "LCA016", "manufacturer": None, "firmware": None, "class": "hue"},
         ],
     }
 
@@ -291,16 +309,27 @@ async def test_zha_and_hue_name_the_zigbee_model_id_and_no_class(tmp_path, integ
     result = await run_suite(ha, steps, profile(integration, light_ct=entity_id))
     [path] = await write(result, tmp_path / "records")
     [test] = held(path)["tests"]
-    assert test["devices"] == [{"model": model, "firmware": firmware, "class": None}]
+    maker = "Signify Netherlands B.V."
+    assert test["devices"] == [{"model": model, "manufacturer": maker, "firmware": firmware, "class": None}]
 
 
 def test_the_model_id_follows_the_device_not_the_suite():
-    z2m = {normalize_ieee(HUE_BULB): "LWA012"}
+    z2m = {normalize_ieee(HUE_BULB): {"model_id": "LWA012"}}
     assert record_model(DEVICES["z2m_a"], z2m) == "LWA012"
     assert record_model(DEVICES["z2m_b"], z2m) is None  # not in bridge/devices: the record can't name it
     assert record_model(DEVICES["zha_bulb"], z2m) == "LWA012"
     assert record_model(DEVICES["hue_bulb"], z2m) == "LWA012"
     assert record_model(DEVICES["plug"], z2m) == "S3SW-001X8EU"
+
+
+def test_the_maker_string_is_the_integrations_never_a_device_name():
+    z2m = {normalize_ieee(TUYA_PLUG): {"model_id": "TS011F", "manufacturer": "_TZ3000_okaz9tjs"}}
+    plug = {"id": "tuya", "identifiers": [["mqtt", f"zigbee2mqtt_{TUYA_PLUG}"]], "manufacturer": "Tuya", "name": "Lamp"}
+    assert (record_model(plug, z2m), record_manufacturer(plug, z2m)) == ("TS011F", "_TZ3000_okaz9tjs")
+    assert record_manufacturer(DEVICES["z2m_b"], z2m) is None  # not in bridge/devices
+    assert record_manufacturer(DEVICES["zha_bulb"], z2m) == "Signify Netherlands B.V."
+    assert record_manufacturer(DEVICES["hue_bulb"], z2m) == "Signify Netherlands B.V."
+    assert record_manufacturer({"id": "x", "manufacturer": ""}, z2m) is None
 
 
 async def test_reached_devices_reads_bridge_devices_only_for_a_z2m_device():
@@ -313,11 +342,12 @@ async def test_reached_devices_reads_bridge_devices_only_for_a_z2m_device():
 
     ha = Counting({})
     assert await reached_devices(ha, ["switch.plug"], {"switch.plug": "Switch"}) == (
-        Reached("S3SW-001X8EU", "1.7.4", "Switch"),
+        Reached("S3SW-001X8EU", "1.7.4", "Switch", "Shelly"),
     )
     assert ha.reads == 0
     found = await reached_devices(ha, ["light.z2m_a", "light.z2m_b"], {})
-    assert found == (Reached("LWA012", "1.116.3"), Reached("LCA016", None)) and ha.reads == 1
+    signify = "Signify Netherlands B.V."
+    assert found == (Reached("LWA012", "1.116.3", None, signify), Reached("LCA016", None)) and ha.reads == 1
     with pytest.raises(LookupError, match="light.unknown"):
         await reached_devices(ha, ["light.unknown"], {})
 
@@ -467,7 +497,7 @@ def test_a_fact_starts_facts_json_and_appends_leaving_every_row_as_it_was(tmp_pa
         "test": "wins[switch_plug]",
         "kind": "automated",
         "result": "fail",
-        "devices": [{"model": "S3SW-001X8EU", "firmware": "1.7.4", "class": "Switch"}],
+        "devices": [{"model": "S3SW-001X8EU", "manufacturer": None, "firmware": "1.7.4", "class": "Switch"}],
     }
     assert held(path) == {
         "format": 2,

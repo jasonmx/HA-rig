@@ -2818,26 +2818,46 @@ async def devices_by_entity(ha: HAClient) -> dict[str, dict]:
 
 @dataclass(frozen=True, slots=True)
 class Reached:
-    """A device a case reached, as a format 2 record and _facts.json row list it (deviceside's schema: test_device)."""
+    """A device a case reached, as a format 2 record and _facts.json row list it (deviceside's schema: test_device):
+    its model ID, maker string, firmware and class."""
 
     model: str | None  # its model ID (record_model); a record naming none doesn't hold to the schema
     firmware: str | None
     capability: str | None = None  # the class its call reached; None where the response named none
+    # Its maker string as its integration reports it (record_manufacturer): a Tuya plug's model, TS011F, is shared by
+    # hundreds of makers, which deviceside tells apart by this.
+    manufacturer: str | None = None
 
     def as_json(self) -> dict:
-        return {"model": self.model, "firmware": self.firmware, "class": self.capability}
+        return {
+            "model": self.model,
+            "manufacturer": self.manufacturer,
+            "firmware": self.firmware,
+            "class": self.capability,
+        }
 
 
-def record_model(device: dict, z2m_models: dict[str, str | None]) -> str | None:
+def record_model(device: dict, z2m_devices: dict[str, dict]) -> str | None:
     """The model ID a format 2 record names for a device-registry entry: a Zigbee device's own (the Basic cluster's,
     such as LWA012) on every integration, else HA's registry `model_id`. Z2M's is its bridge/devices `model_id`
-    (`z2m_models`, by IEEE), as HA's registry holds Z2M's product code (9290018217); ZHA's is the registry `model`. A
-    Hue device's registry `model_id` is the bridge's product_data.model_id, which HA's Hue integration copies."""
+    (`z2m_devices`, its entries by IEEE), as HA's registry holds Z2M's product code (9290018217); ZHA's is the registry
+    `model`. A Hue device's registry `model_id` is the bridge's product_data.model_id, which HA's Hue integration
+    copies."""
     if (ieee := device_ieee(device, Z2M)) is not None:
-        return z2m_models.get(normalize_ieee(ieee))
+        return z2m_devices.get(normalize_ieee(ieee), {}).get("model_id") or None
     if device_ieee(device, "zha") is not None:
         return device.get("model")
     return device.get("model_id")
+
+
+def record_manufacturer(device: dict, z2m_devices: dict[str, dict]) -> str | None:
+    """The maker string a format 2 record names for a device-registry entry, as its integration reports it, never a
+    device name: Z2M's bridge/devices `manufacturer` (the Basic cluster's, such as `_TZ3000_…`, not the definition's
+    vendor, which HA's registry holds), else HA's registry `manufacturer`: ZHA's device manufacturer, and on Hue the
+    bridge's product_data.manufacturer_name, which HA's Hue integration copies. None where it reports none."""
+    if (ieee := device_ieee(device, Z2M)) is not None:
+        return z2m_devices.get(normalize_ieee(ieee), {}).get("manufacturer") or None
+    return device.get("manufacturer") or None
 
 
 async def reached_devices(
@@ -2848,18 +2868,20 @@ async def reached_devices(
     device, on a connection that may subscribe to MQTT (the admin one a Z2M suite runs on). Raises LookupError for an
     entity HA's registry has no device for: a record can't name what it reached."""
     device_of = await devices_by_entity(ha)
-    z2m_models: dict[str, str | None] | None = None
+    z2m_devices: dict[str, dict] | None = None  # bridge/devices' entries by IEEE, read for the first Z2M device
     found: dict[str, Reached] = {}
     for entity_id in entity_ids:
         if (device := device_of.get(entity_id)) is None:
             raise LookupError(f"HA's registry has no device for {entity_id}")
-        if z2m_models is None and device_ieee(device, Z2M) is not None:
-            z2m_models = {
-                normalize_ieee(entry.get("ieee_address", "")): entry.get("model_id")
-                for entry in await ha.z2m_device_list()
-            }
-        model, firmware = record_model(device, z2m_models or {}), device.get("sw_version") or None
-        reached = Reached(model, firmware, classes.get(entity_id))
+        if z2m_devices is None and device_ieee(device, Z2M) is not None:
+            z2m_devices = {normalize_ieee(entry.get("ieee_address", "")): entry for entry in await ha.z2m_device_list()}
+        z2m = z2m_devices or {}
+        reached = Reached(
+            record_model(device, z2m),
+            device.get("sw_version") or None,
+            classes.get(entity_id),
+            record_manufacturer(device, z2m),
+        )
         if (known := found.get(device["id"])) is None:
             found[device["id"]] = reached
         elif known.capability != reached.capability:

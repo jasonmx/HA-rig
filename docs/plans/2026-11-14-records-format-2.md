@@ -37,6 +37,10 @@ and one against a JSON checkout no markdown fact's.
      the bridge's `product_data.model_id`, so the rig needn't ask the bridge. Elsewhere the registry `model_id`.
      A device is told by its registry identifiers (a Z2M or ZHA IEEE), not the suite's integration.
    - `firmware`: `sw_version`, null when empty or absent.
+   - `manufacturer` (a spec change after the PR opened): the maker string as the integration reports it, as a Tuya
+     plug's `TS011F` is hundreds of makers': Z2M's `bridge/devices` `manufacturer` (`_TZ3000_…`, not the definition's
+     vendor, which HA's registry holds), else HA's registry `manufacturer` (ZHA's device manufacturer; on Hue the
+     bridge's `product_data.manufacturer_name`, which HA copies). Null where it reports none; never a device name.
    - `class`: from each call of the tested action on the case's own target outside setup (as the Capability column
      reads them, #85): the target's `capability`; a member's own entry where the response answered member by member;
      a native group's `capabilities` when it lists one class, which every member then reached. Null when the
