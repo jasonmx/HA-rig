@@ -708,6 +708,16 @@ async def test_the_check_reports_a_network_it_cannot_ask(tmp_path, lab):
     ]
 
 
+async def test_the_check_reports_a_stale_zha_listing_that_outlives_its_remove(tmp_path, lab, monkeypatch):
+    """#86: HA kept the bulb's ZHA device through zha.remove; the check names it rather than calling the bulb on Hue."""
+    monkeypatch.setattr(roam, "PURGE_S", 0.05)
+    plug_up(lab)
+    lab.stale("zha", fakes.LAB_A)
+    lab.ha.zha_kept.add(fakes.LAB_A[2:])
+    problems = await check(tmp_path)
+    assert len(problems) == 1 and problems[0].startswith("ZHA still lists light.lab_a 0.05 s after its stale listing")
+
+
 async def test_the_check_looks_for_no_bulb_when_the_run_does_not_roam(tmp_path, lab, capsys):
     plug_up(lab)
     leave_hue(lab, "hue-device-2")

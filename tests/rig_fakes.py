@@ -117,6 +117,9 @@ class FakeHA(HAClient):
         self.entity_meta: dict[str, dict] = {}  # the registry's platform, unique_id and disabled_by, by entity ID
         self.keeps_group_entities = False  # HA keeps a removed group's entity in its registry
         self.zha_open = False
+        # Normalized IEEEs whose registry entry zha.remove leaves: zigpy doesn't hold the device, so no removal reaches
+        # HA's device registry.
+        self.zha_kept: set[str] = set()
         self.zcl_error: str | None = None
         self.logger_levels: dict[str, str] = {}  # logger.set_level's, by logger name
         self.zha_group_names: dict[int, str] = {}
@@ -379,6 +382,8 @@ class FakeHA(HAClient):
             if self.zcl_error:
                 raise HAError({"code": "home_assistant_error", "message": self.zcl_error})
         else:
+            if normalize_ieee(data["ieee"]) in self.zha_kept:
+                return
             self._leave("zha", data["ieee"])
             if self.on_leave is not None:
                 self.on_leave("zha", data["ieee"])

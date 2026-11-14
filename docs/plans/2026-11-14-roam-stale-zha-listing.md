@@ -4,7 +4,7 @@
 
 Intent: stop a roaming move to ZHA or Z2M from counting a bulb's leftover listing on the target as its arrival, and
 stop the move where a stale listing can't be removed.
-Touches: ha_rig/roam.py, tests/rig_fakes.py, tests/test_rig_roam.py
+Touches: ha_rig/roam.py, scripts/rig.py (check_roaming), tests/rig_fakes.py, tests/test_rig_roam*.py
 No deviceside pairing: no step kind or record change.
 
 ## Why
@@ -33,6 +33,7 @@ The cause, in the code:
 - A bulb counts as arrived on ZHA or Z2M only once it is listed and live there (`Roamer.arrived_on`); Hue keeps its
   bridge listing, which a search makes fresh. `arrived` and `at` follow from that; `missed` names where a bulb is
   live, not merely listed.
+- `--check` (`check_roaming`) reports a RoamError from `locate` as a problem instead of crashing on it.
 
 ## Tests (engine, fakes)
 
@@ -41,6 +42,7 @@ The cause, in the code:
 - A dead listing ZHA adds back during the window (a Hue entity still under the fixed ID, the ZHA join never comes):
   a join timeout, not an arrival, and the journal stays off ZHA.
 - A Hue entity keeping the fixed entity ID while no ZHA join comes: a join timeout (a guard for the issue's lead).
+- `--check` with a ZHA registry entry that survives `zha.remove`: the problem named.
 - A normal Hue -> ZHA move: the Hue delete, the window, `arrived` and `at` journaled.
 
 ## Verification

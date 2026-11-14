@@ -2587,6 +2587,9 @@ async def check_roaming(
             except (BridgeError, HAError, OSError, aiohttp.ClientError, TimeoutError) as err:
                 problems.append(f"{bulb.entity_id}: can't tell which network it is on: {err or type(err).__name__}")
                 continue
+            except RoamError as err:  # live on two networks, a dead Hue listing, a stale listing that stays
+                problems.append(str(err))
+                continue
             state = await ha.get_state(bulb.entity_id)
             if network is None:
                 problems.append(f"{bulb.entity_id}: not on any Zigbee network. {BLUETOOTH_RESET}")
