@@ -165,8 +165,15 @@ class FakeHA(HAClient):
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
-        device_id = f"dev-{len(self.devices)}-{normalize_ieee(ieee)}"
         ident = ["zha", ieee] if integration == "zha" else ["mqtt", f"zigbee2mqtt_{ieee}"]
+        # As HA: a device that rejoins gets its registry entry back, and an entity under its unique_id comes alive.
+        kept = next((d for d in self.devices if ident in map(list, d.get("identifiers", []))), None)
+        if integration == "zha" and kept is not None:
+            for entity_id_kept, meta in self.entity_meta.items():
+                if meta["unique_id"] == f"{ieee}-11" and self.entity_devices.get(entity_id_kept) == kept["id"]:
+                    self.set(entity_id_kept, "off")
+                    return kept["id"]
+        device_id = f"dev-{len(self.devices)}-{normalize_ieee(ieee)}"
         self.devices.append({"id": device_id, "identifiers": [ident]})
         if integration == "zigbee2mqtt":
             self.z2m_offline.discard(normalize_ieee(ieee))

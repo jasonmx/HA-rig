@@ -28,11 +28,14 @@ The cause, in the code:
 
 ## Fix
 
+- `move` purges the target's stale listings before it releases anything, so one that stays stops the move with
+  every bulb still where it was.
 - `purge` of a ZHA listing polls until HA's registry no longer lists it, for up to `PURGE_S`; else a RoamError
   saying so, with what to do. Z2M's force remove already waits for its device list (`z2m_force_remove`).
 - A bulb counts as arrived on ZHA or Z2M only once it is listed and live there (`Roamer.arrived_on`); Hue keeps its
   bridge listing, which a search makes fresh. `arrived` and `at` follow from that; `missed` names where a bulb is
-  live, not merely listed.
+  live, and names a dead listing as such. The missed-Hue-Leave retry reads "on no network" as live on none, so a
+  dead listing doesn't cost a bulb its search.
 - `--check` (`check_roaming`) reports a RoamError from `locate` as a problem instead of crashing on it.
 
 ## Tests (engine, fakes)
@@ -41,6 +44,9 @@ The cause, in the code:
   keep the bulb on Hue.
 - A dead listing ZHA adds back during the window (a Hue entity still under the fixed ID, the ZHA join never comes):
   a join timeout, not an arrival, and the journal stays off ZHA.
+- A dead target listing appearing after `settle` that `zha.remove` can't clear: the move stops before any release.
+- A bulb that missed the bridge's Leave while ZHA lists it dead: still searched back to Hue, released alone, joins.
+  (FakeHA's `join` now gives a rejoining ZHA device its registry entry and light back, as HA does.)
 - A Hue entity keeping the fixed entity ID while no ZHA join comes: a join timeout (a guard for the issue's lead).
 - `--check` with a ZHA registry entry that survives `zha.remove`: the problem named.
 - A normal Hue -> ZHA move: the Hue delete, the window, `arrived` and `at` journaled.

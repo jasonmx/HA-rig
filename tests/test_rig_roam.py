@@ -905,13 +905,54 @@ async def test_a_dead_zha_listing_that_appears_in_the_window_is_no_arrival(lab, 
     lab.ha.on_open = add_back
     journal = Journal(tmp_path / "journal.json")
     with pytest.raises(
-        RoamError, match=r"light.lab_a did not join ZHA within 0.05 s\. Not on any Zigbee network: light.lab_a\."
+        RoamError,
+        match=r"light.lab_a did not join ZHA within 0.05 s\. Listed but not live: light.lab_a on ZHA\. Not on any",
     ):
         await roamer(lab, journal).go("zha")
     roamed = journal.get("roam")
     assert roamed["arrived"] == ["light.lab_b"] and roamed["at"]["light.lab_a"] is None
     assert roamed["move"]["to"] == "zha"
     assert "light.lab_a" in lab.ha.entity_devices and lab.ha.entity_meta["light.lab_a"]["platform"] == "hue"
+
+
+async def test_a_bulb_that_missed_the_hue_leave_is_searched_back_though_zha_lists_it_dead(lab, monkeypatch):
+    """A dead ZHA entry added back in the window isn't the bulb: the one that missed the bridge's Leave still gets
+    its search and its release alone."""
+    monkeypatch.setattr(roam, "MISSED_HUE_LEAVE_S", 0)
+    lab.deaf[normalize_ieee(A)] = 1
+    opened = lab.ha.on_open
+
+    def add_back(network):
+        opened(network)
+        if network == "zha" and lab.kept_by_hue and not lab.stale_on:
+            lab.stale("zha", A)
+
+    lab.ha.on_open = add_back
+    printed = []
+    await roamer(lab, out=printed.append).go("zha")
+    assert "light.lab_a not on ZHA; searching Hue in case the bridge's Leave missed it." in printed
+    assert await where(lab) == ["zha", "zha"]
+
+
+async def test_a_stale_target_listing_that_outlives_its_remove_stops_the_move_before_any_release(
+    lab, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(roam, "PURGE_S", 0.05)
+    located = Roamer.locate
+
+    async def blind(self, bulb):  # the listing appears after settle looked: only move's own purge can catch it
+        found = await located(self, bulb)
+        if bulb.entity_id == "light.lab_b" and not lab.stale_on:
+            lab.stale("zha", A)
+            lab.ha.zha_kept.add(normalize_ieee(A))
+        return found
+
+    monkeypatch.setattr(Roamer, "locate", blind)
+    journal = Journal(tmp_path / "journal.json")
+    with pytest.raises(RoamError, match=r"ZHA still lists light.lab_a"):
+        await roamer(lab, journal).go("zha")
+    assert await lab.bridge.device_id_by_ieee(A) is not None and await lab.bridge.device_id_by_ieee(B) is not None
+    assert (journal.get("roam") or {}).get("move") is None and not lab.searching
 
 
 async def test_a_hue_entity_still_under_the_fixed_id_is_no_zha_arrival(lab, tmp_path, monkeypatch):
