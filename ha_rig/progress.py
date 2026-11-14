@@ -300,5 +300,6 @@ def _result(case: dict) -> CaseResult:
         tuple(case["entity_ids"]),
         case["twin"],
         absent=case.get("absent", False),
+        classes=tuple(case.get("classes", ())),
         inapplicable=case.get("inapplicable", case.get("absent", False)),
     )

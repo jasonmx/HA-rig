@@ -436,7 +436,8 @@ class FakeHA(HAClient):
     async def command(self, payload: dict):
         kind, entity_id = payload["type"], payload.get("entity_id")
         if kind == "config/entity_registry/get":
-            return {"entity_id": entity_id, "device_id": self.entity_devices.get(entity_id)}
+            meta = self.entity_meta.get(entity_id, {})
+            return {"entity_id": entity_id, "device_id": self.entity_devices.get(entity_id), "unique_id": None} | meta
         if kind == "config/entity_registry/list":
             return [
                 {"entity_id": e, "device_id": d, "platform": "fake", "unique_id": None} | self.entity_meta.get(e, {})

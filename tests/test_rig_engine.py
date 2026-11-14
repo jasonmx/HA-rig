@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ha_rig import engine
+from ha_rig import engine, progress
 from ha_rig.bridge import BridgeError
 from ha_rig.client import HAError
 from ha_rig.engine import (
@@ -405,7 +405,7 @@ async def test_unattended_reports_observed_cases_not_observed_and_runs_the_autom
     assert not [line for line in printed if line.startswith(("---", "You'll")) or "need" in line]
     assert result.suites[0].recordable  # the automated twin is a default case; nobody watched the fact case
     record = render_record(result.suites[0], "Shelly", "2026.10.1", [], "2026-10-25", "test")
-    assert "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | skipped |" in record  # a fact's
+    assert "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | - | skipped |" in record  # a fact's
 
 
 @pytest.mark.parametrize(("answer", "outcome"), [("", Outcome.PASS), (" Y", Outcome.PASS), ("n", Outcome.FAIL)])
@@ -575,7 +575,9 @@ async def test_a_failed_automated_case_skips_its_observed_twin(tmp_path):
     assert outcomes(result)[WATCHED] == (Outcome.SKIPPED, "automated case failed")
     assert asked == []
     assert not [line for line in printed if "need" in line]
-    assert table(result.suites[0])[-1] == "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | skipped |"
+    assert (
+        table(result.suites[0])[-1] == "| `on_then_off[switch_plug] observed` | `switch` (switch_plug) | - | skipped |"
+    )
 
 
 async def test_a_call_that_raises_after_enter_says_there_is_nothing_to_observe(tmp_path):
@@ -1365,6 +1367,7 @@ async def test_rig_facts_maps_entities_to_their_devices():
 
 async def test_a_full_pass_writes_a_record_and_a_failure_writes_none(tmp_path):
     ha = FakeHA({"switch.plug": {}}, timer_on)
+    ha.entity_meta["switch.plug"] = {"unique_id": "fakemac-switch:0"}  # Shelly's RPC key: the Switch component
     steps = suite(tmp_path, ON_THEN_OFF)
     passed = await run_one(ha, steps, profile(switch_plug="switch.plug"))
     failed = RunResult([SuiteResult(steps, [], complete=True)])
@@ -1386,8 +1389,88 @@ async def test_a_full_pass_writes_a_record_and_a_failure_writes_none(tmp_path):
     assert record.startswith("# Shelly · turn_on_for\n")
     assert "| Device | Mini (`S3`), firmware `2.0` |" in record
     assert "Profile" not in record
-    assert "| `on_then_off[switch_plug]` | `switch` (switch_plug) | pass |" in record
+    assert "| Test | Target | Capability | Result |" in record  # Shelly names classes
+    assert "| `on_then_off[switch_plug]` | `switch` (switch_plug) | `Switch` | pass |" in record
     assert "switch.plug" not in record
+
+
+WAITS = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: idle
+    roles: [{roles}]
+    steps:
+      - wait: 0
+"""
+
+
+def shelly_ha(**unique_ids: str) -> FakeHA:
+    """Shelly entities whose registry unique_ids end in their RPC key, as Shelly's do, with a made-up MAC."""
+    entity_ids = {name.replace("_", "."): unique_id for name, unique_id in unique_ids.items()}
+    ha = FakeHA(dict.fromkeys(entity_ids, {}))
+    ha.entity_meta = {entity_id: {"unique_id": unique_id} for entity_id, unique_id in entity_ids.items()}
+    return ha
+
+
+async def test_a_record_of_an_integration_naming_classes_has_the_class_each_target_reached(tmp_path):
+    ha = shelly_ha(switch_plug="aabbcc-switch:0", light_bulb="aabbcc-rgbcct:0", light_odd="aabbcc-unknown:0")
+    steps = suite(tmp_path, WAITS.format(roles="switch_plug, light_color, light_ct"))
+    inv = profile(switch_plug="switch.plug", light_color="light.bulb", light_ct="light.odd")
+    result = await run_one(ha, steps, inv)
+    assert result.suites[0].recordable
+
+    [path], _ = await write_records(result, REGISTRY, under(tmp_path / "records"), "2026-11-14", "rig run")
+    rows = path.read_text().partition("## Tests")[2].strip().splitlines()
+    assert rows == [
+        "| Test | Target | Capability | Result |",
+        "|---|---|---|---|",
+        "| `idle[switch_plug]` | `switch` (switch_plug) | `Switch` | pass |",
+        "| `idle[light_color]` | `light` (light_color) | `RGBCCT` | pass |",
+        "| `idle[light_ct]` | `light` (light_ct) | - | pass |",  # the adapter names no class for it
+    ]
+    assert engine.Record.read(path).passed == {"idle[switch_plug]", "idle[light_color]", "idle[light_ct]"}
+
+
+def test_a_skipped_case_reads_a_dash_whatever_class_it_holds(tmp_path):
+    steps = suite(tmp_path, WAITS.format(roles="switch_plug"))
+    skipped = CaseResult("idle[switch_plug]", "switch_plug", None, Outcome.SKIPPED, "no adapter", classes=("Switch",))
+    assert (
+        table(SuiteResult(steps, [skipped], True, classes=True))[-1]
+        == "| `idle[switch_plug]` | switch_plug | - | skipped |"
+    )
+
+
+async def test_a_groups_capability_lists_its_members_classes_once_each_sorted(tmp_path):
+    ha = shelly_ha(
+        light_room="", light_a="aabbcc-rgbcct:0", light_b="ddeeff-cct:0", light_c="112233-rgbcct:0", light_d="x-y:0"
+    )
+    steps = suite(tmp_path, WAITS.format(roles="group"))
+
+    async def capability(members: tuple[str, ...]) -> str:
+        ha.states["light.room"]["attributes"] = {"entity_id": list(members)}
+        inv = Profile({"shelly": [RigEntity("light.room", frozenset({"group"}))]}, {})
+        return table((await run_one(ha, steps, inv)).suites[0])[-1].split(" | ")[2]
+
+    assert await capability(("light.a", "light.b", "light.c")) == "`CCT`, `RGBCCT`"
+    assert await capability(("light.a", "light.d")) == "-"  # a member with no class credits none
+
+
+async def test_an_integration_naming_no_classes_keeps_three_columns(tmp_path):
+    ha = FakeHA({"light.bulb": {}})
+    steps = suite(tmp_path, WAITS.format(roles="light_ct"), "zha")
+    result = await run_one(ha, steps, profile("zha", light_ct="light.bulb"), admin=ha)
+    assert not result.suites[0].classes
+    assert table(result.suites[0]) == [
+        "| Test | Target | Result |",
+        "|---|---|---|",
+        "| `idle[light_ct]` | `light` (light_ct) | pass |",
+    ]
+
+
+def test_a_saved_case_keeps_its_classes():
+    case = CaseResult("idle[group]", "group", "light", Outcome.PASS, classes=("CCT", "RGBCCT"))
+    assert progress._result(json.loads(json.dumps(progress._saved(case)))) == case
 
 
 TWO_ROLES = """
@@ -2227,7 +2310,9 @@ tests:
       - expect_response: {integration: self}
 """
 ENTRY_REGISTRY = SimpleNamespace(
-    adapter=lambda action, integration: SimpleNamespace(scope=SimpleNamespace(confirmable=False, options=frozenset()))
+    adapter=lambda action, integration: SimpleNamespace(
+        scope=SimpleNamespace(confirmable=False, capabilities=None, options=frozenset())
+    )
 )
 STORED = {"brightness": 80}
 
@@ -2960,17 +3045,18 @@ tests:
 def test_a_record_lists_a_fact_case_as_skipped_whatever_it_did_and_quotes_its_latest_fact(tmp_path):
     steps = suite(tmp_path, FIRMWARE_FACT)
     cases = [
-        CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS),
-        CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS),
+        CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS, classes=("Switch",)),
+        CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS, classes=("Switch",)),
     ]
     devices = [engine.Device("Plug", "P1", "1.4.2")]
     fact = Fact("2026-11-12", "turn_on_for", "wins[switch_plug]", AUTOMATED_KIND, "Plug (`P1`), firmware `1.4.2`", FAIL)
     on_file = FactsFile((fact,))
-    result = SuiteResult(steps, cases, True)
+    result = SuiteResult(steps, cases, True, classes=True)
     record = render_record(result, "Shelly", "2026.10.1", devices, "2026-11-12", "t", on_file)
     assert "| Ran | 1 passed, 1 skipped |" in record
-    assert "| `plain[switch_plug]` | `switch` (switch_plug) | pass |" in record
-    assert "| `wins[switch_plug]` | `switch` (switch_plug) | skipped |" in record  # its pass is a fact's
+    assert "| `plain[switch_plug]` | `switch` (switch_plug) | `Switch` | pass |" in record
+    # Its pass is a fact's, so it reads skipped, crediting no class.
+    assert "| `wins[switch_plug]` | `switch` (switch_plug) | - | skipped |" in record
     assert "- `wins[switch_plug]`: last on file 2026-11-12, on Plug (`P1`), firmware `1.4.2`: fail" in record
     assert "Fact cases run only when asked (--facts)" in record and "[`_facts.md`](_facts.md)" in record
     assert "- `wins[switch_plug]`: none on file" in render_record(result, "Shelly", "2026.10.1", devices, "d", "t")
@@ -3026,8 +3112,8 @@ async def test_a_default_run_runs_an_observed_tests_automated_twin_and_skips_onl
     assert result.suites[0].recordable
     [path], _ = await write_records(result, REGISTRY, under(tmp_path / "records"), "2026-11-12", "rig run")
     record = path.read_text()
-    assert f"| `{AUTOMATED}` | `switch` (switch_plug) | pass |" in record
-    assert f"| `{WATCHED}` | switch_plug | skipped |" in record
+    assert f"| `{AUTOMATED}` | `switch` (switch_plug) | - | pass |" in record
+    assert f"| `{WATCHED}` | switch_plug | - | skipped |" in record
     assert "| Ran | 2 passed, 2 skipped |" in record
     assert f"- `{WATCHED}`: none on file" in record and f"- `{AUTOMATED}`" not in record
     assert not (tmp_path / "records" / "shelly" / "_facts.md").exists()  # a default run writes no fact
