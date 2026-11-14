@@ -133,6 +133,9 @@ class FakeHA(HAClient):
         self.entity_meta: dict[str, dict] = {}  # the registry's platform, unique_id and disabled_by, by entity ID
         self.keeps_group_entities = False  # HA keeps a removed group's entity in its registry
         self.zha_open = False
+        # Normalized IEEEs whose registry entry zha.remove leaves: zigpy doesn't hold the device, so no removal reaches
+        # HA's device registry.
+        self.zha_kept: set[str] = set()
         self.zcl_error: str | None = None
         self.logger_levels: dict[str, str] = {}  # logger.set_level's, by logger name
         self.zha_group_names: dict[int, str] = {}
@@ -178,8 +181,15 @@ class FakeHA(HAClient):
 
     def join(self, integration: str, ieee: str, entity_id: str | None = None) -> str:
         """A bulb joins `integration` ("zha" or "zigbee2mqtt"), with a registry entity if `entity_id` is given."""
-        device_id = f"dev-{len(self.devices)}-{normalize_ieee(ieee)}"
         ident = ["zha", ieee] if integration == "zha" else ["mqtt", f"zigbee2mqtt_{ieee}"]
+        # As HA: a device that rejoins gets its registry entry back, and an entity under its unique_id comes alive.
+        kept = next((d for d in self.devices if ident in map(list, d.get("identifiers", []))), None)
+        if integration == "zha" and kept is not None:
+            for entity_id_kept, meta in self.entity_meta.items():
+                if meta["unique_id"] == f"{ieee}-11" and self.entity_devices.get(entity_id_kept) == kept["id"]:
+                    self.set(entity_id_kept, "off")
+                    return kept["id"]
+        device_id = f"dev-{len(self.devices)}-{normalize_ieee(ieee)}"
         self.devices.append({"id": device_id, "identifiers": [ident]})
         if integration == "zigbee2mqtt":
             self.z2m_offline.discard(normalize_ieee(ieee))
@@ -395,6 +405,8 @@ class FakeHA(HAClient):
             if self.zcl_error:
                 raise HAError({"code": "home_assistant_error", "message": self.zcl_error})
         else:
+            if normalize_ieee(data["ieee"]) in self.zha_kept:
+                return
             self._leave("zha", data["ieee"])
             if self.on_leave is not None:
                 self.on_leave("zha", data["ieee"])

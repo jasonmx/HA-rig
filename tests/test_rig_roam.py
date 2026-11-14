@@ -874,6 +874,135 @@ async def test_a_stale_listing_on_the_target_is_removed_before_the_window_opens(
     assert await where(lab) == ["zigbee2mqtt", "zigbee2mqtt"]
 
 
+async def test_a_zha_listing_that_outlives_its_remove_stops_the_move_with_the_bulb_on_hue(lab, tmp_path, monkeypatch):
+    """#86: zha.remove left HA's ZHA device, and the join then took the leftover for the bulb's arrival."""
+    monkeypatch.setattr(roam, "PURGE_S", 0.05)
+    lab.stale("zha", A)
+    lab.ha.zha_kept.add(normalize_ieee(A))
+    journal = Journal(tmp_path / "journal.json")
+    printed = []
+    with pytest.raises(RoamError, match=r"ZHA still lists light.lab_a 0.05 s after its stale listing was removed"):
+        await roamer(lab, journal, printed.append).go("zha")
+    assert not any(line.startswith(("Moving", "Removed light.lab_a's stale")) for line in printed)
+    assert not lab.ha.zha_open and ("zha", "permit", {"duration": roam.JOIN_S}) not in lab.ha.calls
+    assert await lab.bridge.device_id_by_ieee(A) is not None
+    roamed = journal.get("roam") or {}
+    assert roamed.get("at", {}).get("light.lab_a") != "zha" and "light.lab_a" not in roamed.get("arrived", [])
+
+
+async def test_a_dead_zha_listing_that_appears_in_the_window_is_no_arrival(lab, tmp_path, monkeypatch):
+    """A listing isn't a join: ZHA adding back a dead entry for a bulb that never joins, while HA's Hue entity still
+    holds its fixed ID, times the window out instead of reading as the bulb in."""
+    monkeypatch.setattr(roam, "JOIN_S", 0.05)
+    lab.stuck.add(normalize_ieee(A))
+    opened = lab.ha.on_open
+
+    def add_back(network):
+        opened(network)
+        if network == "zha" and not lab.stale_on:
+            lab.stale("zha", A)
+
+    lab.ha.on_open = add_back
+    journal = Journal(tmp_path / "journal.json")
+    with pytest.raises(
+        RoamError,
+        match=r"light.lab_a did not join ZHA within 0.05 s\. Listed but not live: light.lab_a on ZHA\. Not on any",
+    ):
+        await roamer(lab, journal).go("zha")
+    roamed = journal.get("roam")
+    assert roamed["arrived"] == ["light.lab_b"] and roamed["at"]["light.lab_a"] is None
+    assert roamed["move"]["to"] == "zha"
+    assert "light.lab_a" in lab.ha.entity_devices and lab.ha.entity_meta["light.lab_a"]["platform"] == "hue"
+
+
+async def test_a_bulb_that_missed_the_hue_leave_is_searched_back_though_zha_lists_it_dead(lab, monkeypatch):
+    """A dead ZHA entry added back in the window isn't the bulb: the one that missed the bridge's Leave still gets
+    its search and its release alone."""
+    monkeypatch.setattr(roam, "MISSED_HUE_LEAVE_S", 0)
+    lab.deaf[normalize_ieee(A)] = 1
+    opened = lab.ha.on_open
+
+    def add_back(network):
+        opened(network)
+        if network == "zha" and lab.kept_by_hue and not lab.stale_on:
+            lab.stale("zha", A)
+
+    lab.ha.on_open = add_back
+    printed = []
+    await roamer(lab, out=printed.append).go("zha")
+    assert "light.lab_a not on ZHA; searching Hue in case the bridge's Leave missed it." in printed
+    assert await where(lab) == ["zha", "zha"]
+
+
+async def test_a_stale_target_listing_that_outlives_its_remove_stops_the_move_before_any_release(
+    lab, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(roam, "PURGE_S", 0.05)
+    located = Roamer.locate
+
+    async def blind(self, bulb):  # the listing appears after settle looked: only move's own purge can catch it
+        found = await located(self, bulb)
+        if bulb.entity_id == "light.lab_b" and not lab.stale_on:
+            lab.stale("zha", A)
+            lab.ha.zha_kept.add(normalize_ieee(A))
+        return found
+
+    monkeypatch.setattr(Roamer, "locate", blind)
+    journal = Journal(tmp_path / "journal.json")
+    with pytest.raises(RoamError, match=r"ZHA still lists light.lab_a"):
+        await roamer(lab, journal).go("zha")
+    assert await lab.bridge.device_id_by_ieee(A) is not None and await lab.bridge.device_id_by_ieee(B) is not None
+    assert (journal.get("roam") or {}).get("move") is None and not lab.searching
+
+
+async def test_a_hue_entity_still_under_the_fixed_id_is_no_zha_arrival(lab, tmp_path, monkeypatch):
+    """#86's lead: HA keeps the bulb's Hue device and light under its fixed ID while it never joins ZHA."""
+    monkeypatch.setattr(roam, "JOIN_S", 0.05)
+    lab.stuck.add(normalize_ieee(A))
+    dropped = lab.drop_device
+
+    def ha_keeps_it(device_id):
+        kept = [d for d in lab.ha.devices if d["id"] == f"ha-{device_id}"]
+        owners = {e: owner for e, owner in lab.ha.entity_devices.items() if owner == f"ha-{device_id}"}
+        dropped(device_id)
+        lab.ha.devices += kept
+        lab.ha.entity_devices.update(owners)
+
+    monkeypatch.setattr(lab, "drop_device", ha_keeps_it)
+    journal = Journal(tmp_path / "journal.json")
+    with pytest.raises(RoamError, match=r"light.lab_a did not join ZHA within 0.05 s"):
+        await roamer(lab, journal).go("zha")
+    assert lab.device_of("light.lab_a")["identifiers"][0][0] == "hue"
+    roamed = journal.get("roam")
+    assert "light.lab_a" not in roamed["arrived"] and roamed["at"]["light.lab_a"] is None
+
+
+async def test_recovery_brings_a_bulb_listed_on_zha_and_live_on_none_home_once_it_is_powered_up(lab, tmp_path):
+    """The state #86 left: stranded on ZHA, the light unavailable. Recovery stops until a power-up brings it back."""
+    journal = Journal(tmp_path / "journal.json")
+    await roamer(lab, journal).go("zha")
+    lab.ha.set("light.lab_a", "unavailable")
+    with pytest.raises(RoamError, match=r"light.lab_a is listed on ZHA but live on none"):
+        await Roamer.from_journal(lab.ha, lab.bridge, journal, lambda _: None).go("hue")
+    lab.ha.set("light.lab_a", "off")  # its lamp switched off and on: it announces itself to ZHA
+    recovering = Roamer.from_journal(lab.ha, lab.bridge, journal, lambda _: None)
+    await recovering.go("hue")
+    assert await where(lab) == ["hue", "hue"] and recovering.done
+
+
+async def test_a_hue_to_zha_move_deletes_on_hue_opens_the_window_and_journals_the_arrival(lab, tmp_path):
+    journal = Journal(tmp_path / "journal.json")
+    printed = []
+    await roamer(lab, journal, printed.append).go("zha")
+    assert await lab.bridge.device_id_by_ieee(A) is None and await lab.bridge.device_id_by_ieee(B) is None
+    assert ("zha", "permit", {"duration": roam.JOIN_S}) in lab.ha.calls and not lab.ha.zha_open
+    roamed = journal.get("roam")
+    assert roamed["at"] == {"light.lab_a": "zha", "light.lab_b": "zha"} and roamed["move"] is None
+    assert sorted(roamed["arrived"]) == ["light.lab_a", "light.lab_b"]
+    assert lab.device_of("light.lab_a")["identifiers"][0][0] == "zha"
+    assert printed[0].startswith("Moving light.lab_a, light.lab_b from Hue to ZHA") and printed[-1].endswith("on ZHA.")
+
+
 async def test_a_bulb_live_on_two_networks_stops_the_move(lab):
     lab.ha.join("zigbee2mqtt", A)  # Z2M lists it, online, and it answers
     with pytest.raises(RoamError, match=r"light.lab_a is live on both Hue and Z2M"):
