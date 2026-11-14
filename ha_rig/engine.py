@@ -21,7 +21,6 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -806,49 +805,23 @@ class Case:
 
 
 def names_classes(registry: Any, suite: Suite) -> bool:
-    """Whether the suite's integration names classes: its adapter's scope lists capabilities (docs/evidence.md, in
-    deviceside: Sign-off format)."""
-    adapter = registry.adapter(suite.action, suite.integration)
-    return adapter is not None and adapter.scope.capabilities is not None
+    """Whether the suite's integration names classes: its IntegrationInfo has a `capability` (docs/evidence.md, in
+    deviceside: Sign-off format). Read with getattr, as a deviceside checkout from before it has none."""
+    info = registry.integrations.get(suite.integration)
+    return getattr(info, "capability", None) is not None
 
 
-def class_source(registry: Any, suite: Suite) -> Callable[[Any, Any], str | None]:
-    """What names a target's class: the integration's `capability`, once deviceside has it, else the adapter's."""
-    if (named := getattr(registry.integrations[suite.integration], "capability", None)) is not None:
-        return named
-    return registry.adapter(suite.action, suite.integration).capability
-
-
-async def target_class(
-    ha: HAClient, name: Callable[[Any, Any], str | None], entity_id: str, integration: str, devices: dict[str, dict]
-) -> str | None:
-    """The class `name` gives the entity, from a Target built of what HA's registries (`devices`: its device
-    registry, by ID) and state say about it. There is no hass here, so `name` gets None for it: a class is named from
-    the target alone."""
-    entry, state = await asyncio.gather(
-        ha.command({"type": "config/entity_registry/get", "entity_id": entity_id}), ha.get_state(entity_id)
-    )
-    return name(None, stand_in_target(entity_id, integration, entry, devices.get(entry.get("device_id")), state))
-
-
-def stand_in_target(entity_id: str, integration: str, entry: dict, device: dict | None, state: dict | None) -> Any:
-    """deviceside's Target (core/models.py), field for field, from HA's registry entry, device and state as the
-    websocket API gives them: no config entry's runtime data, which lives only in HA."""
-    return SimpleNamespace(
-        entity_id=entity_id,
-        domain=entity_id.partition(".")[0],
-        integration=integration,
-        entry=SimpleNamespace(**entry),
-        device=device and SimpleNamespace(**device),
-        config_entry=SimpleNamespace(
-            entry_id=entry.get("config_entry_id"), domain=entry.get("platform"), runtime_data=None
-        ),
-        state=state and SimpleNamespace(**state),
-        via_group=None,
-        via_wrapper=None,
-        is_group=False,
-        named=False,
-    )
+def reported_classes(entry: Any) -> frozenset[str] | None:
+    """The classes a response entry reports its call reached (deviceside's EntityResult.class_keys): a target's
+    `capability`, or a native group's members' `capabilities`; None for neither, which credits none."""
+    if not isinstance(entry, dict):
+        return None
+    if isinstance(capability := entry.get("capability"), str):
+        return frozenset({capability})
+    capabilities = entry.get("capabilities")
+    if isinstance(capabilities, list) and capabilities and all(isinstance(name, str) for name in capabilities):
+        return frozenset(capabilities)
+    return None
 
 
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
@@ -1614,6 +1587,11 @@ class _CaseRun:
         self.baseline: Baseline | None = None
         self.journal, self.journal_key = journal, journal_key
         self.response: dict | None = None
+        # For each call of the tested action on the case's own target, outside setup, that returned a response, its
+        # entries for the target (else for the members it has): what the case's classes are read from. Another
+        # action's call can reach other members of a group (one action refuses a class another serves), so it
+        # credits none.
+        self.answers: list[list[Any]] = []
         self.error: HAError | None = None
         self.last_action = case.suite.action
         self.query = False
@@ -1699,24 +1677,33 @@ class _CaseRun:
         return result
 
     async def reached_classes(self, outcome: Outcome) -> tuple[str, ...]:
-        """The classes the case's target reached, a group's members' once each, sorted, when it passed: only a pass
-        credits a class. None for an integration that names no classes, and none when a member reached none or the
-        lookup fails, which a record writes as a dash and which credits no class."""
-        if outcome is not Outcome.PASS or not names_classes(self.registry, self.case.suite):
+        """The classes the case's target reached, sorted, each once, as DeviceSide's responses report them, when it
+        passed: only a pass credits a class. Each call of the tested action on the target (answers_for_class) gives
+        its entry for the
+        target, else its entries for the target's members as they were when it answered (an HA group, which
+        DeviceSide answers member by member, or a native group that fell back to its members, a refused one absent).
+        None for an integration that names no classes, and none when any such entry reports no class, a call has no
+        entry, or no call returned a response: a record writes that as a dash, which credits no class."""
+        if outcome is not Outcome.PASS or not names_classes(self.registry, self.case.suite) or not self.answers:
             return ()
-        name = class_source(self.registry, self.case.suite)
-        try:
-            members = await self.members(self.case.entities[self.case.role])
-            devices = {
-                device["id"]: device for device in await self.ha.command({"type": "config/device_registry/list"})
-            }
-            found = await asyncio.gather(
-                *(target_class(self.ha, name, member, self.integration, devices) for member in members)
-            )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Could not name the class %s reached, so its record shows none: %s", self.case.id, err)
-            return ()
-        return () if None in found else tuple(sorted(set(found)))
+        found: set[str] = set()
+        for entries in self.answers:
+            if not entries or None in (classes := [reported_classes(entry) for entry in entries]):
+                return ()
+            found.update(*classes)
+        return tuple(sorted(found))
+
+    def answers_for_class(self, action: str, entity_id: str) -> bool:
+        """Whether the call just answered is one the case's classes are read from: the tested action, on the case's
+        own target, outside setup, with a response."""
+        tested = action == self.case.suite.action and not self.in_setup
+        return tested and entity_id == self.case.entities[self.case.role] and self.response is not None
+
+    async def entries(self, response: dict, entity_id: str) -> list[Any]:
+        """The response's entry for the entity, else its entries for those of the entity's members it has."""
+        if entity_id in response:
+            return [response[entity_id]]
+        return [response[member] for member in await self.members(entity_id) if member in response]
 
     async def fact_devices(self) -> tuple[Device, ...]:
         """The devices behind the case's entities, a group's members included, for its _facts.md row; none when the
@@ -1995,6 +1982,8 @@ class _CaseRun:
             finally:
                 self.call_windows.append((sent_at, asyncio.get_running_loop().time()))
             self.call_times = self.call_windows[-1]
+            if self.answers_for_class(action, entity_id):
+                self.answers.append(await self.entries(self.response, entity_id))
         except HAError as err:
             if following != "expect_error":
                 raise StepFailure(f"deviceside.{action} raised {err.translation_key}: {err}") from None

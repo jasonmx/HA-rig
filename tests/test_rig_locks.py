@@ -353,7 +353,7 @@ OPTIONS = fakes.RESTORED_MIDWAY.replace("tests:", "options: [opt]\ntests:", 1)
 LIFECYCLE = fakes.RESTORED_MIDWAY.replace("tests:", "name: lifecycle\ntests:", 1).replace(
     "restore: null", "entry: reload"
 )
-NO_ADAPTER = SimpleNamespace(adapter=lambda action, integration: None)
+NO_ADAPTER = SimpleNamespace(integrations={}, adapter=lambda action, integration: None)
 
 
 @pytest.mark.parametrize(

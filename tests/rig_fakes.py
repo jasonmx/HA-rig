@@ -5,6 +5,7 @@ own fixture step files: the tests never depend on deviceside's test plan, only t
 import asyncio
 import contextlib
 import copy
+import dataclasses
 import functools
 import json
 import logging
@@ -30,19 +31,34 @@ def _discovered():
     return AdapterRegistry.discover()
 
 
+def _never_called(hass, target):
+    raise AssertionError("the rig reads a target's class from DeviceSide's response, never names one")
+
+
 class Roster:
     """The adapters a test says exist, over deviceside's real registry. Which adapters an integration has changes the
     path the engine takes (with both get_attributes and set_attributes it snapshots an off light first), so a test
     that took whatever deviceside ships would change path when deviceside adds an adapter. `adapter` answers only for
     declared pairs, and a declared pair the real registry lacks raises; every other attribute (actions,
-    integrations) is the real registry's, so scopes, kinds and titles stay honest."""
+    integrations) is the real registry's, so scopes, kinds and titles stay honest.
 
-    def __init__(self, declared: dict[str, set[str]]) -> None:
+    Which integrations name classes is declared too (`classes`), as a deviceside checkout before IntegrationInfo's
+    `capability` names none: each integration reads the real one's fields, with a `capability` only for those
+    declared. The rig never calls it, as it reads the class from DeviceSide's response."""
+
+    def __init__(self, declared: dict[str, set[str]], classes: frozenset[str] = frozenset()) -> None:
         for integration, actions in declared.items():
             for action in actions:
                 if _discovered().adapter(action, integration) is None:
                     raise ValueError(f"deviceside has no {action} adapter for {integration}")
         self._declared = declared
+        self.integrations = {
+            key: SimpleNamespace(
+                **{field.name: getattr(info, field.name) for field in dataclasses.fields(info)}
+                | {"capability": _never_called if key in classes else None}
+            )
+            for key, info in _discovered().integrations.items()
+        }
 
     def adapter(self, action: str, integration: str):
         return _discovered().adapter(action, integration) if action in self._declared.get(integration, ()) else None
@@ -796,9 +812,10 @@ def profile(integration: str = "shelly", pause: tuple[str, ...] = (), **roles: s
 def registry(options: frozenset[str]) -> SimpleNamespace:
     """A registry whose every adapter has these DeviceSide options."""
     return SimpleNamespace(
+        integrations={},
         adapter=lambda action, integration: SimpleNamespace(
-            scope=SimpleNamespace(confirmable=False, capabilities=None, fields=frozenset(), options=options)
-        )
+            scope=SimpleNamespace(confirmable=False, fields=frozenset(), options=options)
+        ),
     )
 
 

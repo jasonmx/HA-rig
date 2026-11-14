@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -60,7 +61,8 @@ REGISTRY = Roster(
         "zha": {"turn_on_for", "raise_hue", "get_attributes", "set_attributes"},
         "zigbee2mqtt": {"turn_on_for", "raise_brightness", "raise_hue", "get_attributes", "set_attributes"},
         "hue": {"set_scene", "get_attributes", "set_attributes"},
-    }
+    },
+    classes=frozenset({"shelly"}),  # as on deviceside's device-classes branches: Shelly names classes
 )
 
 ON_THEN_OFF = """
@@ -812,15 +814,19 @@ def members_on(*members: str) -> Callable:
 
 
 GROUP_REGISTRY = SimpleNamespace(
+    integrations={},
     adapter=lambda action, integration: SimpleNamespace(
-        scope=SimpleNamespace(confirmable=False, capabilities=None, fields=frozenset(), options=frozenset())
-    )
+        scope=SimpleNamespace(confirmable=False, fields=frozenset(), options=frozenset())
+    ),
 )
 
 
 # Like Z2M: a turn_on_for adapter, and none for get_attributes or set_attributes.
 NO_ATTRIBUTES_REGISTRY = SimpleNamespace(
-    adapter=lambda action, integration: GROUP_REGISTRY.adapter(action, integration) if action == "turn_on_for" else None
+    integrations={},
+    adapter=lambda action, integration: (
+        GROUP_REGISTRY.adapter(action, integration) if action == "turn_on_for" else None
+    ),
 )
 
 
@@ -948,7 +954,7 @@ WHITE = {"supported_color_modes": ["brightness"], "brightness": 102}
 
 # GROUP_REGISTRY, with get_attributes known as a query, as the real registry knows it.
 QUERY_REGISTRY = SimpleNamespace(
-    adapter=GROUP_REGISTRY.adapter, actions={"get_attributes": SimpleNamespace(kind="query")}
+    integrations={}, adapter=GROUP_REGISTRY.adapter, actions={"get_attributes": SimpleNamespace(kind="query")}
 )
 
 
@@ -1082,7 +1088,10 @@ tests:
 
 # Like Hue: a get_attributes adapter, and none for turn_on_for.
 NO_TIMER_REGISTRY = SimpleNamespace(
-    adapter=lambda action, integration: None if action == "turn_on_for" else GROUP_REGISTRY.adapter(action, integration)
+    integrations={},
+    adapter=lambda action, integration: (
+        None if action == "turn_on_for" else GROUP_REGISTRY.adapter(action, integration)
+    ),
 )
 
 
@@ -1366,8 +1375,7 @@ async def test_rig_facts_maps_entities_to_their_devices():
 
 
 async def test_a_full_pass_writes_a_record_and_a_failure_writes_none(tmp_path):
-    ha = FakeHA({"switch.plug": {}}, timer_on)
-    ha.entity_meta["switch.plug"] = {"unique_id": "fakemac-switch:0"}  # Shelly's RPC key: the Switch component
+    ha = FakeHA({"switch.plug": {}}, classed(timer_on, capability="Switch"))
     steps = suite(tmp_path, ON_THEN_OFF)
     passed = await run_one(ha, steps, profile(switch_plug="switch.plug"))
     failed = RunResult([SuiteResult(steps, [], complete=True)])
@@ -1403,19 +1411,61 @@ tests:
     steps:
       - wait: 0
 """
+CALLS = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: called
+    roles: [{roles}]
+    steps:
+{steps}
+"""
 
 
-def shelly_ha(**unique_ids: str) -> FakeHA:
-    """Shelly entities whose registry unique_ids end in their RPC key, as Shelly's do, with a made-up MAC."""
-    entity_ids = {name.replace("_", "."): unique_id for name, unique_id in unique_ids.items()}
-    ha = FakeHA(dict.fromkeys(entity_ids, {}))
-    ha.entity_meta = {entity_id: {"unique_id": unique_id} for entity_id, unique_id in entity_ids.items()}
-    return ha
+def calls(*steps: str, roles: str = "switch_plug") -> str:
+    """A turn_on_for step file whose one test sends these steps on `roles`."""
+    return CALLS.format(roles=roles, steps="\n".join(f"      - {step}" for step in steps))
 
 
-async def test_a_record_of_an_integration_naming_classes_has_the_class_each_target_reached(tmp_path):
-    ha = shelly_ha(switch_plug="aabbcc-switch:0", light_bulb="aabbcc-rgbcct:0", light_odd="aabbcc-unknown:0")
-    steps = suite(tmp_path, WAITS.format(roles="switch_plug, light_color, light_ct"))
+def classed(respond: Callable, **keys: Any) -> Callable:
+    """`respond`, with DeviceSide's class keys (`capability` or `capabilities`) added to every entry it returns."""
+
+    def _respond(ha, action, data):
+        return {entity_id: entry | keys for entity_id, entry in respond(ha, action, data).items()}
+
+    return _respond
+
+
+def answering(*responses: dict) -> Callable:
+    """DeviceSide answering each call with the next canned response, the last one again once they run out."""
+    left = list(responses)
+
+    def _respond(ha, action, data):
+        return left.pop(0) if len(left) > 1 else left[0]
+
+    return _respond
+
+
+def ran(**keys: Any) -> dict:
+    """A command's entry for a target that ran, with these class keys."""
+    return {"status": "sent", "integration": "shelly"} | keys
+
+
+async def capability_cell(tmp_path, ha: FakeHA, text: str, inv: Profile) -> str:
+    """The Capability cell of the run's one case, which must pass."""
+    result = await run_one(ha, suite(tmp_path, text), inv)
+    assert [case.outcome for case in result.suites[0].cases] == [Outcome.PASS], outcomes(result)
+    return table(result.suites[0])[-1].split(" | ")[2]
+
+
+async def test_a_record_of_an_integration_naming_classes_has_the_class_each_response_reports(tmp_path):
+    ha = FakeHA({"switch.plug": {}, "light.bulb": {}, "light.odd": {}})
+    ha.respond = lambda ha, action, data: {
+        "switch.plug": {data["entity_id"]: ran(capability="Switch")},
+        "light.bulb": {data["entity_id"]: ran(capability="RGBCCT")},
+        "light.odd": {data["entity_id"]: ran()},  # DeviceSide named no class for it
+    }[data["entity_id"]]
+    steps = suite(tmp_path, calls("call: {duration: 1}", roles="switch_plug, light_color, light_ct"))
     inv = profile(switch_plug="switch.plug", light_color="light.bulb", light_ct="light.odd")
     result = await run_one(ha, steps, inv)
     assert result.suites[0].recordable
@@ -1425,11 +1475,123 @@ async def test_a_record_of_an_integration_naming_classes_has_the_class_each_targ
     assert rows == [
         "| Test | Target | Capability | Result |",
         "|---|---|---|---|",
-        "| `idle[switch_plug]` | `switch` (switch_plug) | `Switch` | pass |",
-        "| `idle[light_color]` | `light` (light_color) | `RGBCCT` | pass |",
-        "| `idle[light_ct]` | `light` (light_ct) | - | pass |",  # the adapter names no class for it
+        "| `called[switch_plug]` | `switch` (switch_plug) | `Switch` | pass |",
+        "| `called[light_color]` | `light` (light_color) | `RGBCCT` | pass |",
+        "| `called[light_ct]` | `light` (light_ct) | - | pass |",
     ]
-    assert engine.Record.read(path).passed == {"idle[switch_plug]", "idle[light_color]", "idle[light_ct]"}
+    assert engine.Record.read(path).passed == {"called[switch_plug]", "called[light_color]", "called[light_ct]"}
+
+
+async def test_a_native_groups_entry_lists_its_members_classes(tmp_path):
+    ha = FakeHA({"light.room": {}}, answering({"light.room": ran(capabilities=["CCT", "RGBCCT"])}))
+    inv = Profile({"shelly": [RigEntity("light.room", frozenset({"group"}), members=("light.a", "light.b"))]}, {})
+    text = calls("call: {duration: 1}", roles="group")
+    assert await capability_cell(tmp_path, ha, text, inv) == "`CCT`, `RGBCCT`"
+    # Its own entry answers for it, members' entries beside it aside: with neither key, it reached no class.
+    ha.respond = answering({"light.room": ran(), "light.a": ran(capability="CCT")})
+    assert await capability_cell(tmp_path, ha, text, inv) == "-"
+
+
+async def test_a_querys_class_is_read_from_among_its_data(tmp_path):
+    text = """
+action: get_attributes
+rig_seconds: 5
+tests:
+  - name: reads
+    roles: [light_color]
+    steps:
+      - call: {}
+      - expect_response: {attributes: {brightness: 128}}
+"""
+    ha = FakeHA({"light.bulb": {}}, answering({"light.bulb": {"brightness": 128, "capability": "RGBCCT"}}))
+    assert await capability_cell(tmp_path, ha, text, profile(light_color="light.bulb")) == "`RGBCCT`"
+
+
+async def test_an_ha_group_takes_the_union_of_its_members_classes(tmp_path):
+    ha = group_ha(None)
+    text = calls("call: {duration: 1}", roles="group")
+    inv = profile(group="light.room")
+    ha.respond = answering({"light.a": ran(capability="RGBCCT"), "light.b": ran(capability="CCT")})
+    assert await capability_cell(tmp_path, ha, text, inv) == "`CCT`, `RGBCCT`"
+    ha.respond = answering({"light.a": ran(capability="RGBCCT"), "light.b": ran()})
+    assert await capability_cell(tmp_path, ha, text, inv) == "-"  # a member with no class credits none
+
+
+async def test_a_native_group_that_fell_back_takes_the_classes_of_the_members_that_ran(tmp_path):
+    """A member's class refused, the group fell back: its members that ran answer for it, the refused one absent."""
+    ha = FakeHA({"light.room": {}})
+    members = ("light.a", "light.b", "light.c")
+    inv = Profile({"shelly": [RigEntity("light.room", frozenset({"group"}), members=members)]}, {})
+    ha.respond = answering({"light.a": ran(capability="RGBCCT"), "light.b": ran(capability="CCT")})
+    assert await capability_cell(tmp_path, ha, calls("call: {duration: 1}", roles="group"), inv) == "`CCT`, `RGBCCT`"
+
+    # A test that expects the group's own entry fails on its members' absence: no class to credit.
+    text = calls("call: {duration: 1}", "expect_response: {status: sent}", roles="group")
+    result = await run_one(ha, suite(tmp_path, text), inv)
+    assert outcomes(result) == {
+        "called[group]": (
+            Outcome.FAIL,
+            "step 2 (expect_response): the response has no entry for light.c: "
+            "{'light.a': {'status': 'sent', 'integration': 'shelly', 'capability': 'RGBCCT'}, "
+            "'light.b': {'status': 'sent', 'integration': 'shelly', 'capability': 'CCT'}}",
+        )
+    }
+    assert result.suites[0].cases[0].classes == ()
+
+
+async def test_several_calls_on_the_target_take_the_union_of_their_classes(tmp_path):
+    ha = FakeHA({"switch.plug": {}})
+    text = calls("call: {duration: 1}", "call: {duration: 2}")
+    inv = profile(switch_plug="switch.plug")
+    ha.respond = answering({"switch.plug": ran(capability="Switch")}, {"switch.plug": ran(capability="Cover")})
+    assert await capability_cell(tmp_path, ha, text, inv) == "`Cover`, `Switch`"
+    ha.respond = answering({"switch.plug": ran(capability="Switch")}, {"switch.plug": ran()})
+    assert await capability_cell(tmp_path, ha, text, inv) == "-"  # a call that ran and reported none
+    ha.respond = answering({"light.other": ran(capability="RGBCCT")}, {"switch.plug": ran(capability="Switch")})
+    assert await capability_cell(tmp_path, ha, text, inv) == "-"  # a call with no entry for the target
+
+
+async def test_only_the_tested_actions_calls_outside_setup_count(tmp_path):
+    """A group's call of another action can reach members the tested one refuses, so its classes aren't credited."""
+    text = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: called
+    roles: [switch_plug]
+    setup:
+      - call: {duration: 1}
+    steps:
+      - call: {action: get_attributes}
+      - call: {duration: 1}
+"""
+    ha = FakeHA({"switch.plug": {}})
+    ha.respond = answering(
+        {"switch.plug": ran(capability="Setup")},
+        {"switch.plug": {"brightness": 128, "capability": "Other"}},
+        {"switch.plug": ran(capability="Switch")},
+    )
+    assert await capability_cell(tmp_path, ha, text, profile(switch_plug="switch.plug")) == "`Switch`"
+    assert [service for domain, service, _ in ha.calls if domain == "deviceside"] == [
+        "turn_on_for",
+        "get_attributes",
+        "turn_on_for",
+    ]
+
+
+async def test_only_calls_on_the_target_that_returned_a_response_count(tmp_path):
+    ha = FakeHA({"switch.plug": {}, "light.bulb": {}})
+    inv = profile(switch_plug="switch.plug", light_color="light.bulb")
+    ha.respond = lambda ha, action, data: {data["entity_id"]: ran(capability=data["entity_id"])}
+    other = "call: {target: light_color, duration: 1}"
+    assert await capability_cell(tmp_path, ha, calls(other, "call: {duration: 1}"), inv) == "`switch.plug`"
+    assert await capability_cell(tmp_path, ha, calls(other), inv) == "-"  # none on the target
+
+    ha.respond = refuse("timeout")
+    text = calls("call: {duration: 1}", "expect_error: {key: targets_failed, summary: timeout}")
+    assert await capability_cell(tmp_path, ha, text, inv) == "-"  # no response
+    ha.respond = answering({"light.bulb": ran(capability="RGBCCT")})
+    assert await capability_cell(tmp_path, ha, calls("call: {duration: 1}"), inv) == "-"  # no entry for it
 
 
 def test_only_a_pass_credits_a_class(tmp_path):
@@ -1444,77 +1606,49 @@ def test_only_a_pass_credits_a_class(tmp_path):
     ]
 
 
-async def test_a_failed_case_looks_no_class_up(tmp_path):
-    ha = shelly_ha(switch_plug="aabbcc-switch:0")
-    text = WAITS.format(roles="switch_plug").replace("wait: 0", "expect_state: {state: on}")
+async def test_a_skipped_or_failed_case_reads_no_class(tmp_path):
+    ha = FakeHA({"switch.plug": {}}, answering({"switch.plug": ran(capability="Switch")}))
+    text = calls("call: {duration: 1}", "expect_state: {state: on}")
     result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug"))
     assert [(case.outcome, case.classes) for case in result.suites[0].cases] == [(Outcome.FAIL, ())]
 
-
-async def test_a_groups_capability_lists_its_members_classes_once_each_sorted(tmp_path):
-    ha = shelly_ha(
-        light_room="", light_a="aabbcc-rgbcct:0", light_b="ddeeff-cct:0", light_c="112233-rgbcct:0", light_d="x-y:0"
-    )
-    steps = suite(tmp_path, WAITS.format(roles="group"))
-
-    async def capability(members: tuple[str, ...]) -> str:
-        ha.states["light.room"]["attributes"] = {"entity_id": list(members)}
-        inv = Profile({"shelly": [RigEntity("light.room", frozenset({"group"}))]}, {})
-        return table((await run_one(ha, steps, inv)).suites[0])[-1].split(" | ")[2]
-
-    assert await capability(("light.a", "light.b", "light.c")) == "`CCT`, `RGBCCT`"
-    assert await capability(("light.a", "light.d")) == "-"  # a member with no class credits none
+    result = await run_one(ha, suite(tmp_path, calls("call: {duration: 1}", roles="light_color")), profile())
+    [case] = result.suites[0].cases
+    assert (case.outcome, case.classes) == (Outcome.SKIPPED, ())
+    assert table(result.suites[0])[-1] == "| `called[light_color]` | light_color: none in the profile | - | skipped |"
 
 
 async def test_an_integration_naming_no_classes_keeps_three_columns(tmp_path):
-    ha = FakeHA({"light.bulb": {}})
-    steps = suite(tmp_path, WAITS.format(roles="light_ct"), "zha")
+    ha = FakeHA({"light.bulb": {}}, answering({"light.bulb": {"status": "sent", "capability": "CCT"}}))
+    steps = suite(tmp_path, calls("call: {duration: 1}", roles="light_ct"), "zha")
     result = await run_one(ha, steps, profile("zha", light_ct="light.bulb"), admin=ha)
     assert not result.suites[0].classes
+    assert result.suites[0].cases[0].classes == ()
     assert table(result.suites[0]) == [
         "| Test | Target | Result |",
         "|---|---|---|",
-        "| `idle[light_ct]` | `light` (light_ct) | pass |",
+        "| `called[light_ct]` | `light` (light_ct) | pass |",
     ]
 
 
-async def test_a_failed_class_lookup_writes_a_dash_and_leaves_the_pass(tmp_path, caplog):
-    ha = shelly_ha(switch_plug="aabbcc-switch:0")
-    command = ha.command
-
-    async def no_device_registry(payload: dict):
-        if payload["type"] == "config/device_registry/list":
-            raise HAError({"code": "unknown_error", "message": "device registry unavailable"})
-        return await command(payload)
-
-    ha.command = no_device_registry
-    result = await run_one(ha, suite(tmp_path, WAITS.format(roles="switch_plug")), profile(switch_plug="switch.plug"))
-    assert outcomes(result) == {"idle[switch_plug]": (Outcome.PASS, "")}
-    assert table(result.suites[0])[-1] == "| `idle[switch_plug]` | `switch` (switch_plug) | - | pass |"
-    assert (
-        "Could not name the class idle[switch_plug] reached, so its record shows none: device registry unavailable"
-        in caplog.text
-    )
+def test_an_integration_names_classes_only_with_a_capability_hook(tmp_path):
+    """getattr, as a deviceside checkout from before IntegrationInfo.capability has none."""
+    steps = suite(tmp_path, WAITS.format(roles="switch_plug"))
+    for info in (SimpleNamespace(), SimpleNamespace(capability=None)):
+        assert not engine.names_classes(SimpleNamespace(integrations={"shelly": info}), steps)
+    assert engine.names_classes(SimpleNamespace(integrations={"shelly": SimpleNamespace(capability=len)}), steps)
+    assert not engine.names_classes(SimpleNamespace(integrations={}), steps)
 
 
-def test_the_stand_in_target_has_every_field_of_deviceside_s():
-    from custom_components.deviceside.core.models import Target
+async def test_a_groups_members_are_read_when_its_call_is_answered(tmp_path):
+    def forget_members(ha, action, data):
+        # The group's membership is gone once the call has returned, by the case's end.
+        PENDING.append(asyncio.get_running_loop().call_soon(ha.states["light.room"]["attributes"].clear))
+        return {"light.a": ran(capability="CCT")}
 
-    target = engine.stand_in_target("light.a", "shelly", {"unique_id": "u"}, None, None)
-    assert set(vars(target)) == {field.name for field in dataclasses.fields(Target)}
-
-
-async def test_the_integration_names_the_class_once_deviceside_has_it_there(tmp_path, monkeypatch):
-    """IntegrationInfo.capability (deviceside's device-classes plan, step 3) wins over the adapter's capability()."""
-    ha = shelly_ha(switch_plug="aabbcc-switch:0")
-    shelly = REGISTRY.integrations["shelly"]
-    named = SimpleNamespace(**{name: getattr(shelly, name) for name in ("key", "title", "ha_domain")})
-    named.capability = lambda hass, target: f"by-{target.entry.unique_id}" if hass is None else None
-    monkeypatch.setitem(REGISTRY.integrations, "shelly", named)
-    result = await run_one(ha, suite(tmp_path, WAITS.format(roles="switch_plug")), profile(switch_plug="switch.plug"))
-    assert (
-        table(result.suites[0])[-1] == "| `idle[switch_plug]` | `switch` (switch_plug) | `by-aabbcc-switch:0` | pass |"
-    )
+    ha = group_ha(forget_members)
+    text = calls("call: {duration: 1}", "wait: 0", roles="group")
+    assert await capability_cell(tmp_path, ha, text, profile(group="light.room")) == "`CCT`"
 
 
 def test_a_saved_case_keeps_its_classes():
@@ -2359,9 +2493,8 @@ tests:
       - expect_response: {integration: self}
 """
 ENTRY_REGISTRY = SimpleNamespace(
-    adapter=lambda action, integration: SimpleNamespace(
-        scope=SimpleNamespace(confirmable=False, capabilities=None, options=frozenset())
-    )
+    integrations={},
+    adapter=lambda action, integration: SimpleNamespace(scope=SimpleNamespace(confirmable=False, options=frozenset())),
 )
 STORED = {"brightness": 80}
 
