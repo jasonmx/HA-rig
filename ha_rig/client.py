@@ -279,6 +279,15 @@ class HAClient:
             response.raise_for_status()
             return await response.json()
 
+    async def device_diagnostics(self, device: dict) -> dict:
+        """The diagnostics HA's integration gives for a device-registry entry (`data` of /api/diagnostics), under its
+        primary config entry; admin only. ZHA's hold zigpy's own Basic-cluster `manufacturer` and `model`, which a
+        quirks v2 friendly name hides from the registry."""
+        entry = device.get("primary_config_entry") or next(iter(device.get("config_entries") or []), None)
+        if entry is None:
+            raise LookupError(f"device {device.get('id')} belongs to no config entry")
+        return (await self.rest("get", f"/api/diagnostics/config_entry/{entry}/device/{device['id']}"))["data"]
+
     async def error_log(self) -> str:
         """HA's current session log as text (`/api/error_log`, admin only)."""
         async with self._session.get(f"{self.url}/api/error_log") as response:
@@ -516,8 +525,14 @@ class HAClient:
         """Zigbee2MQTT's entry for `ieee` in its retained bridge/devices (`interview_completed` says it is in), or
         None."""
         wanted = normalize_ieee(ieee)
-        devices = await self._z2m_retained("devices")
-        return next((d for d in devices if normalize_ieee(d.get("ieee_address", "")) == wanted), None)
+        return next(
+            (d for d in await self.z2m_device_list() if normalize_ieee(d.get("ieee_address", "")) == wanted), None
+        )
+
+    async def z2m_device_list(self) -> list[dict]:
+        """Zigbee2MQTT's retained bridge/devices: an entry per device, with its `ieee_address` and its Zigbee
+        `model_id` (the Basic cluster's, where HA's registry holds Z2M's product code)."""
+        return await self._z2m_retained("devices")
 
     async def z2m_has_device(self, ieee: str) -> bool:
         """Whether Zigbee2MQTT's retained bridge/devices lists `ieee`."""

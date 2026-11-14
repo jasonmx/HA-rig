@@ -390,8 +390,8 @@ rig never sets it.
 
 ### Test records
 
-When every default case of an adapter that applies passes, the run stages its record, `<action>.md` at its path in the
-checkout, in `<report>.records/` next to its report, and writes it to the integration's records directory in the
+When every default case of an adapter that applies passes, the run stages its record, `<suite>.json` (or `.md`, below)
+at its path in the checkout, in `<report>.records/` next to its report, and writes it to the integration's records directory in the
 deviceside checkout only when the run ends cleanly: exit 0 (no failure, not stopped, the bulbs home, no unexpected
 DeviceSide log line) with a result for every case it planned (an unreachable skip isn't one). Any other end, a crash
 included, leaves the checkout untouched and prints the one command that promotes the staged records, `scripts/rig.py
@@ -401,28 +401,52 @@ ledger, and the next run at the same commit that ends cleanly, running any case,
 sits in the temp folder, which the OS may clear: when every selected case is saved there is no such run, and only
 `--promote` or `--fresh` writes the record.
 
-A record holds the date, a `Ran` row (`N passed, M skipped`), the Home Assistant version, the devices' model and
+**The format follows the checkout.** One with deviceside's record schema, `docs/test-records.schema.json`, gets JSON
+format 2, the schema's shape, and no markdown: the rig checks each record and `_facts.json` against that schema, from
+the checkout under test, and writes none it refuses, saying why (`ha_rig/schema.py`). It loads the schema before
+anything else, `--check` included, so a checkout without `jsonschema` (`uv sync` there adds it) stops the run before
+anything moves. `--promote` refuses markdown records staged for a checkout that has since moved to JSON: rerun their
+suites. A checkout without the schema, deviceside `main` before its records moved to JSON, gets markdown as below.
+
+A format 2 record holds its integration, action and any options, the date, the commit, the package tree, Home
+Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker
+string, firmware and class. On a Zigbee device the model ID and maker string are the device's own Basic-cluster ones:
+Z2M's `bridge/devices` `model_id` and `manufacturer` (HA's registry holds Z2M's product code and vendor), ZHA's
+device diagnostics' `model` and `manufacturer` (the registry holds a quirks v2 device's friendly name; zha's
+`unk_model` and `unk_manufacturer` read as null), and Hue's registry model ID and manufacturer, which HA takes from the
+bridge. Elsewhere they are HA's registry model ID and manufacturer. Either is null where the integration reports none,
+and the maker string is never a device name: a Tuya `TS011F` is hundreds of makers' plug. The class is as DeviceSide's
+response reported it for the target, a native group's member's from its `member_capabilities`, or null where it reported
+none (an integration that names no classes, or a device not placed yet). A response from before that map names a
+group's members' class only when they share one. A native group's test (`group`) lists
+its members, never the group, and a scene's (`group` too) its group's lights. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
+read as it ends and saved in the ledger; a case that ran with none noted (the lookup failed, or an older rig saved it)
+keeps its suite's record back, and a run at the same commit reruns just that case.
+
+A markdown record holds the date, a `Ran` row (`N passed, M skipped`), the Home Assistant version, the devices' model and
 firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row), its Package row (the integration's package tree at that commit, which a sign-off is checked by) and Result. It needs every
 default case that applies to pass. The only skips it allows are of fact cases, which it always lists as `skipped`,
 whatever they did in the run, and of cases that don't apply here: an action a test calls has no adapter, the profile
 lacks the role, or a group lacks the light the case targets. Any other skip, a failure, or a case not yet run (left out
 by `-k`, unreachable, or cut short) writes nothing until a later run at the same commit completes it (What runs, above).
-A record with fact cases ends with a line pointing to `_facts.md` and, for each, the latest row on file (``last on file
+A markdown record with fact cases ends with a line pointing to `_facts.md` and, for each, the latest row on file (``last on file
 2026-11-12, on Mini (`S3`), firmware `2.0`: fail``, or `none on file`), which only reports what is there. The record's
 Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
 off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's. A record never
 narrows to a profile: a run never overwrites one with a record that skips, as not applying (a role the profile lacks, a
-group without the light, no adapter), a case the record passed (Profiles, above). Facts live in `_facts.md`, never in a
-record.
+group without the light, no adapter), a case the record passed (Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
+a record.
 
 ### Facts
 
-`_facts.md`, in each integration's records directory (`ha_rig/facts.py`), holds what the fact cases found: one row per
+`_facts.md`, or `_facts.json` in a checkout whose records are JSON, in each integration's records directory
+(`ha_rig/facts.py`), holds what the fact cases found: one row per
 firmware fact's automated case that passed or failed, and per watched case a person answered (`pass` if you saw it,
 `fail` for a `n`; a step that broke, or nobody there, adds nothing). A row holds the date, the suite (case ids repeat
 across suites), the case, its kind, which says how the fact was seen (`automated` or `observed`), the devices it ran on
 with their firmware (a group's members included, as a record's Device row names them) and the result. The file is only
 ever appended to, a row as each case ends, straight into the checkout, whether or not a record is written and however
 the run ends, except while the step files are uncommitted (The ledger, above): a fact stands whatever the code, until evidence contradicts it, and a line the rig can't read stays as it
-is. Nothing reruns a fact case by itself, and the rig decides nothing from the rows. Review the diff before committing
-it.
+is. `_facts.json` is rewritten to add a row, with every row already there left as it was; one the rig can't read stays
+as it is, and the run prints the row to add by hand. Its rows' devices are as a format 2 record's. Nothing reruns a fact
+case by itself, and the rig decides nothing from the rows. Review the diff before committing it.

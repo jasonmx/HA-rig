@@ -8,7 +8,8 @@ this rig's main checkout.
 
 Its step files, the test plan, live in `tests/rig/steps/` (STEPS, shared) and `tests/integrations/<x>/rig/` (an
 integration's own, integration_steps_dirs), and its test records in
-`docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out.
+`docs/integrations/<integration>/test-records/` (RECORDS), as deviceside lays them out: JSON where the checkout has
+the records' schema (SCHEMA, ha_rig/schema.py), else markdown.
 
 What needs testing is deviceside's to say: `signoffs_needed` asks its release check (SIGNOFFS) for the integrations
 still needing a sign-off, the run selection of --signoffs.
@@ -28,6 +29,7 @@ COMPONENT = "custom_components/deviceside"
 STEPS = "tests/rig/steps"  # deviceside's shared step files, one per action
 INTEGRATIONS = "tests/integrations"  # deviceside's integration test packages: each one's own step files are in its rig/
 RECORDS = "docs/integrations/{integration}/test-records"  # deviceside's test records directory, per integration
+SCHEMA = "docs/test-records.schema.json"  # deviceside's test-record schema: JSON records where a checkout has it
 SIBLINGS = ("deviceside", "device-side")
 SIGNOFFS = ("scripts/check_release.py", "--signoffs", "--json")  # deviceside's list of integrations needing a sign-off
 UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner

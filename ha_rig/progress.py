@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 
-from .engine import Case, CaseResult, Device, Outcome, Suite, SuiteResult, opt_in
+from .engine import RAN, Case, CaseResult, Device, Outcome, Reached, Suite, SuiteResult, opt_in
 from .journal import write_whole
 
 DIRECTORY = "deviceside-rig-progress"
@@ -68,11 +68,15 @@ def _old(entry: dict, now: datetime.datetime) -> bool:
     return now - touched > datetime.timedelta(days=PRUNE_DAYS)
 
 
-def holds(case: Case, result: CaseResult, unattended: bool) -> bool:
+def holds(case: Case, result: CaseResult, unattended: bool, devices: bool = False) -> bool:
     """Whether a saved result still stands for `case` on resume: the profile skips it for the same reason, or it moved
-    the entities the case plans now. A `not observed` stands only for an unattended run."""
+    the entities the case plans now. A `not observed` stands only for an unattended run. With `devices` (JSON
+    records, which list what each case reached), a case that ran saved with none (the lookup failed, or an older rig
+    saved it) doesn't."""
     if case.skip and not case.unreachable:  # an unreachable skip is for now: what it saved before still stands
         return result.outcome is Outcome.SKIPPED and result.detail == case.skip
+    if devices and result.outcome in RAN and not result.reached:
+        return False
     if result.outcome is Outcome.NOT_OBSERVED:
         return unattended
     return result.outcome is not Outcome.SKIPPED and result.entity_ids == tuple(case.entities.values())
@@ -109,10 +113,18 @@ class Progress:
         self.suites[suite.integration, suite.name] = suite
 
     def resume(
-        self, suite: Suite, commit: str, planned: Iterable[Case], *, fresh: bool = False, unattended: bool = False
+        self,
+        suite: Suite,
+        commit: str,
+        planned: Iterable[Case],
+        *,
+        fresh: bool = False,
+        unattended: bool = False,
+        devices: bool = False,
     ) -> None:
         """Track `suite` at `commit`, keeping the saved results that still hold for the cases it
-        `planned`. `fresh` (--fresh), or a saved failure, drops the suite's entry, so it runs whole."""
+        `planned` (holds, with `devices` for JSON records). `fresh` (--fresh), or a saved failure, drops the suite's
+        entry, so it runs whole."""
         self.track(suite, commit)
         saved = self.saved(suite)
         if fresh or _failed(suite, saved.values()):
@@ -124,7 +136,7 @@ class Progress:
             [
                 case_id
                 for case_id, result in saved.items()
-                if case_id not in by_id or not holds(by_id[case_id], result, unattended)
+                if case_id not in by_id or not holds(by_id[case_id], result, unattended, devices)
             ],
         )
 
@@ -302,4 +314,5 @@ def _result(case: dict) -> CaseResult:
         absent=case.get("absent", False),
         classes=tuple(case.get("classes", ())),
         inapplicable=case.get("inapplicable", case.get("absent", False)),
+        reached=tuple(Reached(**device) for device in case.get("reached", ())),
     )
