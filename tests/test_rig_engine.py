@@ -1432,13 +1432,23 @@ async def test_a_record_of_an_integration_naming_classes_has_the_class_each_targ
     assert engine.Record.read(path).passed == {"idle[switch_plug]", "idle[light_color]", "idle[light_ct]"}
 
 
-def test_a_skipped_case_reads_a_dash_whatever_class_it_holds(tmp_path):
+def test_only_a_pass_credits_a_class(tmp_path):
     steps = suite(tmp_path, WAITS.format(roles="switch_plug"))
-    skipped = CaseResult("idle[switch_plug]", "switch_plug", None, Outcome.SKIPPED, "no adapter", classes=("Switch",))
-    assert (
-        table(SuiteResult(steps, [skipped], True, classes=True))[-1]
-        == "| `idle[switch_plug]` | switch_plug | - | skipped |"
-    )
+    rows = [
+        CaseResult("idle[switch_plug]", "switch_plug", None, Outcome.SKIPPED, "no adapter", classes=("Switch",)),
+        CaseResult("idle[switch_plug]", "switch_plug", "switch", Outcome.FAIL, classes=("Switch",)),
+    ]
+    assert table(SuiteResult(steps, rows, True, classes=True))[2:] == [
+        "| `idle[switch_plug]` | switch_plug | - | skipped |",
+        "| `idle[switch_plug]` | `switch` (switch_plug) | - | fail |",
+    ]
+
+
+async def test_a_failed_case_looks_no_class_up(tmp_path):
+    ha = shelly_ha(switch_plug="aabbcc-switch:0")
+    text = WAITS.format(roles="switch_plug").replace("wait: 0", "expect_state: {state: on}")
+    result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug"))
+    assert [(case.outcome, case.classes) for case in result.suites[0].cases] == [(Outcome.FAIL, ())]
 
 
 async def test_a_groups_capability_lists_its_members_classes_once_each_sorted(tmp_path):
@@ -1466,6 +1476,26 @@ async def test_an_integration_naming_no_classes_keeps_three_columns(tmp_path):
         "|---|---|---|",
         "| `idle[light_ct]` | `light` (light_ct) | pass |",
     ]
+
+
+def test_the_stand_in_target_has_every_field_of_deviceside_s():
+    from custom_components.deviceside.core.models import Target
+
+    target = engine.stand_in_target("light.a", "shelly", {"unique_id": "u"}, None, None)
+    assert set(vars(target)) == {field.name for field in dataclasses.fields(Target)}
+
+
+async def test_the_integration_names_the_class_once_deviceside_has_it_there(tmp_path, monkeypatch):
+    """IntegrationInfo.capability (deviceside's device-classes plan, step 3) wins over the adapter's capability()."""
+    ha = shelly_ha(switch_plug="aabbcc-switch:0")
+    shelly = REGISTRY.integrations["shelly"]
+    named = SimpleNamespace(**{name: getattr(shelly, name) for name in ("key", "title", "ha_domain")})
+    named.capability = lambda hass, target: f"by-{target.entry.unique_id}" if hass is None else None
+    monkeypatch.setitem(REGISTRY.integrations, "shelly", named)
+    result = await run_one(ha, suite(tmp_path, WAITS.format(roles="switch_plug")), profile(switch_plug="switch.plug"))
+    assert (
+        table(result.suites[0])[-1] == "| `idle[switch_plug]` | `switch` (switch_plug) | `by-aabbcc-switch:0` | pass |"
+    )
 
 
 def test_a_saved_case_keeps_its_classes():
