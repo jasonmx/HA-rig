@@ -110,6 +110,7 @@ import argparse
 import asyncio
 import contextlib
 import datetime
+import functools
 import json
 import os
 import re
@@ -188,6 +189,7 @@ from ha_rig.progress import Done, Progress  # noqa: E402
 from ha_rig.roam import BLUETOOTH_RESET, NAMES, Bulb, GroupError, Roamer, RoamError  # noqa: E402
 from ha_rig.roam import plan_lines as roam_plan_lines  # noqa: E402
 from ha_rig.runlogs import HA_DOMAINS, DebugLevels, RunLogs, ha_domains  # noqa: E402
+from ha_rig.schema import RecordSchema  # noqa: E402
 from ha_rig.staging import Staging, display  # noqa: E402
 
 SERVICE = ("deviceside", "turn_on_for")
@@ -196,6 +198,16 @@ SERVICE = ("deviceside", "turn_on_for")
 def checkout_records(integration: str) -> Path:
     """The integration's test records directory in the checkout under test (target.test_records_dir)."""
     return test_records_dir(REPO, integration)
+
+
+def record_schema() -> RecordSchema | None:
+    """The checkout's test-record schema, for JSON format 2 records; None for markdown (ha_rig/schema.py)."""
+    return _schema(REPO)
+
+
+@functools.cache
+def _schema(repo: Path) -> RecordSchema | None:
+    return RecordSchema.load(repo)
 
 
 # HA's bootstrap stage-1 (120 s) and stage-2 (300 s) timeouts, after which a stuck dependency is let go, plus the
@@ -1032,6 +1044,7 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     )
     if args.check:
         return setup
+    record_schema()  # before anything moves: a schema jsonschema can't load would leave the run no record to write
     setup.deploy = deploy_state(env.get("RIG_STATUS_CMD", ""))
     if setup.withholds:
         print(UNCOMMITTED_STEPS)
@@ -2217,15 +2230,15 @@ def observing(
     registry: AdapterRegistry, progress: Progress | None, facts: bool = True
 ) -> Callable[[Suite, CaseResult], None]:
     """run's `on_result`: save the case in `progress`, and, unless `facts` is False (step files that aren't HEAD's),
-    append what an opt-in case found to the checkout's _facts.md, dated now. A fact stands whatever the code
-    (ha_rig/facts.py), so it is written as each case ends, however the run does: with no commit, a failed run, or one
-    cut short."""
+    append what an opt-in case found to the checkout's _facts.md (or _facts.json), dated now. A fact stands whatever
+    the code (ha_rig/facts.py), so it is written as each case ends, however the run does: with no commit, a failed run,
+    or one cut short."""
 
     def on_result(suite: Suite, case: CaseResult) -> None:
         if progress is not None:
             progress.record(suite, case)
         today = datetime.date.today().isoformat()
-        if facts and (path := write_fact(suite, case, registry, checkout_records, today)):
+        if facts and (path := write_fact(suite, case, registry, checkout_records, today, record_schema())):
             print(f"Wrote {display(path, REPO)}; review the diff before committing it.")
 
     return on_result
@@ -2281,17 +2294,26 @@ async def report(
     def package_tree(integration: str) -> str:
         return git("rev-parse", "--short=12", f"{commit}:{COMPONENT}/integrations/{integration}")
 
-    source = f"rig run (`scripts/rig.py`), commit `{git('rev-parse', '--short', commit)}`"
+    short = git("rev-parse", "--short", commit)
+    source = f"rig run (`scripts/rig.py`), commit `{short}`"
     if touched is not None:
         result = RunResult([part for part in result.suites if (part.suite.integration, part.suite.name) in touched])
     written, kept = await write_records(
-        result, registry, checkout_records, today, source, into=staging.test_records_dir, package=package_tree
+        result,
+        registry,
+        checkout_records,
+        today,
+        source,
+        into=staging.test_records_dir,
+        package=package_tree,
+        schema=record_schema(),
+        commit=short,
     )
     by_path = {
-        staging.test_records_dir(part.suite.integration) / f"{part.suite.name}.md": part.suite for part in result.suites
+        (staging.test_records_dir(part.suite.integration), part.suite.name): part.suite for part in result.suites
     }
     for path in written:
-        suite = by_path.get(path)
+        suite = by_path.get((path.parent, path.stem))
         staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
     for path, narrowed in kept:
         print(

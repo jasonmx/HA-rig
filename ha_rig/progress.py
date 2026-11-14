@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 
-from .engine import Case, CaseResult, Device, Outcome, Suite, SuiteResult, opt_in
+from .engine import Case, CaseResult, Device, Outcome, Reached, Suite, SuiteResult, opt_in
 from .journal import write_whole
 
 DIRECTORY = "deviceside-rig-progress"
@@ -302,4 +302,5 @@ def _result(case: dict) -> CaseResult:
         absent=case.get("absent", False),
         classes=tuple(case.get("classes", ())),
         inapplicable=case.get("inapplicable", case.get("absent", False)),
+        reached=tuple(Reached(**device) for device in case.get("reached", ())),
     )

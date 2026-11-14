@@ -1,4 +1,5 @@
-"""Runs deviceside's YAML step files against the live HA and renders test records from the results.
+"""Runs deviceside's YAML step files against the live HA and renders test records from the results: JSON format 2
+where the checkout has deviceside's record schema (ha_rig/schema.py), else markdown.
 
 The step files are the checkout under test's (`tests/rig/steps/`, target.steps_dir). One file per action
 (`<action>.yaml`) runs on every integration in the profile that has that action's adapter; a file with `options`
@@ -11,6 +12,7 @@ import ast
 import asyncio
 import contextlib
 import datetime
+import json
 import logging
 import operator
 import re
@@ -28,12 +30,14 @@ import yaml
 from . import target as checkout
 from .baseline import Baseline
 from .bridge import BridgeError, HueBridge
-from .client import HAClient, HAError, device_ieee
-from .facts import AUTOMATED, FAIL, PASS, Fact, FactsFile, append
+from .client import Z2M, HAClient, HAError, device_ieee
+from .facts import AUTOMATED, FAIL, PASS, Fact, FactsFile, append, append_json
 from .facts import FILE as FACTS_FILE
+from .facts import JSON_FILE as JSON_FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
-from .profile import ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile
+from .profile import ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile, normalize_ieee
+from .schema import FORMAT, RecordSchema
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -824,6 +828,12 @@ def reported_classes(entry: Any) -> frozenset[str] | None:
     return None
 
 
+def _one_class(entry: Any) -> str | None:
+    """The one class a response entry reports (reported_classes), or None for none or several."""
+    classes = reported_classes(entry)
+    return next(iter(classes)) if classes is not None and len(classes) == 1 else None
+
+
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
     """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
@@ -1064,6 +1074,10 @@ class Outcome(StrEnum):
     NOT_RUN = "not run"  # the case never tested DeviceSide (coordinator busy); never saved, so a resume runs it again
 
 
+# The outcomes of a case that ran, which a format 2 record lists with the devices it reached.
+RAN = frozenset({Outcome.PASS, Outcome.FAIL, Outcome.NOT_OBSERVED})
+
+
 @dataclass(slots=True)
 class CaseResult:
     id: str
@@ -1080,6 +1094,9 @@ class CaseResult:
     devices: tuple[Device, ...] = ()
     # The classes its target reached (reached_classes), for an integration that names them; empty for none.
     classes: tuple[str, ...] = ()
+    # A case that ran (RAN): the devices it reached, each with its model ID, firmware and class (_CaseRun.reached),
+    # for a format 2 record and _facts.json row. Saved, so a resumed suite has them; empty when the lookup failed.
+    reached: tuple[Reached, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1588,10 +1605,10 @@ class _CaseRun:
         self.journal, self.journal_key = journal, journal_key
         self.response: dict | None = None
         # For each call of the tested action on the case's own target, outside setup, that returned a response, its
-        # entries for the target (else for the members it has): what the case's classes are read from. Another
-        # action's call can reach other members of a group (one action refuses a class another serves), so it
-        # credits none.
-        self.answers: list[list[Any]] = []
+        # entries for the target (else for the members it has), by entity: what the case's classes are read from.
+        # Another action's call can reach other members of a group (one action refuses a class another serves), so
+        # it credits none.
+        self.answers: list[dict[str, Any]] = []
         self.error: HAError | None = None
         self.last_action = case.suite.action
         self.query = False
@@ -1671,10 +1688,19 @@ class _CaseRun:
                 await self.baseline.release()
         if await self.met_busy_coordinator():
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
-        elif fact_kind(case.suite, result):
+        else:
+            await self.note_reached(result)
+        return result
+
+    async def note_reached(self, result: CaseResult) -> None:
+        """What the case reached, on its result once it has its outcome: a fact's devices for its _facts.md row, the
+        classes for a markdown record's Capability column, and, for a case that ran, the devices for a format 2
+        record and _facts.json row."""
+        if fact_kind(self.case.suite, result):
             result.devices = await self.fact_devices()
         result.classes = await self.reached_classes(result.outcome)
-        return result
+        if result.outcome in RAN:
+            result.reached = await self.reached()
 
     async def reached_classes(self, outcome: Outcome) -> tuple[str, ...]:
         """The classes the case's target reached, sorted, each once, as DeviceSide's responses report them, when it
@@ -1688,7 +1714,7 @@ class _CaseRun:
             return ()
         found: set[str] = set()
         for entries in self.answers:
-            if not entries or None in (classes := [reported_classes(entry) for entry in entries]):
+            if not entries or None in (classes := [reported_classes(entry) for entry in entries.values()]):
                 return ()
             found.update(*classes)
         return tuple(sorted(found))
@@ -1699,11 +1725,58 @@ class _CaseRun:
         tested = action == self.case.suite.action and not self.in_setup
         return tested and entity_id == self.case.entities[self.case.role] and self.response is not None
 
-    async def entries(self, response: dict, entity_id: str) -> list[Any]:
-        """The response's entry for the entity, else its entries for those of the entity's members it has."""
+    async def entries(self, response: dict, entity_id: str) -> dict[str, Any]:
+        """The response's entry for the entity, else its entries for those of the entity's members it has, by
+        entity."""
         if entity_id in response:
-            return [response[entity_id]]
-        return [response[member] for member in await self.members(entity_id) if member in response]
+            return {entity_id: response[entity_id]}
+        return {member: response[member] for member in await self.members(entity_id) if member in response}
+
+    async def reached(self) -> tuple[Reached, ...]:
+        """The devices the case reached (reached_entities), each with its model ID, firmware and the class its calls
+        reached (entity_classes), for a format 2 record and _facts.json row; none when the lookup fails, which costs
+        the record (a test that ran must list its devices), not the case."""
+        try:
+            entity_ids = await self.reached_entities()
+            return await reached_devices(self.ha, entity_ids, self.entity_classes(entity_ids))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Could not read the devices %s reached, so its suite writes no record: %s",
+                self.case.id,
+                err,
+            )
+            return ()
+
+    async def reached_entities(self) -> list[str]:
+        """The entities whose devices the case reached, each once, in role order: a native group's members, never the
+        group's own entity, and every other one but a scene's, which has no device (a scene case reaches its group's
+        lights). A light a step targets is one of the case's group in every step file today."""
+        found: list[str] = []
+        for role, entity_id in self.case.entities.items():
+            if role != "scene":
+                found += await self.members(entity_id)
+        return list(dict.fromkeys(found))
+
+    def entity_classes(self, entity_ids: list[str]) -> dict[str, str | None]:
+        """Each reached entity's class, as the responses read for the case's classes (answers) report it: the
+        target's entry, whose class every entity behind it reached (a native group's `capabilities` names a member's
+        only when it lists one class), else a member's own entry, where the response answered member by member. None
+        where the integration names no classes, no response gave the entity one, the calls disagree, or a group's
+        entry lists several classes without saying whose is whose."""
+        seen: dict[str, set[str | None]] = {entity_id: set() for entity_id in entity_ids}
+        if not names_classes(self.registry, self.case.suite):
+            return dict.fromkeys(entity_ids)
+        target = self.case.entities[self.case.role]
+        behind = [target] if target in seen else entity_ids  # a group's members, or a scene's lights
+        for entries in self.answers:
+            if target in entries:
+                for entity_id in behind:
+                    seen[entity_id].add(_one_class(entries[target]))
+            else:
+                for entity_id in entity_ids:
+                    if entity_id in entries:
+                        seen[entity_id].add(_one_class(entries[entity_id]))
+        return {entity_id: next(iter(found)) if len(found) == 1 else None for entity_id, found in seen.items()}
 
     async def fact_devices(self) -> tuple[Device, ...]:
         """The devices behind the case's entities, a group's members included, for its _facts.md row; none when the
@@ -2717,6 +2790,62 @@ async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[
     return config["version"], list(found)
 
 
+@dataclass(frozen=True, slots=True)
+class Reached:
+    """A device a case reached, as a format 2 record and _facts.json row list it (deviceside's schema: test_device)."""
+
+    model: str | None  # its model ID (record_model); a record naming none doesn't hold to the schema
+    firmware: str | None
+    capability: str | None = None  # the class its call reached; None where the response named none
+
+    def as_json(self) -> dict:
+        return {"model": self.model, "firmware": self.firmware, "class": self.capability}
+
+
+def record_model(device: dict, z2m_models: dict[str, str | None]) -> str | None:
+    """The model ID a format 2 record names for a device-registry entry: a Zigbee device's own (the Basic cluster's,
+    such as LWA012) on every integration, else HA's registry `model_id`. Z2M's is its bridge/devices `model_id`
+    (`z2m_models`, by IEEE), as HA's registry holds Z2M's product code (9290018217); ZHA's is the registry `model`. A
+    Hue device's registry `model_id` is the bridge's product_data.model_id, which HA's Hue integration copies."""
+    if (ieee := device_ieee(device, Z2M)) is not None:
+        return z2m_models.get(normalize_ieee(ieee))
+    if device_ieee(device, "zha") is not None:
+        return device.get("model")
+    return device.get("model_id")
+
+
+async def reached_devices(
+    ha: HAClient, entity_ids: Iterable[str], classes: dict[str, str | None]
+) -> tuple[Reached, ...]:
+    """The devices behind the entities, each once in their order, with each entity's class from `classes`: two
+    entities of one device that reached different classes give it none. Z2M's bridge/devices is read only for a Z2M
+    device, on a connection that may subscribe to MQTT (the admin one a Z2M suite runs on). Raises LookupError for an
+    entity HA's registry has no device for: a record can't name what it reached."""
+    listed, registered = await asyncio.gather(
+        ha.command({"type": "config/entity_registry/list_for_display"}),
+        ha.command({"type": "config/device_registry/list"}),
+    )
+    device_ids = {entry["ei"]: entry.get("di") for entry in listed["entities"]}
+    devices = {device["id"]: device for device in registered}
+    z2m_models: dict[str, str | None] | None = None
+    found: dict[str, Reached] = {}
+    for entity_id in entity_ids:
+        if (device := devices.get(device_ids.get(entity_id))) is None:
+            raise LookupError(f"HA's registry has no device for {entity_id}")
+        if z2m_models is None and device_ieee(device, Z2M) is not None:
+            z2m_models = {
+                normalize_ieee(entry.get("ieee_address", "")): entry.get("model_id")
+                for entry in await ha.z2m_device_list()
+            }
+        model, firmware = record_model(device, z2m_models or {}), device.get("sw_version") or None
+        reached = Reached(model, firmware, classes.get(entity_id))
+        if (known := found.get(device["id"])) is None:
+            found[device["id"]] = reached
+        elif known.capability != reached.capability:
+            found[device["id"]] = replace(known, capability=None)
+    return tuple(found.values())
+
+
 CITED_COMMIT = re.compile(r"^\| Source \|.*\bcommit `([0-9a-f]{7,40})`", re.MULTILINE)  # deviceside's Source row
 DATE = re.compile(r"^\| Date \| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
 OLD_FACT_MARK = " (firmware fact)"  # after a firmware fact's PASS in an older record's Tests table: read, never written
@@ -2725,8 +2854,9 @@ CASE_ROW = re.compile(r"^\| `([^`]+)` \|.*\| ([^|]*?) \|$", re.MULTILINE)  # id,
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    """What the rig reads from a test record: the commit it cites, its date, the case IDs in its Tests table and
-    which of them passed or were skipped (a record writes no skip detail)."""
+    """What the rig reads from a test record: the commit it cites, its date, the case IDs in its Tests table (a JSON
+    record's `tests`) and which of them passed or were skipped (a markdown record writes no skip detail; a JSON one's
+    fact case reads as skipped)."""
 
     path: Path
     commit: str | None
@@ -2739,6 +2869,8 @@ class Record:
     def read(cls, path: Path) -> Record | None:
         if not path.is_file():
             return None
+        if path.suffix == ".json":
+            return cls._read_json(path)
         text = path.read_text()
         cited, date = CITED_COMMIT.search(text), DATE.search(text)
         _, _, tests = text.partition("## Tests")
@@ -2747,6 +2879,25 @@ class Record:
             path,
             cited and cited[1],
             date and date[1],
+            frozenset(case_id for case_id, _ in rows),
+            frozenset(case_id for case_id, result in rows if result == Outcome.PASS),
+            frozenset(case_id for case_id, result in rows if result == Outcome.SKIPPED),
+        )
+
+    @classmethod
+    def _read_json(cls, path: Path) -> Record:
+        """A JSON record, format 1 or 2; one the rig can't read holds nothing, as a markdown one with no table."""
+        try:
+            data = json.loads(path.read_text())
+            source, tests = data.get("source") or {}, data.get("tests") or []
+            rows = [(test["id"], Outcome.SKIPPED if test.get("fact") else test.get("result")) for test in tests]
+            commit, date = source.get("commit"), data.get("date")
+        except ValueError, AttributeError, KeyError, TypeError:
+            return cls(path, None, None, frozenset())
+        return cls(
+            path,
+            commit if isinstance(commit, str) else None,
+            date if isinstance(date, str) else None,
             frozenset(case_id for case_id, _ in rows),
             frozenset(case_id for case_id, result in rows if result == Outcome.PASS),
             frozenset(case_id for case_id, result in rows if result == Outcome.SKIPPED),
@@ -2807,6 +2958,44 @@ def render_record(
     return "\n".join(lines) + "\n"
 
 
+def record_json(suite_result: SuiteResult, ha_version: str, date: str, commit: str, package: str | None) -> dict:
+    """The format 2 record (deviceside's docs/test-records.schema.json): the suite's action and options, the run, and
+    a test per case in the suite's order, each case that ran with the devices it reached, a native group's its
+    members. No counts, notes or facts: deviceside derives what it needs from the tests, and facts are _facts.json's."""
+    suite = suite_result.suite
+    record: dict[str, Any] = {"format": FORMAT, "integration": suite.integration, "action": suite.action}
+    if suite.file.options:
+        record["options"] = sorted(suite.file.options)
+    record |= {
+        "result": "pass",
+        "date": date,
+        "source": {"kind": "rig", "commit": commit},
+        "package": package,
+        "home_assistant": ha_version,
+        "tests": [_test_json(suite, case) for case in suite_result.cases],
+    }
+    return record
+
+
+def _test_json(suite: Suite, case: CaseResult) -> dict:
+    """A record's test: a fact case skipped as one (its result is _facts.json's), a skipped case with its skip's
+    detail, a case that ran with its domain and devices."""
+    if opt_in(suite, case.id):
+        return {"id": case.id, "role": case.role, "result": str(Outcome.SKIPPED), "fact": True}
+    if case.outcome is Outcome.SKIPPED:
+        return {"id": case.id, "role": case.role, "result": str(Outcome.SKIPPED), "reason": case.detail}
+    test: dict[str, Any] = {"id": case.id, "domain": case.domain, "role": case.role, "result": str(case.outcome)}
+    if case.role in GROUP_ROLES:
+        test["group"] = True
+    test["devices"] = [device.as_json() for device in case.reached]
+    return test
+
+
+def record_name(suite: Suite, schema: RecordSchema | None) -> str:
+    """The suite's record's file name: JSON where the checkout has deviceside's schema, else markdown."""
+    return f"{suite.name}.json" if schema is not None else f"{suite.name}.md"
+
+
 Records = Callable[[str], Path]  # an integration's test records directory (the runner's: target.test_records_dir)
 
 
@@ -2838,6 +3027,10 @@ async def write_records(
     source: str,
     into: Records | None = None,
     package: Callable[[str], str] | None = None,
+    *,
+    schema: RecordSchema | None = None,
+    commit: str | None = None,
+    out: Callable[[str], None] = print,
 ) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
@@ -2848,7 +3041,11 @@ async def write_records(
     those case IDs (its `records` path). To narrow on purpose, delete the record.
 
     `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
-    after Source: what deviceside's release check compares to the tree that ships."""
+    after Source: what deviceside's release check compares to the tree that ships.
+
+    With the checkout's `schema`, each record is JSON format 2 (record_json) citing `commit`, the run's (abbreviated),
+    in place of `source`, and is written only once the schema takes it: one it refuses is said in `out`, and written
+    nowhere. Without, markdown (render_record)."""
     written, kept = [], []
     into = into or records
     for suite_result in result.suites:
@@ -2856,18 +3053,32 @@ async def write_records(
             continue
         suite = suite_result.suite
         title = registry.integrations[suite.integration].title
-        path = records(suite.integration) / f"{suite.name}.md"
+        path = records(suite.integration) / record_name(suite, schema)
         if narrowed := narrows(suite_result.cases, Record.read(path)):
             kept.append((path, narrowed))
             continue
-        path = into(suite.integration) / f"{suite.name}.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        facts = FactsFile.read(records(suite.integration) / FACTS_FILE)
+        path = into(suite.integration) / record_name(suite, schema)
         tree = package(suite.integration) if package else None
-        record = render_record(
-            suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts, tree
-        )
-        path.write_text(record)
+        if schema is not None:
+            ran = [case for case in suite_result.cases if case.outcome in RAN and not opt_in(suite, case.id)]
+            if blind := [case.id for case in ran if not case.reached]:
+                out(
+                    f"{suite.integration} / {suite.name}: no record, as no devices were noted for {', '.join(blind)} "
+                    "(the registry lookup failed, or an older rig saved them): rerun it with --fresh"
+                )
+                continue
+            try:
+                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit or "", tree))
+            except ValueError as err:  # InvalidRecord
+                out(f"{suite.integration} / {suite.name}: {err}")
+                continue
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            facts = FactsFile.read(records(suite.integration) / FACTS_FILE)
+            record = render_record(
+                suite_result, title, suite_result.ha_version, suite_result.devices, date, source, facts, tree
+            )
+            path.write_text(record)
         written.append(path)
     return written, kept
 
@@ -2890,14 +3101,40 @@ def fact_kind(suite: Suite, case: CaseResult) -> str | None:
     return None
 
 
-def write_fact(suite: Suite, case: CaseResult, registry: Any, records: Records, date: str) -> Path | None:
+def write_fact(
+    suite: Suite,
+    case: CaseResult,
+    registry: Any,
+    records: Records,
+    date: str,
+    schema: RecordSchema | None = None,
+    out: Callable[[str], None] = print,
+) -> Path | None:
     """Append what one fact case found to its integration's _facts.md in `records`, dated now: each row is
     written once, when its case ends, so a later report or an interrupted run can't re-date it or lose it. None for a
-    result that is no fact (fact_kind), or whose devices couldn't be read."""
-    if (kind := fact_kind(suite, case)) is None or not case.devices:
+    result that is no fact (fact_kind), or whose devices couldn't be read.
+
+    With the checkout's `schema`, the row goes to _facts.json, with the devices the case reached (CaseResult.reached),
+    once the schema takes the file; a file the rig can't read, or a row the schema refuses, is left as it was, and
+    the row is said in `out` instead, so the fact isn't lost."""
+    if (kind := fact_kind(suite, case)) is None:
+        return None
+    result = PASS if case.outcome is Outcome.PASS else FAIL
+    if schema is not None:
+        if not case.reached:
+            return None
+        path = records(suite.integration) / JSON_FACTS_FILE
+        row = {"date": date, "suite": suite.name, "test": case.id, "kind": kind, "result": result}
+        row["devices"] = [device.as_json() for device in case.reached]
+        try:
+            append_json(path, suite.integration, row, schema)
+        except ValueError as err:
+            out(f"Not written to {path.name} ({err}); add the row by hand: {json.dumps(row)}")
+            return None
+        return path
+    if not case.devices:
         return None
     path = records(suite.integration) / FACTS_FILE
-    result = PASS if case.outcome is Outcome.PASS else FAIL
     append(
         path,
         registry.integrations[suite.integration].title,

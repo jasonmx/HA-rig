@@ -16,7 +16,7 @@ authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RE
 
 - `scripts/rig.py`: the runner; `scripts/deploy.sh`: its deploy, through `.env.rig`'s commands
 - `ha_rig/`: the engine, HA and Hue clients, locks, journal, baseline, roaming, run logs, profiles, the target
-  checkout (`target.py`) and the household terms for deviceside's check (`terms.py`)
+  checkout (`target.py`), its record schema (`schema.py`) and the household terms for deviceside's check (`terms.py`)
 - `tests/`: the rig's own tests, with fakes and fixture step files (`tests/steps/`); they import deviceside's registry
   and actions and read its step files from the target checkout, the step files only to check they parse
   (`tests/test_rig_steps.py`); the engine tests take adapters from a declared roster over that registry

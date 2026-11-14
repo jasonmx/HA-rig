@@ -516,8 +516,14 @@ class HAClient:
         """Zigbee2MQTT's entry for `ieee` in its retained bridge/devices (`interview_completed` says it is in), or
         None."""
         wanted = normalize_ieee(ieee)
-        devices = await self._z2m_retained("devices")
-        return next((d for d in devices if normalize_ieee(d.get("ieee_address", "")) == wanted), None)
+        return next(
+            (d for d in await self.z2m_device_list() if normalize_ieee(d.get("ieee_address", "")) == wanted), None
+        )
+
+    async def z2m_device_list(self) -> list[dict]:
+        """Zigbee2MQTT's retained bridge/devices: an entry per device, with its `ieee_address` and its Zigbee
+        `model_id` (the Basic cluster's, where HA's registry holds Z2M's product code)."""
+        return await self._z2m_retained("devices")
 
     async def z2m_has_device(self, ieee: str) -> bool:
         """Whether Zigbee2MQTT's retained bridge/devices lists `ieee`."""
