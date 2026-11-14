@@ -606,6 +606,7 @@ def test_a_fact_starts_facts_json_and_appends_leaving_every_row_as_it_was(tmp_pa
         "test": "halts[light_ct] observed",
         "kind": "observed",
         "result": "pass",
+        "converted": True,  # deviceside's conversion marks the rows it made from _facts.md
         "devices": [{"model": "LTA009", "name": "Hue white ambiance", "firmware": "1.163.1"}],
     }
     path = write_fact(steps, case, REGISTRY, records, "2026-11-14", SCHEMA_OF)
