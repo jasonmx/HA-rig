@@ -834,6 +834,18 @@ def _one_class(entry: Any) -> str | None:
     return next(iter(classes)) if classes is not None and len(classes) == 1 else None
 
 
+def _behind_class(entry: Any, entity_id: str) -> str | None:
+    """The class the target's entry reports for an entity behind it: a native group's `member_capabilities` (each
+    member's class by entity ID; one left out, unclassed or provisional, is None), else, as before deviceside's
+    response had that map, the entry's one class (_one_class), which a group's `capabilities` names only when its
+    members share it."""
+    members = entry.get("member_capabilities") if isinstance(entry, dict) else None
+    if isinstance(members, dict):
+        found = members.get(entity_id)
+        return found if isinstance(found, str) and found else None
+    return _one_class(entry)
+
+
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
     """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
@@ -1777,10 +1789,9 @@ class _CaseRun:
 
     def entity_classes(self, entity_ids: list[str], behind: list[str]) -> dict[str, str | None]:
         """Each reached entity's class, as the responses read for the case's classes (answers) report it: the
-        target's entry, whose class every entity `behind` it reached (a native group's `capabilities` names a member's
-        only when it lists one class), else a member's own entry, where the response answered member by member. None
-        where the integration names no classes, no response gave the entity one, the calls disagree, or a group's
-        entry lists several classes without saying whose is whose."""
+        target's entry for every entity `behind` it (_behind_class: a native group's `member_capabilities` names each
+        member's), else a member's own entry, where the response answered member by member. None where the integration
+        names no classes, no response gave the entity one, or the calls disagree."""
         seen: dict[str, set[str | None]] = {entity_id: set() for entity_id in entity_ids}
         if not names_classes(self.registry, self.case.suite):
             return dict.fromkeys(entity_ids)
@@ -1788,7 +1799,7 @@ class _CaseRun:
         for entries in self.answers:
             if target in entries:
                 for entity_id in behind:
-                    seen[entity_id].add(_one_class(entries[target]))
+                    seen[entity_id].add(_behind_class(entries[target], entity_id))
             else:
                 for entity_id in entity_ids:
                     if entity_id in entries:

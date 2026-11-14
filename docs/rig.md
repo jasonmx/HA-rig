@@ -416,8 +416,9 @@ device diagnostics' `model` and `manufacturer` (the registry holds a quirks v2 d
 `unk_model` and `unk_manufacturer` read as null), and Hue's registry model ID and manufacturer, which HA takes from the
 bridge. Elsewhere they are HA's registry model ID and manufacturer. Either is null where the integration reports none,
 and the maker string is never a device name: a Tuya `TS011F` is hundreds of makers' plug. The class is as DeviceSide's
-response reported it for the target, or null where it reported none (an integration that names no classes, a device not placed
-yet, or a native group listing several classes without saying whose is whose). A native group's test (`group`) lists
+response reported it for the target, a native group's member's from its `member_capabilities`, or null where it reported
+none (an integration that names no classes, or a device not placed yet). A response from before that map names a
+group's members' class only when they share one. A native group's test (`group`) lists
 its members, never the group, and a scene's (`group` too) its group's lights. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
 read as it ends and saved in the ledger; a case that ran with none noted (the lookup failed, or an older rig saved it)
 keeps its suite's record back, and a run at the same commit reruns just that case.

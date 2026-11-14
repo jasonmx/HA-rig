@@ -324,9 +324,30 @@ async def test_a_native_groups_test_lists_its_members_with_their_zigbee_model_id
     }
 
 
+async def test_an_older_groups_entry_without_the_map_names_a_members_class_only_when_they_share_one(tmp_path):
+    """A response from before deviceside named each member's class: one shared class covers every member."""
+    test = await group_test(tmp_path, {"light.z2m_room": {"status": "sent", "capabilities": ["hue"]}})
+    assert [device["class"] for device in test["devices"]] == ["hue", "hue"]
+
+
 async def test_a_group_listing_several_classes_names_none_for_a_member(tmp_path):
     test = await group_test(tmp_path, {"light.z2m_room": {"status": "sent", "capabilities": ["hue", "other"]}})
     assert [device["class"] for device in test["devices"]] == [None, None]
+
+
+async def test_a_mixed_groups_entry_names_each_members_class(tmp_path):
+    entry = {"status": "sent", "capabilities": ["hue", "other"]}
+    entry["member_capabilities"] = {"light.z2m_a": "hue", "light.z2m_b": "other"}
+    test = await group_test(tmp_path, {"light.z2m_room": entry})
+    assert [device["class"] for device in test["devices"]] == ["hue", "other"]
+
+
+async def test_a_member_its_groups_map_leaves_out_has_no_class(tmp_path):
+    """A member deviceside couldn't place, or placed provisionally, is left out of the map; `capabilities` goes too."""
+    test = await group_test(
+        tmp_path, {"light.z2m_room": {"status": "sent", "member_capabilities": {"light.z2m_a": "hue"}}}
+    )
+    assert [device["class"] for device in test["devices"]] == ["hue", None]
 
 
 async def test_a_group_answered_member_by_member_gives_each_its_own_class(tmp_path):

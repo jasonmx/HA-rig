@@ -46,9 +46,10 @@ and one against a JSON checkout no markdown fact's.
      bridge's `product_data.manufacturer_name`, which HA copies). Null where it reports none; never a device name.
    - `class`: from each call of the tested action on the case's own target outside setup (as the Capability column
      reads them, #85): the target's `capability`; a member's own entry where the response answered member by member;
-     a native group's `capabilities` when it lists one class, which every member then reached. Null when the
-     integration names no classes, a response leaves the class out (a device not placed yet), the calls disagree, or a
-     group lists several classes without saying whose is whose.
+     a native group's `member_capabilities`, each member's class by entity ID (DeviceSide#431; decided in the pair
+     review), and in a response from before that map its `capabilities` when it lists one class, which every member
+     then reached. Null when the integration names no classes, a response leaves the class out (a device not placed
+     yet, or a member the map leaves out), the calls disagree, or an older group's entry lists several classes.
 4. **The record**: `{format: 2, integration, action, options?, result: pass, date, source: {kind: rig, commit},
    package, home_assistant, tests}`; a test that ran `{id, domain, role, result, group?, devices}`, a skipped one
    `{id, role, result: skipped, reason}` (the skip detail), a fact case `{id, role, result: skipped, fact: true}`. No
