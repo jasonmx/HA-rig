@@ -2573,7 +2573,8 @@ async def check_roaming(
     env: dict, admin: HAClient | None, bulbs: list[RoamBulb], ha: HAClient, homes: set[str] = frozenset()
 ) -> list[str]:
     """Where each roaming bulb is, printed, and the problems: one on no network, or whose light is unavailable, or
-    one the networks couldn't be asked about."""
+    one the networks couldn't be asked about, or one locate stops on (live on two networks, a stale listing that
+    stays)."""
     if admin is None or not (env.get("HUE_BRIDGE_HOST") and env.get("HUE_APP_KEY")):
         return ["Can't find the roaming bulbs: that needs HA_ADMIN_TOKEN, HUE_BRIDGE_HOST and HUE_APP_KEY in .env.rig"]
     bridge = HueBridge(env["HUE_BRIDGE_HOST"], env["HUE_APP_KEY"])
@@ -2586,6 +2587,9 @@ async def check_roaming(
                 network = await finder.locate(bulb)
             except (BridgeError, HAError, OSError, aiohttp.ClientError, TimeoutError) as err:
                 problems.append(f"{bulb.entity_id}: can't tell which network it is on: {err or type(err).__name__}")
+                continue
+            except RoamError as err:  # live on two networks, a dead Hue listing, a stale listing that stays
+                problems.append(str(err))
                 continue
             state = await ha.get_state(bulb.entity_id)
             if network is None:
