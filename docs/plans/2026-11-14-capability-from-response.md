@@ -20,7 +20,8 @@ Pairs with DeviceSide's device-classes branches (step 4 onward); no Tests-with, 
    The adapter fallback goes. Every other integration keeps three columns; against DeviceSide `main` that is Shelly
    too.
 2. **Calls:** every DeviceSide call a test step sends (`call`) already asks for the response; nothing changes there.
-3. **The cell**, from each call on the case's own target (the role's entity) that returned a response: the entry
+3. **The cell**, from each call of the tested action on the case's own target (the role's entity), outside
+   setup, that returned a response (another action's call can reach other members of a group): the entry
    under that entity, else, for a group, its members' entries present in the response (an HA group DeviceSide
    expands, or a native group that fell back to its members, the refused member absent). `capability` (a string) is
    one class, `capabilities` (a list) a native group's members' classes. The cell is the sorted union over every

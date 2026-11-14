@@ -1587,8 +1587,10 @@ class _CaseRun:
         self.baseline: Baseline | None = None
         self.journal, self.journal_key = journal, journal_key
         self.response: dict | None = None
-        # For each call on the case's own target that returned a response, its entries for the target (else for the
-        # members it has): what the case's classes are read from.
+        # For each call of the tested action on the case's own target, outside setup, that returned a response, its
+        # entries for the target (else for the members it has): what the case's classes are read from. Another
+        # action's call can reach other members of a group (one action refuses a class another serves), so it
+        # credits none.
         self.answers: list[list[Any]] = []
         self.error: HAError | None = None
         self.last_action = case.suite.action
@@ -1676,7 +1678,8 @@ class _CaseRun:
 
     async def reached_classes(self, outcome: Outcome) -> tuple[str, ...]:
         """The classes the case's target reached, sorted, each once, as DeviceSide's responses report them, when it
-        passed: only a pass credits a class. Each call on the target that returned a response gives its entry for the
+        passed: only a pass credits a class. Each call of the tested action on the target (answers_for_class) gives
+        its entry for the
         target, else its entries for the target's members as they were when it answered (an HA group, which
         DeviceSide answers member by member, or a native group that fell back to its members, a refused one absent).
         None for an integration that names no classes, and none when any such entry reports no class, a call has no
@@ -1689,6 +1692,12 @@ class _CaseRun:
                 return ()
             found.update(*classes)
         return tuple(sorted(found))
+
+    def answers_for_class(self, action: str, entity_id: str) -> bool:
+        """Whether the call just answered is one the case's classes are read from: the tested action, on the case's
+        own target, outside setup, with a response."""
+        tested = action == self.case.suite.action and not self.in_setup
+        return tested and entity_id == self.case.entities[self.case.role] and self.response is not None
 
     async def entries(self, response: dict, entity_id: str) -> list[Any]:
         """The response's entry for the entity, else its entries for those of the entity's members it has."""
@@ -1973,7 +1982,7 @@ class _CaseRun:
             finally:
                 self.call_windows.append((sent_at, asyncio.get_running_loop().time()))
             self.call_times = self.call_windows[-1]
-            if entity_id == self.case.entities[self.case.role] and self.response is not None:
+            if self.answers_for_class(action, entity_id):
                 self.answers.append(await self.entries(self.response, entity_id))
         except HAError as err:
             if following != "expect_error":

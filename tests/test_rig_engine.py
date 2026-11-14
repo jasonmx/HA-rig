@@ -1551,6 +1551,34 @@ async def test_several_calls_on_the_target_take_the_union_of_their_classes(tmp_p
     assert await capability_cell(tmp_path, ha, text, inv) == "-"  # a call with no entry for the target
 
 
+async def test_only_the_tested_actions_calls_outside_setup_count(tmp_path):
+    """A group's call of another action can reach members the tested one refuses, so its classes aren't credited."""
+    text = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: called
+    roles: [switch_plug]
+    setup:
+      - call: {duration: 1}
+    steps:
+      - call: {action: get_attributes}
+      - call: {duration: 1}
+"""
+    ha = FakeHA({"switch.plug": {}})
+    ha.respond = answering(
+        {"switch.plug": ran(capability="Setup")},
+        {"switch.plug": {"brightness": 128, "capability": "Other"}},
+        {"switch.plug": ran(capability="Switch")},
+    )
+    assert await capability_cell(tmp_path, ha, text, profile(switch_plug="switch.plug")) == "`Switch`"
+    assert [service for domain, service, _ in ha.calls if domain == "deviceside"] == [
+        "turn_on_for",
+        "get_attributes",
+        "turn_on_for",
+    ]
+
+
 async def test_only_calls_on_the_target_that_returned_a_response_count(tmp_path):
     ha = FakeHA({"switch.plug": {}, "light.bulb": {}})
     inv = profile(switch_plug="switch.plug", light_color="light.bulb")
