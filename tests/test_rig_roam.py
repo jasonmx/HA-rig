@@ -977,6 +977,19 @@ async def test_a_hue_entity_still_under_the_fixed_id_is_no_zha_arrival(lab, tmp_
     assert "light.lab_a" not in roamed["arrived"] and roamed["at"]["light.lab_a"] is None
 
 
+async def test_recovery_brings_a_bulb_listed_on_zha_and_live_on_none_home_once_it_is_powered_up(lab, tmp_path):
+    """The state #86 left: stranded on ZHA, the light unavailable. Recovery stops until a power-up brings it back."""
+    journal = Journal(tmp_path / "journal.json")
+    await roamer(lab, journal).go("zha")
+    lab.ha.set("light.lab_a", "unavailable")
+    with pytest.raises(RoamError, match=r"light.lab_a is listed on ZHA but live on none"):
+        await Roamer.from_journal(lab.ha, lab.bridge, journal, lambda _: None).go("hue")
+    lab.ha.set("light.lab_a", "off")  # its lamp switched off and on: it announces itself to ZHA
+    recovering = Roamer.from_journal(lab.ha, lab.bridge, journal, lambda _: None)
+    await recovering.go("hue")
+    assert await where(lab) == ["hue", "hue"] and recovering.done
+
+
 async def test_a_hue_to_zha_move_deletes_on_hue_opens_the_window_and_journals_the_arrival(lab, tmp_path):
     journal = Journal(tmp_path / "journal.json")
     printed = []
