@@ -108,8 +108,8 @@ The rig classifies the work, not who runs it (`ha_rig/authorize.py`):
 
 - **Unrestricted** work goes at any time, whatever the sensor reads: a test run or `--recover` on a profile with
   `pre_authorized: true` (it covers everything that run does: pauses, DeviceSide reloads and disables, roaming, HA
-  restarts); `--deploy-only`, as HA restarts are always allowed; a probe declared `--visual none`, or
-  `--visual profile` on a pre-authorized profile.
+  restarts), unless it moves an entity the profile leaves out (below); `--deploy-only`, as HA restarts are always
+  allowed; a probe declared `--visual none`, or `--visual profile` on a pre-authorized profile.
 - **Restricted** work is everything else. It goes when either `RIG_RESTRICTED_ENTITY` in `.env.rig`, an HA
   binary_sensor that is on while someone might see the lights move, is off, or Jason has approved it:
   `DEVICE_SIDE_RIG_RESTRICTED=1`, or a y at the terminal's `Restricted: <why>. Proceed anyway?`. With the key unset,
@@ -121,8 +121,17 @@ devices back, when it turns on: two reads in a row of on, unknown or unavailable
 started while the sensor was on goes on until it goes off and on again. `DEVICE_SIDE_RIG_APPROVED`, the variable this
 replaced, is refused.
 
-An aborted run's changes are restricted by the profile that left it, and the journal from before per-run journals
-always is. `--recover`, and the replay before a run's gate, put back what the rig may now (never asking) and name the
+**One entity left out.** An entity listed with `pre_authorized: false` in a pre-authorized profile is left out of it
+(a plug whose light someone might see, say): a run is restricted work, whole, when any case it will run moves that
+entity, as its target, a group's listed member or the supply a case draws power through. A run that leaves it alone
+(another integration, `-k`, its cases saved or skipped as unreachable) is as unrestricted as before, and the plan's
+Authorization line names the entities that make it restricted. A `--visual profile` probe is restricted when an
+integration it holds lists one. An entity takes only `pre_authorized: false`: being pre-authorized is the profile's to
+say, so `true` on an entity is refused (in a restricted profile, `false` only restates it).
+
+An aborted run's changes are restricted by the profile that left it, and by the run: a restricted run's journal says
+so (`restricted`), and its changes are restricted to put back whatever its profile. The journal from before per-run
+journals always is. `--recover`, and the replay before a run's gate, put back what the rig may now (never asking) and name the
 rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
 whose locks cover one it can't put back stops before its gate rather than test on top of it.
 

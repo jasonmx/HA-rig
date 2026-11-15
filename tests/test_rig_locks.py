@@ -1182,3 +1182,82 @@ def test_a_probe_over_a_restricted_orphan_warns_and_runs(probe, monkeypatch, put
     assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
     assert put_back == []
     assert f"left {path} (profile lab, restricted)" in capsys.readouterr().out
+
+
+MIXED = (
+    "pre_authorized: true\n"
+    "shelly:\n"
+    "  - entity_id: switch.plug\n    roles: [switch_plug]\n"
+    "  - entity_id: switch.plug_b\n    roles: [switch_plug]\n    pre_authorized: false\n"
+)
+
+
+def test_recover_holds_a_marked_journal_of_a_pre_authorized_profile_to_the_sensor(
+    tmp_path,
+    monkeypatch,
+    put_back,
+    capsys,
+):
+    profiles(tmp_path, monkeypatch, lab=True)
+    plain = labelled(tmp_path, "lab", "hue")
+    marked = labelled(tmp_path, "lab", "shelly")
+    Journal(marked).update(restricted=True)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert put_back == [plain.name]
+    assert (
+        f"left {marked} (profile lab, restricted: its run moved entities that aren't pre-authorized): sensor off or "
+        "DEVICE_SIDE_RIG_RESTRICTED=1 restores it"
+    ) in capsys.readouterr().out
+
+    sensor_reads(monkeypatch, "off")
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
+    assert sorted(put_back) == sorted([plain.name, marked.name])
+
+
+def test_a_marked_journal_of_a_restricted_profile_reads_as_any_restricted_one(
+    tmp_path,
+    monkeypatch,
+    put_back,
+    capsys,
+):
+    profiles(tmp_path, monkeypatch, house=False)
+    marked = labelled(tmp_path, "house", "shelly")
+    Journal(marked).update(restricted=True)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert f"left {marked} (profile house, restricted): sensor off" in capsys.readouterr().out
+
+
+# --- Probes --------------------------------------------------------------------------------------------------
+
+
+def mixed_probe(probe_dir) -> None:
+    (probe_dir / "lab.yaml").write_text(MIXED + "hue:\n  - entity_id: light.desk\n    roles: [light_ct]\n")
+
+
+def test_a_visual_profile_probe_on_an_integration_with_an_entity_left_out_is_restricted(
+    probe,
+    monkeypatch,
+    capsys,
+):
+    mixed_probe(probe)
+    seen = clear_states(monkeypatch, "on")
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    assert rig.main(["--hold", "shelly", *VISUAL_PROFILE, "--", "true"]) == 1
+    out = capsys.readouterr().out
+    assert "Restricted: profile lab doesn't pre-authorize switch.plug_b." in out
+    assert f"Restricted, and {PROBE_SENSOR} is on." in out
+    assert seen == []
+    assert ProbeHA.calls == []
+
+
+def test_a_visual_profile_probe_elsewhere_stays_unrestricted(probe, monkeypatch):
+    mixed_probe(probe)
+    seen = clear_states(monkeypatch)
+    monkeypatch.setattr(rig, "run_command", lambda command: 0)
+    assert rig.main(["--hold", "hue", *VISUAL_PROFILE, "--", "true"]) == 0
+    assert seen == [False]

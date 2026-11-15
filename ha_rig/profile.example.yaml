@@ -7,6 +7,8 @@
 # disables, roaming, HA restarts), the recovery of what it leaves and its `--visual profile` probes go whatever
 # .env.rig's RIG_RESTRICTED_ENTITY reads, for a setup whose lights nobody minds seeing move (a lab). Left out or false,
 # they are restricted: they go while it is off, or with DEVICE_SIDE_RIG_RESTRICTED=1 (docs/rig.md, Authorization).
+# pre_authorized: false on one entity leaves it out of a pre-authorized profile: a run that moves it (or the supply it
+# draws power through) is restricted, whole, and so is putting back what it left; runs that leave it alone aren't.
 #
 # pause: the automations and switches turned off while the rig runs, for whatever would fight the tests on these
 # entities (motion lighting, an Adaptive Lighting switch). Only those that were on are turned back on, once no run
@@ -42,6 +44,7 @@ shelly:
     roles: [switch_plug]
   - entity_id: switch.kettle_plug  # a second plug: its own cases, [switch_plug-2]
     roles: [switch_plug]
+    pre_authorized: false  # restates it here, as this profile isn't pre-authorized; in one that is, it leaves it out
   - entity_id: light.hall_relay
     roles: [light_onoff]
   - entity_id: light.porch_lamp

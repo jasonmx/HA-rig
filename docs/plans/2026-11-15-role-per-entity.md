@@ -4,8 +4,8 @@
 
 Intent: a profile that lists several `switch_plug` entities on one integration tests each of them, one case per plug,
 so one run gives each device (each Tuya maker string) its own record test.
-Touches: ha_rig/profile.py, ha_rig/engine.py (Case, cases, narrows), scripts/rig.py (plan_lines),
-ha_rig/profile.example.yaml, docs/rig.md, tests/
+Touches: ha_rig/profile.py, ha_rig/engine.py (Case, cases, narrows), scripts/rig.py (plan_lines, the authorization
+gate, journal marks, probes), ha_rig/profile.example.yaml, docs/rig.md, tests/
 Tests-with: DeviceSide/DeviceSide#440
 Pairs with device-classes step 5 part 3, the Z2M Tuya countdown `turn_on_for`: its lab run needs one test per maker
 string (deviceside's device-classes plan, step 5, item 9).
@@ -48,6 +48,23 @@ are of the case's own role.
   plug that powers or is powered goes to the phases, `in_head`) and `--ignore-unreachables` (`unreachable` reads the
   case's entities). `plan_lines` lists every plug of the suite.
 
+## One plug left out of a pre-authorized profile (Jason, 2026-11-15)
+
+A record is one file per integration and suite, so part 3's four plugs must run in one profile: the lab's, whose plug
+is pre-authorized and stays first (`[switch_plug]` names the same device), while the other three may not move
+unrestricted. So an entity takes `pre_authorized: false`, which leaves it out of a pre-authorized profile:
+
+- `RigEntity.pre_authorized`; `Profile.restricted` and `Profile.restricts(entities)`, which adds each one's
+  `powered_by` supply. An entity takes only `false`: `true` on an entity is refused, as it can't widen its profile.
+- The run's gate (`run_held`): restricted when the profile isn't pre-authorized, or when `targets` (every case the run
+  will run, members included; saved and unreachable cases left out) or their supplies hold a restricted entity. The
+  plan's Authorization line names them. Otherwise unchanged.
+- The journal: a restricted run writes `restricted: true` beside `profile`, and `Authority.withholds` holds a marked
+  journal to the sensor or the approval whatever its profile, so `--recover` and the replay put it back as a
+  restricted profile's.
+- A `--visual profile` probe is restricted when an integration it holds lists a restricted entity (or one powered
+  through it).
+
 ## Tests
 
 - Profile: `entities()` order; `entity()` the first.
@@ -60,6 +77,10 @@ are of the case's own role.
 - `--check` / `targets`: every listed plug; `powered_by` on the second plug takes its case out of the lanes; an offline
   second plug skips only its own case.
 - `plan_lines` names every plug.
+- Left out: the profile rule both ways, a supply; the run's gate restricted (sensor on: refused; off: goes, watched)
+  and unrestricted (`-k` on the first plug, another integration, the entity unreachable); the journal mark; `--recover`
+  holding a marked journal of a pre-authorized profile to the sensor; `--visual profile` probes on and off the
+  integration.
 
 ## Verification
 

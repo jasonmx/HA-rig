@@ -1158,3 +1158,64 @@ async def test_an_abort_that_cant_bring_the_bulbs_home_says_so_and_keeps_the_jou
     assert "Could not move the roaming bulbs home" in capsys.readouterr().out
     assert "roam" in Journal(journal.path).sections
     assert lab.ha.states["automation.lab"]["state"] == "on"
+
+
+MIXED = (
+    "pre_authorized: true\n"
+    "shelly:\n"
+    "  - entity_id: switch.plug\n    roles: [switch_plug]\n"
+    "  - entity_id: switch.plug_b\n    roles: [switch_plug]\n    pre_authorized: false\n"
+    "hue:\n  - entity_id: light.desk\n    roles: [light_ct]\n"
+)
+
+
+# --- The run's gate ------------------------------------------------------------------------------------------
+
+
+def mixed_run(tmp_path, monkeypatch, state: str) -> list:
+    """clear_run on MIXED: its two plugs, the second not pre-authorized, with the sensor reading `state`."""
+    seen = clear_run(tmp_path, monkeypatch, state)
+    path = fakes.write(tmp_path, "mixed.yaml", MIXED)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    return seen
+
+
+def test_a_run_that_moves_an_entity_left_out_is_restricted(tmp_path, monkeypatch, capsys):
+    seen = mixed_run(tmp_path, monkeypatch, "on")
+    assert rig.main([]) == 1
+    assert seen == []
+    out = capsys.readouterr().out
+    assert "Authorization: profile mixed is pre-authorized, but not switch.plug_b, which this run moves." in out
+    assert f"Restricted, and {SENSOR} is on. Needs DEVICE_SIDE_RIG_RESTRICTED=1" in out
+
+
+def test_a_restricted_run_of_a_pre_authorized_profile_goes_while_the_sensor_is_off_watched(tmp_path, monkeypatch):
+    seen = mixed_run(tmp_path, monkeypatch, "off")
+    assert rig.main([]) == 0
+    assert seen == [(True, True)]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["-k", "switch_plug]"], id="only the first plug's cases"),
+        pytest.param(["--integration", "hue"], id="another integration"),
+    ],
+)
+def test_a_run_that_leaves_the_entity_alone_stays_unrestricted(tmp_path, monkeypatch, capsys, args):
+    seen = mixed_run(tmp_path, monkeypatch, "on")
+    monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
+    assert rig.main(args) == 0
+    assert seen == [(False, False)]
+    assert "Authorization: profile mixed is pre-authorized. Unrestricted." in capsys.readouterr().out
+
+
+def test_a_run_whose_entity_is_offline_and_skipped_stays_unrestricted(tmp_path):
+    """--ignore-unreachables skips the cases of an entity that is down, so they move nothing."""
+    profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", MIXED))
+    profile.offline = frozenset({"switch.plug_b"})
+    suites = [rig.Suite(load_step_file(fakes.STEPS / "turn_on_for.yaml"), "shelly")]
+    setup = rig.Setup({}, profile, fakes.Roster({"shelly": {"turn_on_for"}}), suites, False, False)
+    assert rig.restricted_targets(setup, None) == []
+    profile.offline = frozenset()
+    assert rig.restricted_targets(setup, None) == ["switch.plug_b"]

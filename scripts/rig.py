@@ -34,7 +34,8 @@ automations for them paused, passing signals on to it and returning its exit cod
 what it changes that anyone could see, and --dry-run says whether it may go.
 
 Authorization (ha_rig/authorize.py) classifies the work, not the caller. Unrestricted work goes at any time: a test run
-or a recovery on a profile with `pre_authorized: true`, which covers everything that run does; --deploy-only, as HA
+or a recovery on a profile with `pre_authorized: true`, which covers everything that run does unless it moves an
+entity listed `pre_authorized: false`; --deploy-only, as HA
 restarts are always allowed; a probe declared --visual none, or --visual profile on a pre-authorized profile.
 Everything else is restricted, and goes when either RIG_RESTRICTED_ENTITY in .env.rig, an HA binary_sensor that is on
 while someone is near enough to see the lights, reads off, or Jason has approved it: DEVICE_SIDE_RIG_RESTRICTED=1, or a
@@ -123,7 +124,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
@@ -516,14 +517,17 @@ class Authority:
 
     def withholds(self, journal: Journal) -> str | None:
         """Why an orphan may not be put back now, None when it may: restoring it is restricted unless the profile
-        that left it is pre-authorized (the journal from before per-run journals never is), and then it needs the
-        sensor off or the approval; never a prompt."""
+        that left it is pre-authorized and its run wasn't restricted work (it moved no entity listed
+        `pre_authorized: false`: the journal's `restricted`); the journal from before per-run journals never is. Then
+        it needs the sensor off or the approval; never a prompt."""
         name = journal.get("profile")
-        if journal.path.name != LEGACY_NAME and pre_authorized(name, self.env):
+        covered = journal.path.name != LEGACY_NAME and pre_authorized(name, self.env)
+        if covered and journal.get("restricted") is not True:
             return None
         if authorize(restricted=True, sensor=self.sensor(), approved=approved(), tty=False).go:
             return None
-        return f"profile {name or 'unknown'}, restricted"
+        why = ": its run moved entities that aren't pre-authorized" if covered else ""
+        return f"profile {name or 'unknown'}, restricted{why}"
 
 
 def pre_authorized(name: str | None, env: dict) -> bool:
@@ -714,6 +718,7 @@ class Setup:
     steps_commit: str | None = None  # HEAD as read before the step files loaded
     selected: list[Suite] = field(default_factory=list)  # every suite selected; `suites` are those with cases left
     planned_commit: str | None = None  # the commit the ledger was read at
+    restricted: bool = True  # whether the run is restricted work (run_restricted); set once at its gate
 
     @property
     def withholds(self) -> bool:
@@ -1195,6 +1200,25 @@ def take(args: argparse.Namespace, setup: Setup, directory: Path) -> Held:
     return held
 
 
+def whose(profile: Profile, moved: list[str]) -> str:
+    """The plan's word on the profile, before the decision: pre-authorized, and which of its entities that aren't the
+    run moves (restricted_targets)."""
+    if not profile.pre_authorized:
+        return ""
+    return f"profile {profile.name} is pre-authorized" + (
+        f", but not {', '.join(moved)}, which this run moves. " if moved else ". "
+    )
+
+
+def restricted_targets(setup: Setup, keyword: str | None) -> list[str]:
+    """The entities listed `pre_authorized: false` that the run's cases move (targets: each case it will run, a
+    group's listed members included) or draw power through; any one makes a pre-authorized profile's run restricted
+    work. Empty for a profile that isn't pre-authorized, whose every run is restricted anyway."""
+    if not setup.profile.pre_authorized:
+        return []
+    return setup.profile.restricts(targets(setup.suites, setup.profile, setup.registry, keyword, done=setup.done))
+
+
 def orphaned(setup: Setup, directory: Path) -> Claim:
     """What a resumed run must also hold to put back the aborted runs of its own profile: the stopped run that saved
     its progress left changes the remaining suites may not touch, and replay only puts back what the run's claim
@@ -1216,7 +1240,9 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
     env, profile, registry, suites = setup.env, setup.profile, setup.registry, setup.suites
     authority = Authority(env)
     # Decided before the replay, which restores only what the rig may put back now; asked after the plan.
-    decision = None if args.check else authority.decide(restricted=not profile.pre_authorized)
+    moved = restricted_targets(setup, args.keyword)
+    setup.restricted = not profile.pre_authorized or bool(moved)
+    decision = None if args.check else authority.decide(restricted=setup.restricted)
     homes = replay(env, held, directory, authority)
     if args.check:
         return check_only(setup, args.keyword, homes, claim(args, setup), directory, args.ignore_unreachables)
@@ -1251,8 +1277,7 @@ def run_held(args: argparse.Namespace, setup: Setup, held: Held | None, director
         print_unreachable(suites, profile, registry, args.keyword, setup.done)
         if problems and not args.dry_run:
             raise SystemExit("Power or fix the devices above, then run again.")
-    whose = f"profile {profile.name} is pre-authorized. " if profile.pre_authorized else ""
-    print(f"Authorization: {whose}{decision.reason}")
+    print(f"Authorization: {whose(profile, moved)}{decision.reason}")
     if args.dry_run:
         return 0
     if not proceed(decision):
@@ -1360,6 +1385,7 @@ def run_approved(
             budget=budget,
             pending=pending(setup),
             facts=not withheld,
+            restricted=setup.restricted,
         ),
         aborted=aborted(setup, args.keyword) if setup.progress is not None else None,
     )
@@ -1456,7 +1482,7 @@ def hold_command(args: argparse.Namespace, directory: Path) -> int:
         profile = Profile.load(choose_profile(args.profile, env))
     except ValueError as err:
         raise SystemExit(f"Fix the profile: {err}") from err
-    restricted = probe_restricted(args.visual, profile)
+    restricted = probe_restricted(args.visual, profile, wanted.integrations)
     pausing = profile.paused_by(wanted.integrations)
     if pausing and not (env.get("HA_URL") and env.get("HA_TOKEN")):
         raise SystemExit("HA_URL and HA_TOKEN must be set in .env.rig to pause the profile's automations")
@@ -1489,14 +1515,19 @@ def hold_command(args: argparse.Namespace, directory: Path) -> int:
             journal.release()
 
 
-def probe_restricted(visual: str | None, profile: Profile) -> bool:
+def probe_restricted(visual: str | None, profile: Profile, integrations: Iterable[str] = ()) -> bool:
     """Whether a probe is restricted work, as its --visual declares, trusted: `none` moves nothing anyone sees,
-    `profile` only what the pre-authorized profile covers; undeclared, it is restricted."""
+    `profile` only what the pre-authorized profile covers, which leaves out any entity it lists `pre_authorized:
+    false` (or whose supply it lists so) under an integration the probe holds; undeclared, it is restricted."""
     if visual == "none":
         return False
     if visual == "profile":
         if not profile.pre_authorized:
             raise SystemExit(f"--visual profile needs a pre-authorized profile, and {profile.name} isn't")
+        held = [e.entity_id for key in integrations for e in profile.integrations.get(key, ())]
+        if restricted := profile.restricts(held):
+            print(f"Restricted: profile {profile.name} doesn't pre-authorize {', '.join(restricted)}.")
+            return True
         return False
     return True
 
@@ -1815,7 +1846,8 @@ def print_profile(profile: Profile) -> None:
     for integration, entities in profile.integrations.items():
         for entity in entities:
             if entity.entity_id not in roaming_ids:
-                print(f"  {integration:8} {entity.entity_id:40} {', '.join(sorted(entity.roles))}")
+                restricted = "" if entity.pre_authorized else " (pre_authorized: false)"
+                print(f"  {integration:8} {entity.entity_id:40} {', '.join(sorted(entity.roles))}{restricted}")
     for bulb in profile.roam:
         print(f"  {'roams':8} {bulb.entity_id:40} {', '.join(sorted(bulb.roles))}")
     for group in profile.roam_groups:
@@ -1888,6 +1920,7 @@ async def run_rig(
     budget: Budget | None = None,
     pending: set[tuple[str, str]] | None = None,
     facts: bool = True,
+    restricted: bool = False,
 ) -> int:
     """Run the step files, in lanes first when `lanes` (run_phases), then phase by phase, moving the roaming bulbs
     before each and home after the last, and making the ds-rig-* groups in each phase when `grouping`, then stage a
@@ -1925,7 +1958,9 @@ async def run_rig(
     stopped: Roamer | None = None  # the roamer, once a RoamError stopped the run
     home = True  # whether the roaming bulbs ended at home, with no rig-made group left
     if journal is not None:  # the claim says what a run must hold to put back what this one leaves
-        journal.update(profile=profile.name, **({"claim": claim.as_json()} if claim else {}))
+        # A restricted run's journal is restricted to put back, whatever its profile (Authority.withholds).
+        marks = {"restricted": True} if restricted else {}
+        journal.update(profile=profile.name, **({"claim": claim.as_json()} if claim else {}), **marks)
     results: list[SuiteResult] = []  # each phase's, as it finishes: a failed move keeps the phases before it
     started = datetime.datetime.now()
     stamp = started.strftime("%Y-%m-%d %H:%M:%S")

@@ -92,6 +92,9 @@ class RigEntity:
     roles: frozenset[str]
     powered_by: str | None = None  # the profile's switch this entity draws power through
     members: tuple[str, ...] = ()  # a group's member lights, for a group light without an entity_id attribute
+    # False: work that moves this entity is restricted, though its profile is pre-authorized (`pre_authorized: false`
+    # on the entity; Profile.restricts).
+    pre_authorized: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,8 +174,9 @@ class Profile:
                 members = tuple(members)
                 if members and not roles & GROUP_ROLES:
                     raise ValueError(f"{path.name}: {item['entity_id']} lists members but has no group role")
+                allowed = entity_pre_authorized(path, item)
                 profile.integrations[integration].append(
-                    RigEntity(item["entity_id"], roles, item.get("powered_by"), members)
+                    RigEntity(item["entity_id"], roles, item.get("powered_by"), members, allowed)
                 )
         listed = {entity.entity_id for entities in profile.integrations.values() for entity in entities}
         profile.add_roaming(path, listed)
@@ -229,6 +233,18 @@ class Profile:
 
     def members(self, integration: str, entity_id: str) -> tuple[str, ...]:
         return next((e.members for e in self.integrations.get(integration, ()) if e.entity_id == entity_id), ())
+
+    @property
+    def restricted(self) -> frozenset[str]:
+        """The entities listed with `pre_authorized: false`: moving one is restricted work, whatever the profile's."""
+        return frozenset(e.entity_id for es in self.integrations.values() for e in es if not e.pre_authorized)
+
+    def restricts(self, entity_ids: Iterable[str]) -> list[str]:
+        """The restricted entities among `entity_ids` and the supplies they draw power through (a case needs its
+        supply on, and may switch it), in order; every one when the profile isn't pre-authorized."""
+        power = self.power()
+        touched = dict.fromkeys(e for entity_id in entity_ids for e in (entity_id, power.get(entity_id)) if e)
+        return [e for e in touched if not self.pre_authorized or e in self.restricted]
 
     def power(self) -> dict[str, str]:
         """Each entity that draws power through another, mapped to its supply, across every integration."""
@@ -358,6 +374,20 @@ def pause_list(path: Path, entity_ids: object) -> tuple[str, ...]:
     if other := [entity_id for entity_id in entity_ids if entity_id.partition(".")[0] not in PAUSABLE]:
         raise ValueError(f"{path.name}: pause takes automations and switches only, got {', '.join(other)}")
     return tuple(entity_ids)
+
+
+def entity_pre_authorized(path: Path, item: dict) -> bool:
+    """A listed entity's `pre_authorized:`, which only narrows: `false` makes moving it restricted work in a
+    pre-authorized profile (and restates it in a restricted one). Left out, the entity is as its profile is; it can't
+    be pre-authorized on its own, as that is the profile's to say."""
+    if "pre_authorized" not in item:
+        return True
+    if item["pre_authorized"] is not False:
+        raise ValueError(
+            f"{path.name}: {item['entity_id']} pre_authorized must be false, got {item['pre_authorized']!r}; "
+            "only the profile's own pre_authorized makes work unrestricted"
+        )
+    return False
 
 
 def pre_authorized_key(path: Path, value: object) -> bool:
