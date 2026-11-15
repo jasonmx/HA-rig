@@ -72,10 +72,20 @@ role, and under `pause:` the automations and switches turned off for the run and
 an Adaptive Lighting switch). `.env.rig` (from `ha_rig/env.example`) holds what belongs to the HA instance: its
 address, tokens, deploy commands and Hue bridge.
 
+A role's cases test the first entity the profile lists with it, on each integration, but for `switch_plug`
+(`EACH_ENTITY` in `ha_rig/profile.py`): its cases run once per plug listed, so each device gets its own test and
+record test, with its own model, maker string and class. The first plug's case keeps the bare id
+(`on_then_off[switch_plug]`), and the n-th is `on_then_off[switch_plug-<n>]`, in profile order, so a profile with
+one plug plans what it always did and adding plugs only adds cases. Light roles stay first-entity on purpose: a
+roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
+first entity too.
+
 `--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
 a record never narrows to a profile: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`), or
-whose group lacks the light a case targets, writes no record over one that passed that case, and says `Kept
-<record>`. Run a profile with the role, or, to narrow on purpose
+whose group lacks the light a case targets, or that lists fewer plugs than the run whose record passed
+`<test>[switch_plug-3]`, writes no record over one that passed that case, and says `Kept <record>`. A record is one
+file per integration and suite, so two profiles on one integration (one plug each, say) can't both hold their plugs'
+tests in it: list every plug the record should hold in one profile. Run a profile with the role, or, to narrow on purpose
 (a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's (through
 `.private-terms.rig`) and this repo's (`scripts/check_private.py`), keep every profile's entity IDs, members, supplies,
@@ -235,7 +245,7 @@ action: turn_on_for        # the DeviceSide action every test in the file calls
 rig_seconds: 25            # the gate's duration estimate
 tests:
   - name: on_then_off
-    roles: [switch_plug, light_onoff]   # one run per role the profile names
+    roles: [switch_plug, light_onoff]   # one run per role the profile names; switch_plug, one per plug
     steps:
       - set: {state: off}
       - call: {duration: 6}
@@ -434,7 +444,8 @@ A markdown record with fact cases ends with a line pointing to `_facts.md` and, 
 Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
 off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's. A record never
 narrows to a profile: a run never overwrites one with a record that skips, as not applying (a role the profile lacks, a
-group without the light, no adapter), a case the record passed (Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
+group without the light, no adapter), or doesn't plan (a plug beyond the profile's), a case the record passed
+(Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
 a record.
 
 ### Facts

@@ -36,7 +36,7 @@ from .facts import FILE as FACTS_FILE
 from .facts import JSON_FILE as JSON_FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
-from .profile import ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile, normalize_ieee
+from .profile import EACH_ENTITY, ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile, normalize_ieee
 from .schema import FORMAT, RecordSchema
 
 _LOGGER = logging.getLogger(__name__)
@@ -788,10 +788,14 @@ class Case:
     # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult), and
     # never narrows to them (narrows).
     inapplicable: bool = False
+    # Which of the role's entities it targets, from 1 in profile order, for an EACH_ENTITY role: each runs its own case.
+    index: int = 1
 
     @property
     def id(self) -> str:
-        return f"{self.test.name}[{self.role}]" + (" observed" if self.observed else "")
+        """`<test>[<role>]`, `<test>[<role>-<n>]` for the n-th entity of an EACH_ENTITY role, ` observed` after for a
+        watched case. The first keeps the bare role, so a profile with one entity plans what it always did."""
+        return case_id(self.test.name, self.role, self.index, self.observed)
 
     @property
     def fact(self) -> bool:
@@ -846,6 +850,19 @@ def _behind_class(entry: Any, entity_id: str) -> str | None:
     return _one_class(entry)
 
 
+def case_id(test: str, role: str, index: int = 1, observed: bool = False) -> str:
+    """A case's id (Case.id)."""
+    return f"{test}[{role}{f'-{index}' if index > 1 else ''}]" + (" observed" if observed else "")
+
+
+def case_family(case_id_: str) -> tuple[str, str, bool]:
+    """A case id's test, role and whether it is watched, its entity's index dropped: the cases of one test and role,
+    one per entity of an EACH_ENTITY role."""
+    observed = case_id_.endswith(" observed")
+    test, _, rest = case_id_.removesuffix(" observed").partition("[")
+    return test, rest.removesuffix("]").partition("-")[0], observed
+
+
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
     """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
@@ -883,9 +900,9 @@ def cases(
         if not test.runs_on(suite.integration):
             continue
         lacking = next((a for a in test.calls if adapters is not None and a not in adapters), None)
-        for role in test.roles:
+        for role, index in roles_by_entity(test, profile, suite.integration):
             for observed in [False] * test.automated + [True] * test.observed_on(role, suite.integration):
-                case = Case(suite, test, role, {}, observed=observed)
+                case = Case(suite, test, role, {}, observed=observed, index=index)
                 if keyword and keyword not in case.id:
                     continue
                 if why := opt_out(case):
@@ -894,11 +911,10 @@ def cases(
                 if lacking:
                     result.append(replace(case, skip=f"no {lacking} adapter on {suite.integration}", inapplicable=True))
                     continue
-                needed = test.roles_needed(role)
-                entities = {name: profile.entity(suite.integration, name) for name in needed}
+                entities = case_entities(test, role, index, profile, suite.integration)
                 if missing := [name for name, entity_id in entities.items() if entity_id is None]:
                     why = f"no {missing[0]} entity in the profile"
-                    case = Case(suite, test, role, {}, why, observed, absent=True, inapplicable=True)
+                    case = Case(suite, test, role, {}, why, observed, absent=True, inapplicable=True, index=index)
                 else:
                     group = next((name for name in entities if name in GROUP_ROLES), None)
                     members = profile.members(suite.integration, entities[group]) if group else ()
@@ -906,11 +922,32 @@ def cases(
                     lights = [name for name in entities if name.startswith("light_")]
                     outside = [name for name in lights if members and entities[name] not in members]
                     skip = f"{outside[0]} is not one of the group's members" if outside else None
-                    case = Case(suite, test, role, entities, skip, observed, members, inapplicable=bool(outside))
+                    case = Case(
+                        suite, test, role, entities, skip, observed, members, inapplicable=bool(outside), index=index
+                    )
                     if skip is None and (why := unreachable(case, profile)):
                         case = replace(case, skip=why, unreachable=True)
                 result.append(case)
     return result
+
+
+def roles_by_entity(test: RigTest, profile: Profile, integration: str) -> list[tuple[str, int]]:
+    """Each of the test's roles with the index of each entity its cases run on: one, the first (or none listed, which
+    skips), for most roles; one per listed entity for an EACH_ENTITY role."""
+    return [
+        (role, index)
+        for role in test.roles
+        for index in range(1, 1 + (max(1, len(profile.entities(integration, role))) if role in EACH_ENTITY else 1))
+    ]
+
+
+def case_entities(test: RigTest, role: str, index: int, profile: Profile, integration: str) -> dict[str, str | None]:
+    """The entity for each role the case needs (None: the profile lists none): its own role's `index`-th, the first
+    for every role a step targets."""
+    entities = {name: profile.entity(integration, name) for name in test.roles_needed(role)}
+    if index > 1:
+        entities[role] = profile.entities(integration, role)[index - 1]
+    return entities
 
 
 def opt_out(case: Case) -> str | None:
@@ -2984,9 +3021,17 @@ class Record:
 
 def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[str]:
     """The IDs of the cases `record` passed that this profile skips as not applying (Case.inapplicable: a role it
-    lacks, a group without the light, no adapter): a record with these rewritten would lose what an earlier profile
+    lacks, a group without the light, no adapter), or doesn't plan at all though it plans their test on their role
+    (an EACH_ENTITY role with fewer entities listed): a record with these rewritten would lose what an earlier profile
     proved."""
-    return sorted(case.id for case in cases if record and case.inapplicable and case.id in record.passed)
+    if record is None:
+        return []
+    cases = list(cases)
+    planned = {case.id for case in cases}
+    families = {case_family(case.id) for case in cases}
+    skipped = {case.id for case in cases if case.inapplicable and case.id in record.passed}
+    dropped = {done for done in record.passed if done not in planned and case_family(done) in families}
+    return sorted(skipped | dropped)
 
 
 def render_record(

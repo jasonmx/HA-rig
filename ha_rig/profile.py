@@ -27,6 +27,10 @@ PAUSABLE = ("automation", "switch")
 # A native group's roles: `group_color` is one whose members all take color.
 GROUP_ROLES = frozenset({"group", "group_color"})
 ZHA_GROUP_MIN = 2  # ZHA makes no light entity for a group with fewer members
+# The roles whose cases run once per entity the profile lists with them, so each device gets its own test (several
+# plugs, one per maker string). Every other role tests its first entity: a roaming bulb is listed beside a network's
+# fixed lights (Profile.add_roaming), so light roles often hold several, and only the first is meant.
+EACH_ENTITY = frozenset({"switch_plug"})
 ROLES = frozenset(
     {"light_onoff", "light_wrapped", "light_dimmable", "light_ct", "light_color", "switch_plug", "scene"} | GROUP_ROLES
 )
@@ -214,7 +218,12 @@ class Profile:
         return frozenset(bulbs | {e for group in self.roam_groups for e in (group.entity_id, group.scene) if e})
 
     def entity(self, integration: str, role: str) -> str | None:
-        return next((e.entity_id for e in self.integrations.get(integration, ()) if role in e.roles), None)
+        """The first entity with the role: the one a case of any role but EACH_ENTITY's targets."""
+        return next(iter(self.entities(integration, role)), None)
+
+    def entities(self, integration: str, role: str) -> tuple[str, ...]:
+        """Every entity with the role on the integration, in profile order."""
+        return tuple(e.entity_id for e in self.integrations.get(integration, ()) if role in e.roles)
 
     def members(self, integration: str, entity_id: str) -> tuple[str, ...]:
         return next((e.members for e in self.integrations.get(integration, ()) if e.entity_id == entity_id), ())

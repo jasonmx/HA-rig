@@ -175,6 +175,7 @@ from ha_rig.home import HomeRecord  # noqa: E402
 from ha_rig.journal import LEGACY_NAME, Journal, orphans  # noqa: E402
 from ha_rig.locks import Claim, Held  # noqa: E402
 from ha_rig.profile import (  # noqa: E402
+    EACH_ENTITY,
     EXAMPLE,
     MAIN_CHECKOUT,
     PAUSE_ALL,
@@ -331,7 +332,7 @@ def plan_lines(
             lines.append(f"{suite.integration} / {suite.action} (no adapter, will skip)")
             continue
         if only is None:
-            entities = [entity for role in suite.file.roles if (entity := profile.entity(suite.integration, role))]
+            entities = [entity for role in suite.file.roles for entity in suite_entities(profile, suite, role)]
         else:
             entities = [entity for case in suite_cases for entity in case.entities.values()]
         targets = ", ".join(dict.fromkeys(entities)) or "no entity, will skip"
@@ -339,6 +340,13 @@ def plan_lines(
         for case in suite_cases:
             lines.append(f"    {case.id}: {case.skip or ', '.join(dict.fromkeys(case.entities.values()))}")
     return lines
+
+
+def suite_entities(profile: Profile, suite: Suite, role: str) -> tuple[str, ...]:
+    """The entities the suite's cases on `role` target: every one listed for an EACH_ENTITY role, else the first."""
+    if role in EACH_ENTITY:
+        return profile.entities(suite.integration, role)
+    return tuple(filter(None, [profile.entity(suite.integration, role)]))
 
 
 def head(profile: Profile) -> Callable[[Case], bool]:
