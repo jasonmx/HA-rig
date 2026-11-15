@@ -76,7 +76,8 @@ A role's cases test the first entity the profile lists with it, on each integrat
 (`EACH_ENTITY` in `ha_rig/profile.py`): its cases run once per plug listed, so each device gets its own test and
 record test, with its own model, maker string and class. The first plug's case keeps the bare id
 (`on_then_off[switch_plug]`), and the n-th is `on_then_off[switch_plug-<n>]`, in profile order, so a profile with
-one plug plans what it always did and adding plugs only adds cases. Light roles stay first-entity on purpose: a
+one plug plans what it always did and adding plugs only adds cases (`-k 'switch_plug]'` picks the first's alone).
+An entity is listed once per integration. Light roles stay first-entity on purpose: a
 roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
 first entity too.
 

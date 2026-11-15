@@ -53,6 +53,13 @@ def test_entities_lists_every_one_with_the_role_in_order_and_entity_the_first():
     assert inv.entities("zha", "switch_plug") == ()
 
 
+def test_an_entity_listed_twice_on_an_integration_is_refused(tmp_path):
+    path = tmp_path / "lab.yaml"
+    path.write_text("shelly:\n" + f"  - entity_id: {PLUGS[0]}\n    roles: [switch_plug]\n" * 2)
+    with pytest.raises(ValueError, match=f"{PLUGS[0]} is listed twice under shelly"):
+        Profile.load(path)
+
+
 def test_each_plug_gets_its_own_case_and_the_first_keeps_the_bare_id(tmp_path):
     planned = cases(suite(tmp_path, ON_THEN_OFF), plugs(*PLUGS))
     assert [(case.id, case.entities) for case in planned] == [

@@ -934,11 +934,11 @@ def cases(
 def roles_by_entity(test: RigTest, profile: Profile, integration: str) -> list[tuple[str, int]]:
     """Each of the test's roles with the index of each entity its cases run on: one, the first (or none listed, which
     skips), for most roles; one per listed entity for an EACH_ENTITY role."""
-    return [
-        (role, index)
-        for role in test.roles
-        for index in range(1, 1 + (max(1, len(profile.entities(integration, role))) if role in EACH_ENTITY else 1))
-    ]
+    found = []
+    for role in test.roles:
+        count = len(profile.entities(integration, role)) if role in EACH_ENTITY else 1
+        found += [(role, index) for index in range(1, max(count, 1) + 1)]
+    return found
 
 
 def case_entities(test: RigTest, role: str, index: int, profile: Profile, integration: str) -> dict[str, str | None]:
@@ -3153,8 +3153,9 @@ async def write_records(
     in its integration's directory of `into` (a run's staging, ha_rig/staging.py), else of `records`.
 
     A record never narrows: where a case the existing record passed doesn't apply to this profile (an inapplicable skip:
-    a role it lacks, a group without the light), the file in `records` stays as it is, and the suite is `kept` with
-    those case IDs (its `records` path). To narrow on purpose, delete the record.
+    a role it lacks, a group without the light) or isn't planned (a plug beyond the profile's: narrows), the file in
+    `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To narrow on purpose,
+    delete the record.
 
     `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
     after Source: what deviceside's release check compares to the tree that ships.

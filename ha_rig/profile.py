@@ -160,6 +160,8 @@ class Profile:
                 raise ValueError(f"{path.name}: unknown integration {integration!r}; use {', '.join(TOLERANCE_S)}")
             profile.integrations[integration] = []
             for item in entities or []:
+                if any(e.entity_id == item["entity_id"] for e in profile.integrations[integration]):
+                    raise ValueError(f"{path.name}: {item['entity_id']} is listed twice under {integration}")
                 roles = frozenset(item.get("roles", ()))
                 if unknown := roles - ROLES:
                     raise ValueError(f"{path.name}: {item['entity_id']} has unknown roles {sorted(unknown)}")

@@ -1747,7 +1747,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
 
     out = capsys.readouterr().out
     assert f"Kept {record_path('shelly')}:" in out
-    assert "skips t[switch_plug], u[switch_plug], which it passed; run a profile with those roles" in out
+    assert "skips or doesn't plan t[switch_plug], u[switch_plug], which it passed; run a profile with those" in out
     staging.promote(progress)
     assert {key[0] for key in progress.done()} == {"shelly"}  # the kept suite still needs its run; zha's is promoted
 
