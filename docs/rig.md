@@ -10,7 +10,7 @@ terminal, you say yes. `--dry-run` prints the plan and the decision, and stops.
 
 ## Setup
 
-The rig lives here, apart from deviceside, which is public. It tests a deviceside checkout: the one you run it
+The rig lives here, apart from deviceside. It tests a deviceside checkout: the one you run it
 from, so each worktree tests its own code, or `DEVICE_SIDE_REPO`, else a `deviceside` (or `device-side`) checkout
 beside this one. A run refuses a checkout that is not a worktree on a `wt/*` branch with an open PR (`pr-draft`
 opens it). `--check`, `--dry-run` and `--recover` skip that check, so they work from any checkout, while

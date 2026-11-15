@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Refuse a commit whose files or message name the household's private details.
 
-This repo is private, but its code is kept as free of household details as deviceside's: the profiles and .env.rig
-are gitignored, and this check keeps their terms out of what is committed. Terms come from every profile and
-.env.rig (ha_rig/terms.py) and .private-terms (one term per line, for names, hostnames and anything else), all read
-from the main checkout so a linked worktree is checked too. Where none of those exist (CI) the check passes.
+This repo's code is kept as free of household details as deviceside's: the profiles and .env.rig are gitignored, and
+this check keeps their terms out of what is committed. Terms come from every profile and .env.rig (ha_rig/terms.py)
+and .private-terms (one term per line, for names, hostnames and anything else), all read from the main checkout so a
+linked worktree is checked too. Where none of those exist (CI) the check passes.
 
 Usage: scripts/check_private.py FILE ...   (pre-commit passes staged files, or the message file at commit-msg)
 """

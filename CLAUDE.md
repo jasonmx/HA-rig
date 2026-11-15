@@ -1,11 +1,11 @@
 # ha-rig
 
-The private test rig for DeviceSide (`DeviceSide/DeviceSide`, public). It tests a deviceside checkout and writes test
+The test rig for DeviceSide (`DeviceSide/DeviceSide`, public). It tests a deviceside checkout and writes test
 records into it: see `docs/rig.md`, Setup. What a record must prove, when an adapter's `experimental` flag clears, and
 how releases gate on records are deviceside's rules (its `CLAUDE.md`); a change here that alters what a record
 proves needs a matching change there.
 
-**No household details in commits**, though this repo is private: entity IDs, device names, MACs, hostnames and
+**No household details in commits**: entity IDs, device names, MACs, hostnames and
 tokens stay in the gitignored `profiles/`, `.env.rig`, `.private-terms` and `CLAUDE.local.md`. The pre-commit
 household check (`scripts/check_private.py`) enforces it.
 
