@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>jasonmx/dotfiles//renovate/default"],
+  "extends": ["github>jasonmx/renovate-config"],
   "packageRules": [
     {
       "description": "ruff and its pre-commit hook move together in one PR, for review, so the linter CI runs never disagrees with the one in .venv.",
