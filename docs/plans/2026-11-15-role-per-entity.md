@@ -6,8 +6,9 @@ Intent: a profile that lists several `switch_plug` entities on one integration t
 so one run gives each device (each Tuya maker string) its own record test.
 Touches: ha_rig/profile.py, ha_rig/engine.py (Case, cases, narrows), scripts/rig.py (plan_lines),
 ha_rig/profile.example.yaml, docs/rig.md, tests/
-Tests-with: DeviceSide/DeviceSide#<part 3 PR> (device-classes step 5 part 3, the Z2M Tuya countdown `turn_on_for`:
-its lab run needs one test per maker string, deviceside's device-classes plan, step 5, item 9)
+Tests-with: DeviceSide/DeviceSide#440
+Pairs with device-classes step 5 part 3, the Z2M Tuya countdown `turn_on_for`: its lab run needs one test per maker
+string (deviceside's device-classes plan, step 5, item 9).
 
 ## Why
 
