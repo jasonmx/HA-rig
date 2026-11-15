@@ -132,7 +132,8 @@ Authorization line names the entities that make it restricted. A resumed run tha
 (origin moved during the deploy, or the step files aren't the commit's) would rerun its saved cases: where they reach
 a left-out entity its unrestricted gate didn't count, it stops before any case, to be run again and gated for them.
 A `--visual profile` probe is restricted when an integration it holds lists one (any integration, for a probe holding
-HA alone).
+HA alone). A restart of HA or a deploy (`--deploy-only`) moves no device, so it stays unrestricted whatever the
+profile leaves out.
 
 An entity takes only `pre_authorized: false`: being pre-authorized is the profile's to say, so `true` on an entity is
 refused (in a restricted profile, `false` only restates it), and so is any key an entity doesn't take, so a misspelt
