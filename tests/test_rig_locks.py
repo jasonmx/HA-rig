@@ -1309,3 +1309,25 @@ def test_a_journal_whose_profile_wont_load_is_restricted_to_put_back_whatever_it
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
     assert put_back == []
     assert f"left {journal} (profile lab, restricted)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("taken", "put"),
+    [
+        pytest.param({"switch.plug": {"state": "on"}}, True, id="it changed only what the profile pre-authorizes"),
+        pytest.param({"switch.plug_b": {"state": "on"}}, False, id="the profile has since left out what it changed"),
+    ],
+)
+def test_a_journal_marked_unrestricted_is_held_once_its_profile_leaves_out_what_it_changed(
+    tmp_path, monkeypatch, put_back, taken, put
+):
+    path = tmp_path / "profiles" / "lab.yaml"
+    path.parent.mkdir()
+    path.write_text(MIXED)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    journal = labelled(tmp_path, "lab", "shelly")
+    Journal(journal).update(restricted=False, cases={"shelly": {"taken": taken, "stored": {}, "power": {}}})
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == (0 if put else 1)
+    assert put_back == ([journal.name] if put else [])

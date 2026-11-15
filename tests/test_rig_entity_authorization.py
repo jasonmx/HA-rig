@@ -88,8 +88,21 @@ def test_power_is_followed_through_a_chain_of_supplies_both_ways(tmp_path):
 
 def test_a_left_out_entity_cant_be_paused_by_a_pre_authorized_profile(tmp_path):
     text = MIXED.replace("pre_authorized: true\n", "pre_authorized: true\npause: [switch.plug_b]\n", 1)
-    with pytest.raises(ValueError, match="switch.plug_b is pre_authorized: false, so it can't be under pause:"):
+    with pytest.raises(ValueError, match="pause: reaches switch.plug_b, which is pre_authorized: false"):
         Profile.load(write(tmp_path, "lab.yaml", text))
+
+
+def test_nor_can_the_supply_it_draws_power_through(tmp_path):
+    """Pausing a supply turns it off, cutting what draws power through it."""
+    text = (
+        "pre_authorized: true\npause: [switch.supply]\nshelly:\n"
+        "  - entity_id: switch.supply\n    roles: [switch_plug]\n"
+        "  - entity_id: light.lamp\n    roles: [light_onoff]\n    powered_by: switch.supply\n"
+        "    pre_authorized: false\n"
+    )
+    with pytest.raises(ValueError, match="pause: reaches light.lamp, which is pre_authorized: false"):
+        Profile.load(write(tmp_path, "lab.yaml", text))
+    assert not Profile.load(write(tmp_path, "house.yaml", text.replace("pre_authorized: true\n", "", 1))).pre_authorized
 
 
 # --- What the run leaves -------------------------------------------------------------------------------------

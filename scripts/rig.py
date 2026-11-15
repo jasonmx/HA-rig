@@ -525,12 +525,22 @@ class Authority:
         profile = None if journal.path.name == LEGACY_NAME else journal_profile(name, self.env)
         # A journal from before the mark is the profile's, unless the profile now leaves an entity out.
         covered = profile is not None and profile.pre_authorized
+        # Marked unrestricted, it is still held when the profile has since left out an entity it changed.
+        if covered and mark is False and profile.restricts(journal_entities(journal)):
+            covered = False
         if covered and (mark is False or (mark is None and not profile.restricted)):
             return None
         if authorize(restricted=True, sensor=self.sensor(), approved=approved(), tty=False).go:
             return None
         why = ": its run moved entities that aren't pre-authorized" if covered else ""
         return f"profile {name or 'unknown'}, restricted{why}"
+
+
+def journal_entities(journal: Journal) -> list[str]:
+    """The entities a journal holds changes to: each case's taken entities, and a journal from before lanes' own."""
+    cases = [entry for entry in (journal.get("cases") or {}).values() if isinstance(entry, dict)]
+    taken = [entry.get("taken") or {} for entry in cases] + [journal.get("taken") or {}]
+    return list(dict.fromkeys(entity for found in taken if isinstance(found, dict) for entity in found))
 
 
 def journal_profile(name: str | None, env: dict) -> Profile | None:

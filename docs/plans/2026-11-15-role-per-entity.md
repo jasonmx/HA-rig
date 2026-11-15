@@ -57,7 +57,8 @@ unrestricted. So an entity takes `pre_authorized: false`, which leaves it out of
 - `RigEntity.pre_authorized`; `Profile.restricted` and `Profile.restricts(entities)`, which follows power along any
   chain of `powered_by`, both ways, as the engine does (`CaseSnapshot.take`). An entity takes only `false`: `true` on
   an entity is refused, as it can't widen its profile. A listed entity takes no other key than its five
-  (`ENTITY_KEYS`), so a misspelling fails the load; a pre-authorized profile can't `pause:` a left-out entity.
+  (`ENTITY_KEYS`), so a misspelling fails the load; a pre-authorized profile can't `pause:` a left-out entity, or
+  one power joins to it.
 - The run's gate (`run_held`, `restricted_targets`, over `will_run`, which `targets` shares): restricted when the
   profile isn't pre-authorized, or when the cases the run will run (saved ones left out) reach a restricted entity:
   targets, listed members, power, and every restricted entity of the integration for a case whose devices the
@@ -68,8 +69,9 @@ unrestricted. So an entity takes `pre_authorized: false`, which leaves it out of
   left out.
 - The journal: every run writes `restricted` beside `profile` (`run_rig` defaults to true), and `Authority.withholds`
   loads the journal's profile once (`journal_profile`): a journal marked true, or whose profile is gone or won't load,
-  is held to the sensor or the approval. An unmarked one, from before, goes by its profile, and is restricted once
-  that leaves an entity out.
+  is held to the sensor or the approval, and so is one marked false whose taken entities the profile now leaves
+  out (`journal_entities`). An unmarked one, from before, goes by its profile, and is restricted once that leaves an
+  entity out.
 - A `--visual profile` probe is restricted when an integration it holds (every one, holding HA alone) lists a
   restricted entity or power reaches one; its Authorization line names them.
 

@@ -1213,7 +1213,7 @@ def test_a_run_that_leaves_the_entity_alone_stays_unrestricted(tmp_path, monkeyp
 
 
 def test_a_resume_leaves_its_saved_cases_out_of_the_gate(tmp_path):
-    """Saved, they don't run again; and the gate runs before the device check, so an unreachable case still counts."""
+    """Saved, they don't run again, so the gate leaves them out; not resuming, it counts them."""
     setup = resumed(tmp_path)
     assert rig.restricted_targets(setup, None) == []
     assert rig.restricted_targets(setup, None, resuming=False) == ["switch.plug_b"]
@@ -1260,6 +1260,21 @@ def test_a_resume_that_loses_its_ledger_stops_before_rerunning_saved_cases_its_g
         SystemExit, match=f"{says}, so this run would rerun its saved cases, and they move switch.plug_b"
     ):
         rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False)
+
+
+def test_a_restricted_resume_that_loses_its_ledger_reruns_its_saved_cases(tmp_path, monkeypatch):
+    """Gated restricted, it was approved for every case, so it reruns them without the ledger."""
+    setup = resumed(tmp_path)
+    setup.restricted = True
+    setup.deploy = rig.Deploy("c1", "tree", "tree", "tree", "wt")
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda *args: None)
+    ran = []
+    monkeypatch.setattr(rig, "run_rig", lambda *args, **kwargs: ran.append((kwargs["progress"], kwargs["restricted"])))
+    monkeypatch.setattr(rig, "run_tests", lambda coroutine, aborted=None: 0)
+    args = argparse.Namespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False) == 0
+    assert ran == [(None, True)]
 
 
 def test_a_resume_that_loses_its_ledger_with_nothing_left_out_among_its_saved_cases_goes_on(tmp_path, monkeypatch):

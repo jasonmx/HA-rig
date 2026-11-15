@@ -137,13 +137,14 @@ profile leaves out.
 
 An entity takes only `pre_authorized: false`: being pre-authorized is the profile's to say, so `true` on an entity is
 refused (in a restricted profile, `false` only restates it), and so is any key an entity doesn't take, so a misspelt
-`pre_authorised` can't leave it pre-authorized. A pre-authorized profile can't list a left-out entity under `pause:`,
-which every run of its key turns off and on.
+`pre_authorised` can't leave it pre-authorized. A pre-authorized profile can't list a left-out entity, or its supply, under
+`pause:`, which every run of its key turns off and on.
 
 An aborted run's changes are restricted by the profile that left it, and by the run: its journal says whether it was
 restricted work (`restricted`), and a restricted run's changes are restricted to put back whatever its profile. A
-journal from before that mark goes by its profile, and is restricted once the profile leaves an entity out; one whose
-profile is gone or won't load is restricted. The journal from before per-run journals always is. `--recover`, and the
+journal from before that mark goes by its profile, and is restricted once the profile leaves an entity out; one marked
+unrestricted is restricted once the profile leaves out an entity it changed; one whose profile is gone or won't load is
+restricted. The journal from before per-run journals always is. `--recover`, and the
 replay before a run's gate, put back what the rig may now (never asking) and name the rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
 whose locks cover one it can't put back stops before its gate rather than test on top of it.
 

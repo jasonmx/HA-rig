@@ -174,11 +174,11 @@ class Profile:
         for entity_id, supply in profile.power().items():
             if supply not in listed:
                 raise ValueError(f"{path.name}: {entity_id} is powered_by {supply}, which the profile doesn't list")
-        paused = sorted(profile.restricted & {e for key in profile.pause for e in profile.pause[key]})
+        paused = profile.restricts(dict.fromkeys(e for key in profile.pause for e in profile.pause[key]))
         if paused and profile.pre_authorized:
             raise ValueError(
-                f"{path.name}: {', '.join(paused)} is pre_authorized: false, so it can't be under pause:, which every "
-                "run of its key turns off and on, restricted or not"
+                f"{path.name}: pause: reaches {', '.join(paused)}, which is pre_authorized: false (listed there, or "
+                "drawing power through what is): every run of its key turns pause: off and on, restricted or not"
             )
         return profile
 
