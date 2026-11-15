@@ -762,7 +762,7 @@ class Suite:
         return self.file.name or "-".join([self.action, *sorted(self.file.options)])
 
     def test(self, case_id: str) -> RigTest | None:
-        """The test a case id (`name[role]`, maybe ` observed`) is a run of."""
+        """The test a case id (`name[role]` or `name[role-n]`, maybe ` observed`: Case.id) is a run of."""
         name = case_id.partition("[")[0]
         return next((test for test in self.file.tests if test.name == name), None)
 
@@ -1716,7 +1716,7 @@ class _CaseRun:
         try:
             if case.observed:
                 self.out("")
-                self.out(f"--- {case.suite.action} / {case.test.name} on {case.role} ({self.position}) ---")
+                self.out(f"--- {case.suite.action} / {case.id} ({self.position}) ---")
             await self.await_settled()
             await self.check_power()
             await self.steps(case.test.setup, setup=True)

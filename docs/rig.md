@@ -183,7 +183,7 @@ empty: exit 0 and 1 both carry the list, and the rig points to `scripts/check_re
 why each needs one. A check that fails (any other exit, or exit 1 with nothing listed) or prints no JSON list stops the
 run, before anything moves.
 
-**Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`), or any case of a
+**Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`, `[<role>-<n>]` for the n-th plug), or any case of a
 `firmware_fact: true` test, its watched one included (Writing a step file, below). It finds a fact, which stands once
 written down in the integration's `_facts.md` (Facts, below), so a default run skips it, `skipped` with `fact case: runs
 with --facts`. The automated case of a test with `observe:` is an ordinary check of a shipped call, and every default
@@ -354,7 +354,7 @@ Such a test runs twice, so you are asked only what a machine can't check:
 1. **Automated**, with every other test first: setup and steps, every check applied. It runs in every run, as any
    test's does (unless the test is a firmware fact), and its result is the record's. It has no automated run if its
    steps check nothing or its setup has a `do`.
-2. **Observed** (`<name>[<role>] observed`), a fact case, so only with `--facts`, after all automated runs. Setup runs
+2. **Observed** (`<name>[<role>] observed`, or `[<role>-<n>]`), a fact case, so only with `--facts`, after all automated runs. Setup runs
    and settles for 2 s, then the runner prints `see` (in bold) and `watch` and waits for Enter. The steps run with their
    checks turned into waits, so the timing matches. As each `call` goes out the runner prints, and speaks with macOS
    `say` (when it exists), the action in words (`raise brightness`; a bare `call: {}` speaks the suite's action), so you know when a

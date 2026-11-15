@@ -38,7 +38,7 @@ are of the case's own role.
 - `twin` carries the index, so an observed case pairs with its own entity's automated case.
 - The record (format 2, deviceside's `docs/test-records.schema.json`): a test per case, `role: switch_plug`, its own
   `domain` and its one device. The schema already allows it: `id` is any string, and `role` is its own field. No
-  deviceside change.
+  validation change: DeviceSide#440 updates the schema's `id` description to name the `[<role>-<n>]` form.
 - **Never narrows, per entity.** A record test that passed `X[switch_plug-3]` would vanish if a later run of that
   suite lists two plugs. `narrows` counts, beside today's inapplicable skips, every id the record passed from the same
   test, role and kind (automated or observed) as a case this run plans that this run doesn't plan, so the file is

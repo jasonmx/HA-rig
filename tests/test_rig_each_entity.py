@@ -9,6 +9,7 @@ import pytest
 from ha_rig import engine
 from ha_rig.engine import Outcome, Record, case_family, cases, in_head, narrows
 from ha_rig.profile import Profile, RigEntity
+from ha_rig.progress import Progress
 from ha_rig.target import SCHEMA, deviceside_repo
 
 from .rig_fakes import FakeHA, Roster
@@ -123,6 +124,19 @@ def test_a_case_family_drops_the_index(case_id, family):
     assert case_family(case_id) == family
 
 
+async def test_each_plugs_watched_case_has_its_own_banner(tmp_path):
+    ha, printed = FakeHA({PLUGS[0]: {}, PLUGS[1]: {}}, timer_on), []
+    registry = Roster({"shelly": {"turn_on_for", "get_attributes"}})
+    steps = suite(tmp_path, WATCHED)
+    await engine.run(
+        [steps], plugs(*PLUGS[:2]), registry, ha, tolerance=TOLERANCE, out=printed.append, ask=lambda _: "y"
+    )
+    assert [line for line in printed if line.startswith("---")] == [
+        "--- turn_on_for / on_then_off[switch_plug] observed (1 of 2) ---",
+        "--- turn_on_for / on_then_off[switch_plug-2] observed (2 of 2) ---",
+    ]
+
+
 async def test_a_run_drives_and_restores_each_plug_and_reports_each(tmp_path):
     ha = FakeHA({PLUGS[0]: {"state": "on"}, PLUGS[1]: {"state": "off"}}, timer_on)
     result = await engine.run(
@@ -155,6 +169,62 @@ def test_a_run_with_fewer_plugs_narrows_the_record_and_one_with_as_many_does_not
     assert narrows(cases(steps, Profile({"shelly": []})), record) == sorted(record.passed)
     # A test the step file no longer has is no narrowing: its family isn't planned.
     assert narrows(cases(steps, plugs(*PLUGS)), passed("gone[switch_plug-2]")) == []
+
+
+def ledger(tmp_path: Path, steps, saved_on: Profile, resumed_on: Profile, saved: int) -> set[str]:
+    """The case ids a resume on `resumed_on` keeps, after the first `saved` cases on `saved_on` passed and were
+    saved."""
+    progress = Progress.load(tmp_path, "lab")
+    progress.track(steps, "c1")
+    progress.check_ha("2026.10.1", lambda _: None)
+    for case in cases(steps, saved_on)[:saved]:
+        progress.record(
+            steps, engine.CaseResult(case.id, case.role, "switch", Outcome.PASS, "", tuple(case.entities.values()))
+        )
+    again = Progress.load(tmp_path, "lab")
+    again.check_ha("2026.10.1", lambda _: None)
+    again.resume(steps, "c1", cases(steps, resumed_on))
+    return set(again.saved(steps))
+
+
+def test_a_resume_keeps_the_saved_plugs_and_runs_the_rest(tmp_path):
+    steps = suite(tmp_path, ON_THEN_OFF)
+    kept = ledger(tmp_path, steps, plugs(*PLUGS), plugs(*PLUGS), saved=2)
+    assert kept == {"on_then_off[switch_plug]", "on_then_off[switch_plug-2]"}
+
+
+def test_a_resume_after_the_plugs_are_reordered_reruns_them(tmp_path):
+    steps = suite(tmp_path, ON_THEN_OFF)
+    assert ledger(tmp_path, steps, plugs(*PLUGS), plugs(PLUGS[1], PLUGS[0], PLUGS[2]), saved=2) == set()
+
+
+def test_a_resume_on_one_plug_keeps_only_the_first(tmp_path):
+    steps = suite(tmp_path, ON_THEN_OFF)
+    assert ledger(tmp_path, steps, plugs(*PLUGS), plugs(PLUGS[0]), saved=2) == {"on_then_off[switch_plug]"}
+
+
+async def test_a_run_with_two_plugs_keeps_a_record_that_passed_three(tmp_path):
+    steps = suite(tmp_path, ON_THEN_OFF)
+    old = tmp_path / "records" / "shelly" / "turn_on_for.md"
+    old.parent.mkdir(parents=True)
+    rows = "".join(
+        f"| `{case_id}` | `switch` (switch_plug) | pass |\n"
+        for case_id in ("on_then_off[switch_plug]", "on_then_off[switch_plug-2]", "on_then_off[switch_plug-3]")
+    )
+    old.write_text(f"# Shelly · turn_on_for\n\n## Tests\n\n| Test | Target | Result |\n|---|---|---|\n{rows}")
+    assert engine.Record.read(old).passed == {
+        "on_then_off[switch_plug]",
+        "on_then_off[switch_plug-2]",
+        "on_then_off[switch_plug-3]",
+    }
+    ha = FakeHA({PLUGS[0]: {"state": "off"}, PLUGS[1]: {"state": "off"}}, timer_on)
+    registry = Roster({"shelly": {"turn_on_for", "get_attributes"}})
+    result = await engine.run([steps], plugs(*PLUGS[:2]), registry, ha, tolerance=TOLERANCE, out=lambda _: None)
+    assert not result.failed
+    written, kept = await engine.write_records(
+        result, registry, lambda integration: tmp_path / "records" / integration, "2026-11-15", "rig run"
+    )
+    assert (written, kept) == ([], [(old, ["on_then_off[switch_plug-3]"])])
 
 
 def test_an_offline_second_plug_skips_only_its_own_case(tmp_path):
