@@ -54,15 +54,22 @@ A record is one file per integration and suite, so part 3's four plugs must run 
 is pre-authorized and stays first (`[switch_plug]` names the same device), while the other three may not move
 unrestricted. So an entity takes `pre_authorized: false`, which leaves it out of a pre-authorized profile:
 
-- `RigEntity.pre_authorized`; `Profile.restricted` and `Profile.restricts(entities)`, which follows power both ways:
-  each one's supply, and what draws power through it. An entity takes only `false`: `true` on an entity is refused, as it can't widen its profile.
-- The run's gate (`run_held`, `restricted_targets`): restricted when the profile isn't pre-authorized, or when the
-  cases the run will run (saved and unreachable ones left out) reach a restricted entity: targets, listed members,
-  power either way, and every restricted entity of the integration for a case whose devices the profile can't name
-  (`engine.hidden_devices`: a fixed group without members, a fixed scene). The Authorization line names them.
+- `RigEntity.pre_authorized`; `Profile.restricted` and `Profile.restricts(entities)`, which follows power along any
+  chain of `powered_by`, both ways, as the engine does (`CaseSnapshot.take`). An entity takes only `false`: `true` on
+  an entity is refused, as it can't widen its profile. A listed entity takes no other key than its five
+  (`ENTITY_KEYS`), so a misspelling fails the load; a pre-authorized profile can't `pause:` a left-out entity.
+- The run's gate (`run_held`, `restricted_targets`, over `will_run`, which `targets` shares): restricted when the
+  profile isn't pre-authorized, or when the cases the run will run (saved ones left out) reach a restricted entity:
+  targets, listed members, power, and every restricted entity of the integration for a case whose devices the
+  profile can't name (`engine.hidden_devices`: a fixed group without members, a fixed scene). The gate runs before
+  the device check, so unreachable cases count. The Authorization line names them.
+- Losing the ledger after the gate (`run_approved`: origin moved, or the step files aren't the commit's) reruns the
+  saved cases: `drop_progress` stops the run before any case when they reach a left-out entity an unrestricted gate
+  left out.
 - The journal: every run writes `restricted` beside `profile` (`run_rig` defaults to true), and `Authority.withholds`
-  holds a journal marked true to the sensor or the approval whatever its profile. An unmarked one, from before, goes
-  by its profile, and is restricted once that leaves an entity out.
+  loads the journal's profile once (`journal_profile`): a journal marked true, or whose profile is gone or won't load,
+  is held to the sensor or the approval. An unmarked one, from before, goes by its profile, and is restricted once
+  that leaves an entity out.
 - A `--visual profile` probe is restricted when an integration it holds (every one, holding HA alone) lists a
   restricted entity or power reaches one; its Authorization line names them.
 
@@ -78,10 +85,12 @@ unrestricted. So an entity takes `pre_authorized: false`, which leaves it out of
 - `--check` / `targets`: every listed plug; `powered_by` on the second plug takes its case out of the lanes; an offline
   second plug skips only its own case.
 - `plan_lines` names every plug.
-- Left out: the profile rule both ways, a supply; the run's gate restricted (sensor on: refused; off: goes, watched)
-  and unrestricted (`-k` on the first plug, another integration, the entity unreachable); the journal mark; `--recover`
-  holding a marked journal of a pre-authorized profile to the sensor; `--visual profile` probes on and off the
-  integration.
+- Left out: the profile rule both ways, power along a chain, misspelt keys and a paused left-out entity refused;
+  the run's gate restricted (sensor on: refused; off: goes, watched) and unrestricted (`-k` on the first plug,
+  another integration, saved cases); a resume that loses its ledger (origin moved, step files withheld) stopping
+  before it reruns a saved left-out case; the journal mark; `--recover` holding a marked journal, an unmarked one
+  under a profile that now leaves an entity out, and one whose profile won't load; `--visual profile` probes on and
+  off the integration, and holding HA alone.
 
 ## Verification
 

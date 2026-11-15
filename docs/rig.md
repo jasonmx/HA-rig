@@ -123,19 +123,27 @@ replaced, is refused.
 
 **One entity left out.** An entity listed with `pre_authorized: false` in a pre-authorized profile is left out of it
 (a plug whose light someone might see, say): a run is restricted work, whole, when any case it will run reaches that
-entity: as its target, a group's listed member, the supply a case draws power through, or a light drawing power
-through a supply a case switches. A case on a fixed group without `members`, or a fixed scene, may hold any device of
-its integration, so it reaches every such entity there. A run that leaves them alone (another integration, `-k`, its
-cases saved or skipped as unreachable) is as unrestricted as before, and the Authorization line names the entities
-that make it restricted. A `--visual profile` probe is restricted when an integration it holds lists one (any
-integration, for a probe holding HA alone). An entity takes only `pre_authorized: false`: being pre-authorized is the profile's to
-say, so `true` on an entity is refused (in a restricted profile, `false` only restates it).
+entity: as its target, a group's listed member, or through power, along any chain of `powered_by` either way (a case
+needs its supplies on and may switch them, which moves whatever draws power through them). A case on a fixed group
+without `members`, or a fixed scene, may hold any device of its integration, so it reaches every such entity there.
+The gate is decided before the device check, so a case `--ignore-unreachables` will skip still counts. A run that
+leaves them alone (another integration, `-k`, its cases saved in the ledger) is as unrestricted as before, and the
+Authorization line names the entities that make it restricted. A resumed run that loses its ledger after its gate
+(origin moved during the deploy, or the step files aren't the commit's) would rerun its saved cases: where they reach
+a left-out entity its unrestricted gate didn't count, it stops before any case, to be run again and gated for them.
+A `--visual profile` probe is restricted when an integration it holds lists one (any integration, for a probe holding
+HA alone).
+
+An entity takes only `pre_authorized: false`: being pre-authorized is the profile's to say, so `true` on an entity is
+refused (in a restricted profile, `false` only restates it), and so is any key an entity doesn't take, so a misspelt
+`pre_authorised` can't leave it pre-authorized. A pre-authorized profile can't list a left-out entity under `pause:`,
+which every run of its key turns off and on.
 
 An aborted run's changes are restricted by the profile that left it, and by the run: its journal says whether it was
 restricted work (`restricted`), and a restricted run's changes are restricted to put back whatever its profile. A
-journal from before that mark goes by its profile, and is restricted once the profile leaves an entity out. The journal from before per-run
-journals always is. `--recover`, and the replay before a run's gate, put back what the rig may now (never asking) and name the
-rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
+journal from before that mark goes by its profile, and is restricted once the profile leaves an entity out; one whose
+profile is gone or won't load is restricted. The journal from before per-run journals always is. `--recover`, and the
+replay before a run's gate, put back what the rig may now (never asking) and name the rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
 whose locks cover one it can't put back stops before its gate rather than test on top of it.
 
 ### Deploys

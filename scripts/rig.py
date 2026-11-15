@@ -522,9 +522,10 @@ class Authority:
         `pre_authorized: false`: the journal's `restricted`); the journal from before per-run journals never is. Then
         it needs the sensor off or the approval; never a prompt."""
         name, mark = journal.get("profile"), journal.get("restricted")
-        covered = journal.path.name != LEGACY_NAME and pre_authorized(name, self.env)
+        profile = None if journal.path.name == LEGACY_NAME else journal_profile(name, self.env)
         # A journal from before the mark is the profile's, unless the profile now leaves an entity out.
-        if covered and (mark is False or (mark is None and not leaves_out(name, self.env))):
+        covered = profile is not None and profile.pre_authorized
+        if covered and (mark is False or (mark is None and not profile.restricted)):
             return None
         if authorize(restricted=True, sensor=self.sensor(), approved=approved(), tty=False).go:
             return None
@@ -532,23 +533,15 @@ class Authority:
         return f"profile {name or 'unknown'}, restricted{why}"
 
 
-def pre_authorized(name: str | None, env: dict) -> bool:
-    """Whether the profile `name` is pre-authorized; one that is gone or won't load isn't."""
+def journal_profile(name: str | None, env: dict) -> Profile | None:
+    """The profile `name` that left a journal, as it is now; None when it is gone or won't load, which makes putting
+    the journal back restricted."""
     if not name:
-        return False
+        return None
     try:
-        return Profile.load(choose_profile(name, env)).pre_authorized
+        return Profile.load(choose_profile(name, env))
     except SystemExit, ValueError, OSError:
-        return False
-
-
-def leaves_out(name: str | None, env: dict) -> bool:
-    """Whether the profile `name` lists an entity `pre_authorized: false`; one that is gone or won't load lists none
-    (pre_authorized already reads it as restricted)."""
-    try:
-        return bool(Profile.load(choose_profile(name, env)).restricted) if name else False
-    except SystemExit, ValueError, OSError:
-        return False
+        return None
 
 
 def ask(question: str, prompt: Callable[[str], str] = input) -> bool:
@@ -1221,26 +1214,36 @@ def whose(profile: Profile, moved: list[str], work: str = "run moves") -> str:
     )
 
 
-def restricted_targets(setup: Setup, keyword: str | None) -> list[str]:
+def restricted_targets(setup: Setup, keyword: str | None, resuming: bool = True) -> list[str]:
     """The entities listed `pre_authorized: false` that the cases the run will run reach (Profile.restricts): their
     targets and a group's listed members; and, for a case whose devices the profile can't name (a fixed group without
     members, a fixed scene: hidden_devices), every such entity of its integration. Any one makes a pre-authorized
-    profile's run restricted work."""
-    profile, registry = setup.profile, setup.registry
+    profile's run restricted work. A resumed run leaves out the cases the ledger holds, unless not `resuming`.
+
+    The gate decides this before the device check, so a case --ignore-unreachables will skip still counts."""
+    profile = setup.profile
     if not profile.restricted:
         return []
-    only = unfinished(setup.done)
     touched: list[str] = []
-    for suite in setup.suites:
-        if registry.adapter(suite.action, suite.integration) is None:
-            continue
-        for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
-            if case.skip or (only is not None and not only(case)):
-                continue
-            touched += [*case.entities.values(), *case.members]
-            if hidden_devices(case, profile):
-                touched += profile.restricted_on(suite.integration)
+    for case in will_run(setup.suites, profile, setup.registry, keyword, done=setup.done if resuming else None):
+        touched += [*case.entities.values(), *case.members]
+        if hidden_devices(case, profile):
+            touched += profile.restricted_on(case.suite.integration)
     return profile.restricts(touched)
+
+
+def drop_progress(setup: Setup, keyword: str | None, why: str, said: bool = False) -> None:
+    """Run without the ledger, after `why`: the run then reruns the cases it holds, which its gate left out. Where
+    they reach an entity left out of the profile that the gate let an unrestricted run past, stop instead, before any
+    case, so the rerun goes through the gate with them."""
+    if not setup.restricted and (moved := restricted_targets(setup, keyword, resuming=False)):
+        raise SystemExit(
+            f"{why}, so this run would rerun its saved cases, and they move {', '.join(moved)}, which its "
+            "unrestricted gate didn't cover. Nothing was tested; run it again, to be gated for them."
+        )
+    if not said:
+        print(f"{why}, so this run saves no progress to resume.")
+    setup.progress = None
 
 
 def orphaned(setup: Setup, directory: Path) -> Claim:
@@ -1383,12 +1386,11 @@ def run_approved(
     commit = None if withheld else tested_commit(env.get("RIG_STATUS_CMD", ""), deploy, deploying)
     if withheld and setup.progress is not None:
         print(UNCOMMITTED_STEPS)
-        setup.progress = None
+        drop_progress(setup, args.keyword, "The step files aren't the commit's", said=True)
     if commit is None and setup.progress is not None:
         # The saved cases are keyed by the commit planned at, which isn't what HA runs: saving them would pass them
         # off as that commit's.
-        print("HA loaded another tree than the one planned (origin moved), so this run saves no progress to resume.")
-        setup.progress = None
+        drop_progress(setup, args.keyword, "HA loaded another tree than the one planned (origin moved)")
     return run_tests(
         run_rig(
             env,
@@ -2507,17 +2509,31 @@ def targets(
 ) -> list[str]:
     """Every entity a case `only` accepts will move, a group's listed members included; none of a case `done` has a
     result for, which the run leaves out."""
-    only = unfinished(done, only)
     return sorted(
         {
             entity
-            for suite in suites
-            if registry.adapter(suite.action, suite.integration)
-            for case in cases(suite, profile, keyword, adapters_for(suite, registry))
-            if not case.skip and (only is None or only(case))
+            for case in will_run(suites, profile, registry, keyword, only, done)
             for entity in (*case.entities.values(), *case.members)
         }
     )
+
+
+def will_run(
+    suites: list[Suite],
+    profile: Profile,
+    registry: AdapterRegistry,
+    keyword: str | None,
+    only: Callable[[Case], bool] | None = None,
+    done: Done | None = None,
+) -> Iterator[Case]:
+    """The cases `only` accepts that the run will run: of a suite with an adapter, not skipped, none `done` has a
+    result for."""
+    only = unfinished(done, only)
+    for suite in suites:
+        if registry.adapter(suite.action, suite.integration):
+            for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+                if not case.skip and (only is None or only(case)):
+                    yield case
 
 
 def platforms(

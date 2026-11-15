@@ -64,6 +64,34 @@ def test_switching_a_supply_restricts_what_draws_power_through_it_and_isnt_pre_a
     assert profile.restricts(["switch.plug"]) == ["light.lamp"]
 
 
+@pytest.mark.parametrize("key", ["pre_authorised", "preauthorized", "restricted"])
+def test_a_misspelt_key_on_an_entity_fails_the_load_rather_than_leave_it_pre_authorized(tmp_path, key):
+    text = MIXED.replace("    pre_authorized: false\n", f"    {key}: false\n")
+    with pytest.raises(ValueError, match=rf"switch.plug_b has unknown keys \['{key}'\]"):
+        Profile.load(write(tmp_path, "lab.yaml", text))
+
+
+def test_power_is_followed_through_a_chain_of_supplies_both_ways(tmp_path):
+    """light.a draws power through switch.b, which draws it through switch.c: switching switch.c cuts light.a."""
+    text = (
+        "pre_authorized: true\nshelly:\n"
+        "  - entity_id: switch.c\n    roles: [switch_plug]\n"
+        "  - entity_id: switch.b\n    roles: [switch_plug]\n    powered_by: switch.c\n"
+        "  - entity_id: light.a\n    roles: [light_onoff]\n    powered_by: switch.b\n    pre_authorized: false\n"
+        "  - entity_id: light.d\n    roles: [light_wrapped]\n"
+    )
+    profile = Profile.load(write(tmp_path, "lab.yaml", text))
+    assert profile.restricts(["switch.c"]) == ["light.a"]
+    assert profile.restricts(["switch.b"]) == ["light.a"]
+    assert profile.restricts(["light.d"]) == []
+
+
+def test_a_left_out_entity_cant_be_paused_by_a_pre_authorized_profile(tmp_path):
+    text = MIXED.replace("pre_authorized: true\n", "pre_authorized: true\npause: [switch.plug_b]\n", 1)
+    with pytest.raises(ValueError, match="switch.plug_b is pre_authorized: false, so it can't be under pause:"):
+        Profile.load(write(tmp_path, "lab.yaml", text))
+
+
 # --- What the run leaves -------------------------------------------------------------------------------------
 
 

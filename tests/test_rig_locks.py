@@ -616,7 +616,7 @@ def test_the_legacy_journal_is_replayed_only_by_recover(tmp_path, monkeypatch, p
 
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
-    monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
+    monkeypatch.setattr(rig, "journal_profile", lambda name, env: Profile(pre_authorized=True))
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1  # restricted, whatever its profile
     assert put_back == []
     monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
@@ -635,7 +635,7 @@ def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypat
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
-    monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
+    monkeypatch.setattr(rig, "journal_profile", lambda name, env: Profile(pre_authorized=True))
     args = argparse.Namespace(dry_run=True)
     assert rig.recover_all(args, tmp_path) == 1
     assert put_back == []
@@ -1293,3 +1293,19 @@ def test_a_journal_is_put_back_by_its_mark_or_else_by_its_profile_now(
     recovering(monkeypatch, SENSOR_ON)
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == (0 if put else 1)
     assert put_back == ([journal.name] if put else [])
+
+
+def test_a_journal_whose_profile_wont_load_is_restricted_to_put_back_whatever_its_mark(
+    tmp_path, monkeypatch, put_back, capsys
+):
+    path = tmp_path / "profiles" / "lab.yaml"
+    path.parent.mkdir()
+    path.write_text(MIXED.replace("    pre_authorized: false\n", "    pre_authorised: false\n"))  # fails the load
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    journal = labelled(tmp_path, "lab", "shelly")
+    Journal(journal).update(restricted=False)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert put_back == []
+    assert f"left {journal} (profile lab, restricted)" in capsys.readouterr().out

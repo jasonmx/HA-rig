@@ -1,6 +1,7 @@
 """scripts/rig.py with a roaming profile: phases by the cycle, a move before each and home after the last, a crash in
 each phase, --roam-check, and --recover bringing the bulbs home. Against the Lab fake; no rig is touched."""
 
+import argparse
 import asyncio
 import contextlib
 import importlib.util
@@ -18,6 +19,7 @@ from ha_rig.engine import load_step_file
 from ha_rig.home import HomeRecord
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import Profile, RigEntity
+from ha_rig.progress import Progress
 from ha_rig.roam import Roamer
 from tests import rig_fakes as fakes
 
@@ -1210,15 +1212,68 @@ def test_a_run_that_leaves_the_entity_alone_stays_unrestricted(tmp_path, monkeyp
     assert "Authorization: profile mixed is pre-authorized. Unrestricted." in capsys.readouterr().out
 
 
-def test_a_run_whose_entity_is_offline_and_skipped_stays_unrestricted(tmp_path):
-    """--ignore-unreachables skips the cases of an entity that is down, so they move nothing."""
-    profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", MIXED))
-    profile.offline = frozenset({"switch.plug_b"})
-    suites = [rig.Suite(load_step_file(fakes.STEPS / "turn_on_for.yaml"), "shelly")]
-    setup = rig.Setup({}, profile, fakes.Roster({"shelly": {"turn_on_for"}}), suites, False, False)
+def test_a_resume_leaves_its_saved_cases_out_of_the_gate(tmp_path):
+    """Saved, they don't run again; and the gate runs before the device check, so an unreachable case still counts."""
+    setup = resumed(tmp_path)
     assert rig.restricted_targets(setup, None) == []
-    profile.offline = frozenset()
-    assert rig.restricted_targets(setup, None) == ["switch.plug_b"]
+    assert rig.restricted_targets(setup, None, resuming=False) == ["switch.plug_b"]
+
+
+def resumed(tmp_path, *, uncommitted: bool = False) -> rig.Setup:
+    """A resumed run on MIXED's shelly suite, gated unrestricted: the ledger holds the left-out plug's case, from an
+    earlier, approved session, and the first plug's is still to run."""
+    profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", MIXED))
+    suite = rig.Suite(load_step_file(fakes.STEPS / "turn_on_for.yaml"), "shelly")
+    registry = fakes.Roster({"shelly": {"turn_on_for"}})
+    progress = Progress.load(tmp_path, "mixed")
+    progress.track(suite, "c1")
+    progress.check_ha("2026.10.1", lambda _: None)
+    for case in engine.cases(suite, profile, None, rig.adapters_for(suite, registry)):
+        if not case.skip and case.entities.get("switch_plug") == "switch.plug_b":
+            progress.record(
+                suite, engine.CaseResult(case.id, case.role, "switch", engine.Outcome.PASS, "", ("switch.plug_b",))
+            )
+    setup = rig.Setup({}, profile, registry, [suite], False, False, progress=progress, uncommitted_steps=uncommitted)
+    setup.restricted = bool(rig.restricted_targets(setup, None))
+    assert not setup.restricted
+    return setup
+
+
+@pytest.mark.parametrize(
+    ("commit", "uncommitted", "says"),
+    [
+        pytest.param(None, False, r"HA loaded another tree than the one planned \(origin moved\)", id="origin moved"),
+        pytest.param("c1", True, "The step files aren't the commit's", id="step files withheld"),
+    ],
+)
+def test_a_resume_that_loses_its_ledger_stops_before_rerunning_saved_cases_its_gate_left_out(
+    tmp_path, monkeypatch, commit, uncommitted, says
+):
+    """Without the ledger the run reruns the saved cases, so a left-out entity among them stops it before any case."""
+    setup = resumed(tmp_path, uncommitted=uncommitted)
+    setup.deploy = rig.Deploy("c1", "tree", "tree", "tree", "wt")
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda *args: commit)
+    monkeypatch.setattr(rig, "run_rig", lambda *args, **kwargs: pytest.fail("ran the tests"))
+    args = argparse.Namespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    with pytest.raises(
+        SystemExit, match=f"{says}, so this run would rerun its saved cases, and they move switch.plug_b"
+    ):
+        rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False)
+
+
+def test_a_resume_that_loses_its_ledger_with_nothing_left_out_among_its_saved_cases_goes_on(tmp_path, monkeypatch):
+    setup = resumed(tmp_path)
+    setup.profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", MIXED.replace("    pre_authorized: false\n", "")))
+    setup.deploy = rig.Deploy("c1", "tree", "tree", "tree", "wt")
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda *args: None)
+    ran = []
+    monkeypatch.setattr(rig, "run_rig", lambda *args, **kwargs: ran.append(kwargs["progress"]))
+    monkeypatch.setattr(rig, "run_tests", lambda coroutine, aborted=None: 0)
+    args = argparse.Namespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False) == 0
+    assert ran == [None]  # without the ledger, as before
 
 
 def test_a_group_whose_members_arent_listed_counts_every_left_out_entity_of_its_integration(tmp_path):
