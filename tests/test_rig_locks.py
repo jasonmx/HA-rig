@@ -1249,7 +1249,7 @@ def test_a_visual_profile_probe_on_an_integration_with_an_entity_left_out_is_res
     monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
     assert rig.main(["--hold", "shelly", *VISUAL_PROFILE, "--", "true"]) == 1
     out = capsys.readouterr().out
-    assert "Restricted: profile lab doesn't pre-authorize switch.plug_b." in out
+    assert "Authorization: profile lab is pre-authorized, but not switch.plug_b, which this probe may move." in out
     assert f"Restricted, and {PROBE_SENSOR} is on." in out
     assert seen == []
     assert ProbeHA.calls == []
@@ -1261,3 +1261,35 @@ def test_a_visual_profile_probe_elsewhere_stays_unrestricted(probe, monkeypatch)
     monkeypatch.setattr(rig, "run_command", lambda command: 0)
     assert rig.main(["--hold", "hue", *VISUAL_PROFILE, "--", "true"]) == 0
     assert seen == [False]
+
+
+def test_a_visual_profile_probe_holding_ha_alone_reaches_every_integration(probe, monkeypatch, capsys):
+    mixed_probe(probe)
+    clear_states(monkeypatch, "on")
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    assert rig.main(["--exclusive", *VISUAL_PROFILE, "--", "true"]) == 1
+    assert "but not switch.plug_b, which this probe may move" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("mark", "listed", "put"),
+    [
+        pytest.param(False, True, True, id="marked unrestricted: put back"),
+        pytest.param(None, False, True, id="unmarked, the profile leaves nothing out: put back"),
+        pytest.param(None, True, False, id="unmarked, the profile now leaves an entity out: restricted"),
+    ],
+)
+def test_a_journal_is_put_back_by_its_mark_or_else_by_its_profile_now(
+    tmp_path, monkeypatch, put_back, mark, listed, put
+):
+    path = tmp_path / "profiles" / "lab.yaml"
+    path.parent.mkdir()
+    path.write_text(MIXED if listed else "pre_authorized: true\nshelly:\n")
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    journal = labelled(tmp_path, "lab", "shelly")
+    if mark is not None:
+        Journal(journal).update(restricted=mark)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == (0 if put else 1)
+    assert put_back == ([journal.name] if put else [])

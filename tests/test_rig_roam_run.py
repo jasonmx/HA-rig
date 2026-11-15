@@ -159,7 +159,7 @@ async def test_a_failed_move_stops_the_run_and_leaves_the_bulbs_for_recover(tmp_
 
     assert await fakes.where(lab) == ["zha", None]
     assert lab.ha.states["automation.lab"]["state"] == "on"
-    assert set(Journal(journal.path).sections) == {"profile", "roam"}
+    assert set(Journal(journal.path).sections) == {"profile", "restricted", "roam"}
 
 
 async def test_a_failed_move_still_reports_the_phases_before_it(tmp_path, monkeypatch, lab):
@@ -1219,3 +1219,18 @@ def test_a_run_whose_entity_is_offline_and_skipped_stays_unrestricted(tmp_path):
     assert rig.restricted_targets(setup, None) == []
     profile.offline = frozenset()
     assert rig.restricted_targets(setup, None) == ["switch.plug_b"]
+
+
+def test_a_group_whose_members_arent_listed_counts_every_left_out_entity_of_its_integration(tmp_path):
+    """The profile can't say which devices a fixed group without `members` holds, so it may hold the plug."""
+    text = (
+        "pre_authorized: true\nzigbee2mqtt:\n  - entity_id: light.room\n    roles: [group]\n"
+        "  - entity_id: switch.plug_z\n    roles: [switch_plug]\n    pre_authorized: false\n"
+    )
+    profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", text))
+    suites = [rig.Suite(load_step_file(fakes.STEPS / "turn_on_for.yaml"), "zigbee2mqtt")]
+    setup = rig.Setup({}, profile, fakes.Roster({"zigbee2mqtt": {"turn_on_for"}}), suites, False, False)
+    assert rig.restricted_targets(setup, "group_on_then_off") == ["switch.plug_z"]
+    listed = text.replace("roles: [group]\n", "roles: [group]\n    members: [light.a]\n")
+    setup.profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", listed))
+    assert rig.restricted_targets(setup, "group_on_then_off") == []

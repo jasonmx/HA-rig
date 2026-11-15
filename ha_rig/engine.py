@@ -967,6 +967,12 @@ def unreachable(case: Case, profile: Profile) -> str | None:
     devices = [*case.entities.values(), *case.members]
     if down := next((e for e in [*devices, *filter(None, map(power.get, devices))] if e in profile.offline), None):
         return f"{down} unreachable"
+    return hidden_devices(case, profile)
+
+
+def hidden_devices(case: Case, profile: Profile) -> str | None:
+    """Why the profile can't say which devices the case moves, or None: it targets a fixed group whose members it
+    doesn't list, or a fixed scene. Rig-made groups and scenes are made of the roaming bulbs."""
     fixed = {name: entity for name, entity in case.entities.items() if entity not in profile.made_entities}
     if any(name in GROUP_ROLES for name in fixed) and not case.members:
         return "group: members not listed"

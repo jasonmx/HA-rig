@@ -54,16 +54,17 @@ A record is one file per integration and suite, so part 3's four plugs must run 
 is pre-authorized and stays first (`[switch_plug]` names the same device), while the other three may not move
 unrestricted. So an entity takes `pre_authorized: false`, which leaves it out of a pre-authorized profile:
 
-- `RigEntity.pre_authorized`; `Profile.restricted` and `Profile.restricts(entities)`, which adds each one's
-  `powered_by` supply. An entity takes only `false`: `true` on an entity is refused, as it can't widen its profile.
-- The run's gate (`run_held`): restricted when the profile isn't pre-authorized, or when `targets` (every case the run
-  will run, members included; saved and unreachable cases left out) or their supplies hold a restricted entity. The
-  plan's Authorization line names them. Otherwise unchanged.
-- The journal: a restricted run writes `restricted: true` beside `profile`, and `Authority.withholds` holds a marked
-  journal to the sensor or the approval whatever its profile, so `--recover` and the replay put it back as a
-  restricted profile's.
-- A `--visual profile` probe is restricted when an integration it holds lists a restricted entity (or one powered
-  through it).
+- `RigEntity.pre_authorized`; `Profile.restricted` and `Profile.restricts(entities)`, which follows power both ways:
+  each one's supply, and what draws power through it. An entity takes only `false`: `true` on an entity is refused, as it can't widen its profile.
+- The run's gate (`run_held`, `restricted_targets`): restricted when the profile isn't pre-authorized, or when the
+  cases the run will run (saved and unreachable ones left out) reach a restricted entity: targets, listed members,
+  power either way, and every restricted entity of the integration for a case whose devices the profile can't name
+  (`engine.hidden_devices`: a fixed group without members, a fixed scene). The Authorization line names them.
+- The journal: every run writes `restricted` beside `profile` (`run_rig` defaults to true), and `Authority.withholds`
+  holds a journal marked true to the sensor or the approval whatever its profile. An unmarked one, from before, goes
+  by its profile, and is restricted once that leaves an entity out.
+- A `--visual profile` probe is restricted when an integration it holds (every one, holding HA alone) lists a
+  restricted entity or power reaches one; its Authorization line names them.
 
 ## Tests
 

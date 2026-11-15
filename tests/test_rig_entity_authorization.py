@@ -37,16 +37,31 @@ def test_an_entity_cant_be_pre_authorized_on_its_own(tmp_path, value):
         Profile.load(write(tmp_path, "house.yaml", f"{text}    pre_authorized: {value}\n"))
 
 
-def test_in_a_restricted_profile_every_entity_is_restricted(tmp_path):
+def test_false_on_an_entity_of_a_restricted_profile_only_restates_it(tmp_path):
+    """Its every run is restricted anyway (the gate reads the profile's own key first); the entity's key is allowed, so
+    a profile can be made restricted for a while without editing its entities."""
     text = MIXED.replace("pre_authorized: true\n", "pre_authorized: false\n", 1)
     profile = Profile.load(write(tmp_path, "house.yaml", text))
-    assert profile.restricts(["switch.plug"]) == ["switch.plug"]
+    assert not profile.pre_authorized
+    assert profile.restricted == {"switch.plug_b"}
 
 
 def test_a_supply_that_isnt_pre_authorized_restricts_what_it_powers(tmp_path):
     text = MIXED + "  - entity_id: light.lamp\n    roles: [light_onoff]\n    powered_by: switch.plug_b\n"
     profile = Profile.load(write(tmp_path, "lab.yaml", text))
     assert profile.restricts(["light.lamp"]) == ["switch.plug_b"]
+
+
+def test_switching_a_supply_restricts_what_draws_power_through_it_and_isnt_pre_authorized(tmp_path):
+    text = MIXED + "  - entity_id: light.lamp\n    roles: [light_onoff]\n    powered_by: switch.plug\n"
+    profile = Profile.load(
+        write(
+            tmp_path,
+            "lab.yaml",
+            text.replace("    roles: [light_onoff]\n", "    roles: [light_onoff]\n    pre_authorized: false\n"),
+        )
+    )
+    assert profile.restricts(["switch.plug"]) == ["light.lamp"]
 
 
 # --- What the run leaves -------------------------------------------------------------------------------------
@@ -69,8 +84,8 @@ async def test_a_restricted_runs_journal_says_so(tmp_path, monkeypatch, restrict
     suites = target_suite(tmp_path)
     profile = fakes.profile("shelly")
     await rig.run_rig({}, suites, profile, fakes.OPTION_REGISTRY, None, True, "c1", journal, restricted=restricted)
-    assert seen and all(("restricted" in sections) is restricted for sections in seen)
-    assert all(sections.get("restricted", True) is True for sections in seen)
+    assert seen and all(sections["restricted"] is restricted for sections in seen)
+    assert not journal.path.exists()  # cleared with the profile once nothing is left
 
 
 async def _nothing():

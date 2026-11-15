@@ -742,7 +742,7 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
     task = asyncio.create_task(run_rig)
     while ha.states["light.a"]["state"] != "off":
         await asyncio.sleep(0.005)
-    assert set(journal.sections) == {"profile", "options", "cases"}
+    assert set(journal.sections) == {"profile", "restricted", "options", "cases"}
     assert json.loads((tmp_path / baseline.NAME).read_text()) == {
         "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]},
     }

@@ -240,11 +240,21 @@ class Profile:
         return frozenset(e.entity_id for es in self.integrations.values() for e in es if not e.pre_authorized)
 
     def restricts(self, entity_ids: Iterable[str]) -> list[str]:
-        """The restricted entities among `entity_ids` and the supplies they draw power through (a case needs its
-        supply on, and may switch it), in order; every one when the profile isn't pre-authorized."""
-        power = self.power()
-        touched = dict.fromkeys(e for entity_id in entity_ids for e in (entity_id, power.get(entity_id)) if e)
-        return [e for e in touched if not self.pre_authorized or e in self.restricted]
+        """The entities listed `pre_authorized: false` that moving `entity_ids` reaches, in order: each one, the
+        supply it draws power through (a case needs it on, and may switch it), and what draws power through it (a case
+        that switches a supply cuts them)."""
+        restricted, power = self.restricted, self.power()
+        touched = dict.fromkeys(
+            e
+            for entity_id in entity_ids
+            for e in (entity_id, power.get(entity_id), *(p for p, supply in power.items() if supply == entity_id))
+            if e
+        )
+        return [e for e in touched if e in restricted]
+
+    def restricted_on(self, integration: str) -> list[str]:
+        """The integration's entities listed `pre_authorized: false`, in profile order."""
+        return [e.entity_id for e in self.integrations.get(integration, ()) if not e.pre_authorized]
 
     def power(self) -> dict[str, str]:
         """Each entity that draws power through another, mapped to its supply, across every integration."""
