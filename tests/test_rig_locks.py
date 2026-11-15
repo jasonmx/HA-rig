@@ -616,7 +616,7 @@ def test_the_legacy_journal_is_replayed_only_by_recover(tmp_path, monkeypatch, p
 
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
-    monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
+    monkeypatch.setattr(rig, "journal_profile", lambda name, env: Profile(pre_authorized=True))
     assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1  # restricted, whatever its profile
     assert put_back == []
     monkeypatch.setenv("DEVICE_SIDE_RIG_RESTRICTED", "1")
@@ -635,7 +635,7 @@ def test_recover_holds_everything_and_puts_back_every_orphan(tmp_path, monkeypat
     monkeypatch.setattr(rig, "recover_rig", recover_rig)
     monkeypatch.setattr(rig, "load_env", dict)
     monkeypatch.setattr(rig, "git", lambda *args, check=True: "wt")
-    monkeypatch.setattr(rig, "pre_authorized", lambda name, env: True)
+    monkeypatch.setattr(rig, "journal_profile", lambda name, env: Profile(pre_authorized=True))
     args = argparse.Namespace(dry_run=True)
     assert rig.recover_all(args, tmp_path) == 1
     assert put_back == []
@@ -1182,3 +1182,152 @@ def test_a_probe_over_a_restricted_orphan_warns_and_runs(probe, monkeypatch, put
     assert rig.main(["--hold", "hue", "--visual", "none", "--", "true"]) == 0
     assert put_back == []
     assert f"left {path} (profile lab, restricted)" in capsys.readouterr().out
+
+
+MIXED = (
+    "pre_authorized: true\n"
+    "shelly:\n"
+    "  - entity_id: switch.plug\n    roles: [switch_plug]\n"
+    "  - entity_id: switch.plug_b\n    roles: [switch_plug]\n    pre_authorized: false\n"
+)
+
+
+def test_recover_holds_a_marked_journal_of_a_pre_authorized_profile_to_the_sensor(
+    tmp_path,
+    monkeypatch,
+    put_back,
+    capsys,
+):
+    profiles(tmp_path, monkeypatch, lab=True)
+    plain = labelled(tmp_path, "lab", "hue")
+    marked = labelled(tmp_path, "lab", "shelly")
+    Journal(marked).update(restricted=True)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert put_back == [plain.name]
+    assert (
+        f"left {marked} (profile lab, restricted: its run moved entities that aren't pre-authorized): sensor off or "
+        "DEVICE_SIDE_RIG_RESTRICTED=1 restores it"
+    ) in capsys.readouterr().out
+
+    sensor_reads(monkeypatch, "off")
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 0
+    assert sorted(put_back) == sorted([plain.name, marked.name])
+
+
+def test_a_marked_journal_of_a_restricted_profile_reads_as_any_restricted_one(
+    tmp_path,
+    monkeypatch,
+    put_back,
+    capsys,
+):
+    profiles(tmp_path, monkeypatch, house=False)
+    marked = labelled(tmp_path, "house", "shelly")
+    Journal(marked).update(restricted=True)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert f"left {marked} (profile house, restricted): sensor off" in capsys.readouterr().out
+
+
+# --- Probes --------------------------------------------------------------------------------------------------
+
+
+def mixed_probe(probe_dir) -> None:
+    (probe_dir / "lab.yaml").write_text(MIXED + "hue:\n  - entity_id: light.desk\n    roles: [light_ct]\n")
+
+
+def test_a_visual_profile_probe_on_an_integration_with_an_entity_left_out_is_restricted(
+    probe,
+    monkeypatch,
+    capsys,
+):
+    mixed_probe(probe)
+    seen = clear_states(monkeypatch, "on")
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    assert rig.main(["--hold", "shelly", *VISUAL_PROFILE, "--", "true"]) == 1
+    out = capsys.readouterr().out
+    assert "Authorization: profile lab is pre-authorized, but not switch.plug_b, which this probe may move." in out
+    assert f"Restricted, and {PROBE_SENSOR} is on." in out
+    assert seen == []
+    assert ProbeHA.calls == []
+
+
+def test_a_visual_profile_probe_elsewhere_stays_unrestricted(probe, monkeypatch):
+    mixed_probe(probe)
+    seen = clear_states(monkeypatch)
+    monkeypatch.setattr(rig, "run_command", lambda command: 0)
+    assert rig.main(["--hold", "hue", *VISUAL_PROFILE, "--", "true"]) == 0
+    assert seen == [False]
+
+
+def test_a_visual_profile_probe_holding_ha_alone_reaches_every_integration(probe, monkeypatch, capsys):
+    mixed_probe(probe)
+    clear_states(monkeypatch, "on")
+    monkeypatch.setattr(rig, "run_command", lambda command: pytest.fail("ran"))
+    assert rig.main(["--exclusive", *VISUAL_PROFILE, "--", "true"]) == 1
+    assert "but not switch.plug_b, which this probe may move" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("mark", "listed", "put"),
+    [
+        pytest.param(False, True, True, id="marked unrestricted: put back"),
+        pytest.param(None, False, True, id="unmarked, the profile leaves nothing out: put back"),
+        pytest.param(None, True, False, id="unmarked, the profile now leaves an entity out: restricted"),
+    ],
+)
+def test_a_journal_is_put_back_by_its_mark_or_else_by_its_profile_now(
+    tmp_path, monkeypatch, put_back, mark, listed, put
+):
+    path = tmp_path / "profiles" / "lab.yaml"
+    path.parent.mkdir()
+    path.write_text(MIXED if listed else "pre_authorized: true\nshelly:\n")
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    journal = labelled(tmp_path, "lab", "shelly")
+    if mark is not None:
+        Journal(journal).update(restricted=mark)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == (0 if put else 1)
+    assert put_back == ([journal.name] if put else [])
+
+
+def test_a_journal_whose_profile_wont_load_is_restricted_to_put_back_whatever_its_mark(
+    tmp_path, monkeypatch, put_back, capsys
+):
+    path = tmp_path / "profiles" / "lab.yaml"
+    path.parent.mkdir()
+    path.write_text(MIXED.replace("    pre_authorized: false\n", "    pre_authorised: false\n"))  # fails the load
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    journal = labelled(tmp_path, "lab", "shelly")
+    Journal(journal).update(restricted=False)
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == 1
+    assert put_back == []
+    assert f"left {journal} (profile lab, restricted)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("taken", "put"),
+    [
+        pytest.param({"switch.plug": {"state": "on"}}, True, id="it changed only what the profile pre-authorizes"),
+        pytest.param({"switch.plug_b": {"state": "on"}}, False, id="the profile has since left out what it changed"),
+    ],
+)
+def test_a_journal_marked_unrestricted_is_held_once_its_profile_leaves_out_what_it_changed(
+    tmp_path, monkeypatch, put_back, taken, put
+):
+    path = tmp_path / "profiles" / "lab.yaml"
+    path.parent.mkdir()
+    path.write_text(MIXED)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    journal = labelled(tmp_path, "lab", "shelly")
+    Journal(journal).update(restricted=False, cases={"shelly": {"taken": taken, "stored": {}, "power": {}}})
+    sensor_reads(monkeypatch, "on")
+    recovering(monkeypatch, SENSOR_ON)
+    assert rig.recover_all(argparse.Namespace(dry_run=False), tmp_path) == (0 if put else 1)
+    assert put_back == ([journal.name] if put else [])

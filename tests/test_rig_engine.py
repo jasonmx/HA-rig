@@ -519,7 +519,7 @@ async def test_setup_runs_before_the_brief_and_the_steps_after_enter(tmp_path):
     start = printed.index("1 test needs you")
     assert printed[start + 1 : start + 5] == [
         "",
-        "--- turn_on_for / on_then_off on switch_plug (1 of 1) ---",
+        "--- turn_on_for / on_then_off[switch_plug] observed (1 of 1) ---",
         "Lights: switch.plug",
         "You'll see: \033[1mIt clicks on then off.\033[0m",
     ]
@@ -613,8 +613,8 @@ async def test_every_automated_case_runs_before_the_first_brief(tmp_path):
     assert len(automated) == 2
     assert max(automated) < printed.index("2 tests need you") < min(briefs)
     assert [printed[index] for index in briefs] == [
-        "--- turn_on_for / on_then_off on switch_plug (1 of 2) ---",
-        "--- turn_on_for / on_then_off on switch_plug (2 of 2) ---",
+        "--- turn_on_for / on_then_off[switch_plug] observed (1 of 2) ---",
+        "--- turn_on_for / on_then_off[switch_plug] observed (2 of 2) ---",
     ]
 
 
@@ -765,7 +765,7 @@ async def test_the_brief_counts_only_the_observed_cases_that_run(tmp_path):
     inv = profile(switch_plug="switch.plug")
     await run([steps], inv, REGISTRY, ha, tolerance=TOLERANCE, out=printed.append, ask=lambda _: "y")
     assert [line for line in printed if line.startswith("---")] == [
-        "--- turn_on_for / everywhere on switch_plug (1 of 1) ---"
+        "--- turn_on_for / everywhere[switch_plug] observed (1 of 1) ---"
     ]
 
 

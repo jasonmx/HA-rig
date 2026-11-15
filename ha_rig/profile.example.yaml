@@ -7,6 +7,8 @@
 # disables, roaming, HA restarts), the recovery of what it leaves and its `--visual profile` probes go whatever
 # .env.rig's RIG_RESTRICTED_ENTITY reads, for a setup whose lights nobody minds seeing move (a lab). Left out or false,
 # they are restricted: they go while it is off, or with DEVICE_SIDE_RIG_RESTRICTED=1 (docs/rig.md, Authorization).
+# pre_authorized: false on one entity leaves it out of a pre-authorized profile: a run that moves it (or the supply it
+# draws power through) is restricted, whole, and so is putting back what it left; runs that leave it alone aren't.
 #
 # pause: the automations and switches turned off while the rig runs, for whatever would fight the tests on these
 # entities (motion lighting, an Adaptive Lighting switch). Only those that were on are turned back on, once no run
@@ -16,6 +18,9 @@
 # Then one list per integration key (shelly, zigbee2mqtt, zha, matter, hue). Roles pick which test uses an entity:
 #   switch_plug, light_onoff (a relay shown as a light), light_wrapped (a switch_as_x light over a switch),
 #   light_dimmable, light_ct, light_color, group, group_color (a native group whose members all take color), scene
+# A role's cases test its first entity on the integration, but switch_plug's run once per plug listed, each its own
+# case and record test (on_then_off[switch_plug], on_then_off[switch_plug-2], ...): list several plugs to test each
+# model or maker string.
 # Tests restore each entity's prior state afterwards, but every entity here will visibly change state.
 # powered_by names the profile's switch an entity draws power through: its cases need that switch on, and a case
 # that switches it puts the entity back once power returns.
@@ -37,6 +42,9 @@ pause:
 shelly:
   - entity_id: switch.office_plug
     roles: [switch_plug]
+  - entity_id: switch.kettle_plug  # a second plug: its own cases, [switch_plug-2]
+    roles: [switch_plug]
+    pre_authorized: false  # restates it here, as this profile isn't pre-authorized; in one that is, it leaves it out
   - entity_id: light.hall_relay
     roles: [light_onoff]
   - entity_id: light.porch_lamp

@@ -1,6 +1,7 @@
 """scripts/rig.py with a roaming profile: phases by the cycle, a move before each and home after the last, a crash in
 each phase, --roam-check, and --recover bringing the bulbs home. Against the Lab fake; no rig is touched."""
 
+import argparse
 import asyncio
 import contextlib
 import importlib.util
@@ -18,6 +19,7 @@ from ha_rig.engine import load_step_file
 from ha_rig.home import HomeRecord
 from ha_rig.journal import LEGACY_NAME, Journal
 from ha_rig.profile import Profile, RigEntity
+from ha_rig.progress import Progress
 from ha_rig.roam import Roamer
 from tests import rig_fakes as fakes
 
@@ -159,7 +161,7 @@ async def test_a_failed_move_stops_the_run_and_leaves_the_bulbs_for_recover(tmp_
 
     assert await fakes.where(lab) == ["zha", None]
     assert lab.ha.states["automation.lab"]["state"] == "on"
-    assert set(Journal(journal.path).sections) == {"profile", "roam"}
+    assert set(Journal(journal.path).sections) == {"profile", "restricted", "roam"}
 
 
 async def test_a_failed_move_still_reports_the_phases_before_it(tmp_path, monkeypatch, lab):
@@ -1158,3 +1160,147 @@ async def test_an_abort_that_cant_bring_the_bulbs_home_says_so_and_keeps_the_jou
     assert "Could not move the roaming bulbs home" in capsys.readouterr().out
     assert "roam" in Journal(journal.path).sections
     assert lab.ha.states["automation.lab"]["state"] == "on"
+
+
+MIXED = (
+    "pre_authorized: true\n"
+    "shelly:\n"
+    "  - entity_id: switch.plug\n    roles: [switch_plug]\n"
+    "  - entity_id: switch.plug_b\n    roles: [switch_plug]\n    pre_authorized: false\n"
+    "hue:\n  - entity_id: light.desk\n    roles: [light_ct]\n"
+)
+
+
+# --- The run's gate ------------------------------------------------------------------------------------------
+
+
+def mixed_run(tmp_path, monkeypatch, state: str) -> list:
+    """clear_run on MIXED: its two plugs, the second not pre-authorized, with the sensor reading `state`."""
+    seen = clear_run(tmp_path, monkeypatch, state)
+    path = fakes.write(tmp_path, "mixed.yaml", MIXED)
+    monkeypatch.setattr(rig, "choose_profile", lambda name, env: path)
+    return seen
+
+
+def test_a_run_that_moves_an_entity_left_out_is_restricted(tmp_path, monkeypatch, capsys):
+    seen = mixed_run(tmp_path, monkeypatch, "on")
+    assert rig.main([]) == 1
+    assert seen == []
+    out = capsys.readouterr().out
+    assert "Authorization: profile mixed is pre-authorized, but not switch.plug_b, which this run moves." in out
+    assert f"Restricted, and {SENSOR} is on. Needs DEVICE_SIDE_RIG_RESTRICTED=1" in out
+
+
+def test_a_restricted_run_of_a_pre_authorized_profile_goes_while_the_sensor_is_off_watched(tmp_path, monkeypatch):
+    seen = mixed_run(tmp_path, monkeypatch, "off")
+    assert rig.main([]) == 0
+    assert seen == [(True, True)]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["-k", "switch_plug]"], id="only the first plug's cases"),
+        pytest.param(["--integration", "hue"], id="another integration"),
+    ],
+)
+def test_a_run_that_leaves_the_entity_alone_stays_unrestricted(tmp_path, monkeypatch, capsys, args):
+    seen = mixed_run(tmp_path, monkeypatch, "on")
+    monkeypatch.setattr(rig, "_get", lambda url, token: pytest.fail("read the sensor"))
+    assert rig.main(args) == 0
+    assert seen == [(False, False)]
+    assert "Authorization: profile mixed is pre-authorized. Unrestricted." in capsys.readouterr().out
+
+
+def test_a_resume_leaves_its_saved_cases_out_of_the_gate(tmp_path):
+    """Saved, they don't run again, so the gate leaves them out; not resuming, it counts them."""
+    setup = resumed(tmp_path)
+    assert rig.restricted_targets(setup, None) == []
+    assert rig.restricted_targets(setup, None, resuming=False) == ["switch.plug_b"]
+
+
+def resumed(tmp_path, *, uncommitted: bool = False) -> rig.Setup:
+    """A resumed run on MIXED's shelly suite, gated unrestricted: the ledger holds the left-out plug's case, from an
+    earlier, approved session, and the first plug's is still to run."""
+    profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", MIXED))
+    suite = rig.Suite(load_step_file(fakes.STEPS / "turn_on_for.yaml"), "shelly")
+    registry = fakes.Roster({"shelly": {"turn_on_for"}})
+    progress = Progress.load(tmp_path, "mixed")
+    progress.track(suite, "c1")
+    progress.check_ha("2026.10.1", lambda _: None)
+    for case in engine.cases(suite, profile, None, rig.adapters_for(suite, registry)):
+        if not case.skip and case.entities.get("switch_plug") == "switch.plug_b":
+            progress.record(
+                suite, engine.CaseResult(case.id, case.role, "switch", engine.Outcome.PASS, "", ("switch.plug_b",))
+            )
+    setup = rig.Setup({}, profile, registry, [suite], False, False, progress=progress, uncommitted_steps=uncommitted)
+    setup.restricted = bool(rig.restricted_targets(setup, None))
+    assert not setup.restricted
+    return setup
+
+
+@pytest.mark.parametrize(
+    ("commit", "uncommitted", "says"),
+    [
+        pytest.param(None, False, r"HA loaded another tree than the one planned \(origin moved\)", id="origin moved"),
+        pytest.param("c1", True, "The step files aren't the commit's", id="step files withheld"),
+    ],
+)
+def test_a_resume_that_loses_its_ledger_stops_before_rerunning_saved_cases_its_gate_left_out(
+    tmp_path, monkeypatch, commit, uncommitted, says
+):
+    """Without the ledger the run reruns the saved cases, so a left-out entity among them stops it before any case."""
+    setup = resumed(tmp_path, uncommitted=uncommitted)
+    setup.deploy = rig.Deploy("c1", "tree", "tree", "tree", "wt")
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda *args: commit)
+    monkeypatch.setattr(rig, "run_rig", lambda *args, **kwargs: pytest.fail("ran the tests"))
+    args = argparse.Namespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    with pytest.raises(
+        SystemExit, match=f"{says}, so this run would rerun its saved cases, and they move switch.plug_b"
+    ):
+        rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False)
+
+
+def test_a_restricted_resume_that_loses_its_ledger_reruns_its_saved_cases(tmp_path, monkeypatch):
+    """Gated restricted, it was approved for every case, so it reruns them without the ledger."""
+    setup = resumed(tmp_path)
+    setup.restricted = True
+    setup.deploy = rig.Deploy("c1", "tree", "tree", "tree", "wt")
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda *args: None)
+    ran = []
+    monkeypatch.setattr(rig, "run_rig", lambda *args, **kwargs: ran.append((kwargs["progress"], kwargs["restricted"])))
+    monkeypatch.setattr(rig, "run_tests", lambda coroutine, aborted=None: 0)
+    args = argparse.Namespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False) == 0
+    assert ran == [(None, True)]
+
+
+def test_a_resume_that_loses_its_ledger_with_nothing_left_out_among_its_saved_cases_goes_on(tmp_path, monkeypatch):
+    setup = resumed(tmp_path)
+    setup.profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", MIXED.replace("    pre_authorized: false\n", "")))
+    setup.deploy = rig.Deploy("c1", "tree", "tree", "tree", "wt")
+    monkeypatch.setattr(rig, "deploy_and_wait", lambda env, branch: None)
+    monkeypatch.setattr(rig, "tested_commit", lambda *args: None)
+    ran = []
+    monkeypatch.setattr(rig, "run_rig", lambda *args, **kwargs: ran.append(kwargs["progress"]))
+    monkeypatch.setattr(rig, "run_tests", lambda coroutine, aborted=None: 0)
+    args = argparse.Namespace(budget=None, keyword=None, unattended=True, debug_logs=False)
+    assert rig.run_approved(args, setup, rig.locks.Held(rig.Claim()), None, False, False) == 0
+    assert ran == [None]  # without the ledger, as before
+
+
+def test_a_group_whose_members_arent_listed_counts_every_left_out_entity_of_its_integration(tmp_path):
+    """The profile can't say which devices a fixed group without `members` holds, so it may hold the plug."""
+    text = (
+        "pre_authorized: true\nzigbee2mqtt:\n  - entity_id: light.room\n    roles: [group]\n"
+        "  - entity_id: switch.plug_z\n    roles: [switch_plug]\n    pre_authorized: false\n"
+    )
+    profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", text))
+    suites = [rig.Suite(load_step_file(fakes.STEPS / "turn_on_for.yaml"), "zigbee2mqtt")]
+    setup = rig.Setup({}, profile, fakes.Roster({"zigbee2mqtt": {"turn_on_for"}}), suites, False, False)
+    assert rig.restricted_targets(setup, "group_on_then_off") == ["switch.plug_z"]
+    listed = text.replace("roles: [group]\n", "roles: [group]\n    members: [light.a]\n")
+    setup.profile = Profile.load(fakes.write(tmp_path, "mixed.yaml", listed))
+    assert rig.restricted_targets(setup, "group_on_then_off") == []

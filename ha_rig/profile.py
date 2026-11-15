@@ -27,6 +27,12 @@ PAUSABLE = ("automation", "switch")
 # A native group's roles: `group_color` is one whose members all take color.
 GROUP_ROLES = frozenset({"group", "group_color"})
 ZHA_GROUP_MIN = 2  # ZHA makes no light entity for a group with fewer members
+# The keys a listed entity takes; any other (a typo of pre_authorized, say) fails the load rather than be ignored.
+ENTITY_KEYS = frozenset({"entity_id", "roles", "powered_by", "members", "pre_authorized"})
+# The roles whose cases run once per entity the profile lists with them, so each device gets its own test (several
+# plugs, one per maker string). Every other role tests its first entity: a roaming bulb is listed beside a network's
+# fixed lights (Profile.add_roaming), so light roles often hold several, and only the first is meant.
+EACH_ENTITY = frozenset({"switch_plug"})
 ROLES = frozenset(
     {"light_onoff", "light_wrapped", "light_dimmable", "light_ct", "light_color", "switch_plug", "scene"} | GROUP_ROLES
 )
@@ -88,6 +94,9 @@ class RigEntity:
     roles: frozenset[str]
     powered_by: str | None = None  # the profile's switch this entity draws power through
     members: tuple[str, ...] = ()  # a group's member lights, for a group light without an entity_id attribute
+    # False: work that moves this entity is restricted, though its profile is pre-authorized (`pre_authorized: false`
+    # on the entity; Profile.restricts).
+    pre_authorized: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,23 +165,21 @@ class Profile:
                 raise ValueError(f"{path.name}: unknown integration {integration!r}; use {', '.join(TOLERANCE_S)}")
             profile.integrations[integration] = []
             for item in entities or []:
-                roles = frozenset(item.get("roles", ()))
-                if unknown := roles - ROLES:
-                    raise ValueError(f"{path.name}: {item['entity_id']} has unknown roles {sorted(unknown)}")
-                members = item.get("members", [])
-                if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
-                    raise ValueError(f"{path.name}: {item['entity_id']} members must be a list of entity IDs")
-                members = tuple(members)
-                if members and not roles & GROUP_ROLES:
-                    raise ValueError(f"{path.name}: {item['entity_id']} lists members but has no group role")
-                profile.integrations[integration].append(
-                    RigEntity(item["entity_id"], roles, item.get("powered_by"), members)
-                )
+                entity = fixed_entity(path, integration, item)
+                if any(e.entity_id == entity.entity_id for e in profile.integrations[integration]):
+                    raise ValueError(f"{path.name}: {entity.entity_id} is listed twice under {integration}")
+                profile.integrations[integration].append(entity)
         listed = {entity.entity_id for entities in profile.integrations.values() for entity in entities}
         profile.add_roaming(path, listed)
         for entity_id, supply in profile.power().items():
             if supply not in listed:
                 raise ValueError(f"{path.name}: {entity_id} is powered_by {supply}, which the profile doesn't list")
+        paused = profile.restricts(dict.fromkeys(e for key in profile.pause for e in profile.pause[key]))
+        if paused and profile.pre_authorized:
+            raise ValueError(
+                f"{path.name}: pause: reaches {', '.join(paused)}, which is pre_authorized: false (listed there, or "
+                "drawing power through what is): every run of its key turns pause: off and on, restricted or not"
+            )
         return profile
 
     def add_roaming(self, path: Path, listed: set[str]) -> None:
@@ -214,10 +221,46 @@ class Profile:
         return frozenset(bulbs | {e for group in self.roam_groups for e in (group.entity_id, group.scene) if e})
 
     def entity(self, integration: str, role: str) -> str | None:
-        return next((e.entity_id for e in self.integrations.get(integration, ()) if role in e.roles), None)
+        """The first entity with the role: the one a case of any role but EACH_ENTITY's targets."""
+        return next(iter(self.entities(integration, role)), None)
+
+    def entities(self, integration: str, role: str) -> tuple[str, ...]:
+        """Every entity with the role on the integration, in profile order."""
+        return tuple(e.entity_id for e in self.integrations.get(integration, ()) if role in e.roles)
 
     def members(self, integration: str, entity_id: str) -> tuple[str, ...]:
         return next((e.members for e in self.integrations.get(integration, ()) if e.entity_id == entity_id), ())
+
+    @property
+    def restricted(self) -> frozenset[str]:
+        """The entities listed with `pre_authorized: false`: moving one is restricted work, whatever the profile's."""
+        return frozenset(e.entity_id for es in self.integrations.values() for e in es if not e.pre_authorized)
+
+    def restricts(self, entity_ids: Iterable[str]) -> list[str]:
+        """The entities listed `pre_authorized: false` that moving `entity_ids` reaches, in order: each one and
+        everything joined to it by power, through any chain of `powered_by` either way. A case needs its supplies on
+        and may switch them (the engine follows a chain of them, CaseSnapshot.take), and a supply switched on or off
+        moves everything drawing power through it."""
+        restricted, linked = self.restricted, self.power_links()
+        touched: dict[str, None] = {}
+        stack = list(entity_ids)
+        while stack:
+            if (entity_id := stack.pop(0)) not in touched:
+                touched[entity_id] = None
+                stack += sorted(linked.get(entity_id, ()))
+        return [e for e in touched if e in restricted]
+
+    def power_links(self) -> dict[str, set[str]]:
+        """Each entity's supply and what draws power through it, both ways."""
+        links: dict[str, set[str]] = {}
+        for entity_id, supply in self.power().items():
+            links.setdefault(entity_id, set()).add(supply)
+            links.setdefault(supply, set()).add(entity_id)
+        return links
+
+    def restricted_on(self, integration: str) -> list[str]:
+        """The integration's entities listed `pre_authorized: false`, in profile order."""
+        return [e.entity_id for e in self.integrations.get(integration, ()) if not e.pre_authorized]
 
     def power(self) -> dict[str, str]:
         """Each entity that draws power through another, mapped to its supply, across every integration."""
@@ -347,6 +390,38 @@ def pause_list(path: Path, entity_ids: object) -> tuple[str, ...]:
     if other := [entity_id for entity_id in entity_ids if entity_id.partition(".")[0] not in PAUSABLE]:
         raise ValueError(f"{path.name}: pause takes automations and switches only, got {', '.join(other)}")
     return tuple(entity_ids)
+
+
+def fixed_entity(path: Path, integration: str, item: object) -> RigEntity:
+    """One entity listed under an integration: its ID, roles, supply, members and `pre_authorized`, and no other key."""
+    if not isinstance(item, dict) or "entity_id" not in item:
+        raise ValueError(f"{path.name}: each {integration} entity needs an entity_id")
+    entity_id = item["entity_id"]
+    if unknown := set(item) - ENTITY_KEYS:
+        raise ValueError(f"{path.name}: {entity_id} has unknown keys {sorted(unknown)}")
+    roles = frozenset(item.get("roles", ()))
+    if unknown := roles - ROLES:
+        raise ValueError(f"{path.name}: {entity_id} has unknown roles {sorted(unknown)}")
+    members = item.get("members", [])
+    if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
+        raise ValueError(f"{path.name}: {entity_id} members must be a list of entity IDs")
+    if members and not roles & GROUP_ROLES:
+        raise ValueError(f"{path.name}: {entity_id} lists members but has no group role")
+    return RigEntity(entity_id, roles, item.get("powered_by"), tuple(members), entity_pre_authorized(path, item))
+
+
+def entity_pre_authorized(path: Path, item: dict) -> bool:
+    """A listed entity's `pre_authorized:`, which only narrows: `false` makes moving it restricted work in a
+    pre-authorized profile (and restates it in a restricted one). Left out, the entity is as its profile is; it can't
+    be pre-authorized on its own, as that is the profile's to say."""
+    if "pre_authorized" not in item:
+        return True
+    if item["pre_authorized"] is not False:
+        raise ValueError(
+            f"{path.name}: {item['entity_id']} pre_authorized must be false, got {item['pre_authorized']!r}; "
+            "only the profile's own pre_authorized makes work unrestricted"
+        )
+    return False
 
 
 def pre_authorized_key(path: Path, value: object) -> bool:

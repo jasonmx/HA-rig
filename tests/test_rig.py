@@ -742,7 +742,7 @@ async def test_a_signal_mid_case_puts_everything_back_and_leaves_no_journal(tmp_
     task = asyncio.create_task(run_rig)
     while ha.states["light.a"]["state"] != "off":
         await asyncio.sleep(0.005)
-    assert set(journal.sections) == {"profile", "options", "cases"}
+    assert set(journal.sections) == {"profile", "restricted", "options", "cases"}
     assert json.loads((tmp_path / baseline.NAME).read_text()) == {
         "automation:automation.motion": {"original": "on", "holders": [f"{journal.name}#pause"]},
     }
@@ -1747,7 +1747,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
 
     out = capsys.readouterr().out
     assert f"Kept {record_path('shelly')}:" in out
-    assert "skips t[switch_plug], u[switch_plug], which it passed; run a profile with those roles" in out
+    assert "skips or doesn't plan t[switch_plug], u[switch_plug], which it passed; run a profile with those" in out
     staging.promote(progress)
     assert {key[0] for key in progress.done()} == {"shelly"}  # the kept suite still needs its run; zha's is promoted
 

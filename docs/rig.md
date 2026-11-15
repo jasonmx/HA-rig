@@ -72,10 +72,21 @@ role, and under `pause:` the automations and switches turned off for the run and
 an Adaptive Lighting switch). `.env.rig` (from `ha_rig/env.example`) holds what belongs to the HA instance: its
 address, tokens, deploy commands and Hue bridge.
 
+A role's cases test the first entity the profile lists with it, on each integration, but for `switch_plug`
+(`EACH_ENTITY` in `ha_rig/profile.py`): its cases run once per plug listed, so each device gets its own test and
+record test, with its own model, maker string and class. The first plug's case keeps the bare id
+(`on_then_off[switch_plug]`), and the n-th is `on_then_off[switch_plug-<n>]`, in profile order, so a profile with
+one plug plans what it always did and adding plugs only adds cases (`-k 'switch_plug]'` picks the first's alone).
+An entity is listed once per integration. Light roles stay first-entity on purpose: a
+roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
+first entity too.
+
 `--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
 a record never narrows to a profile: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`), or
-whose group lacks the light a case targets, writes no record over one that passed that case, and says `Kept
-<record>`. Run a profile with the role, or, to narrow on purpose
+whose group lacks the light a case targets, or that lists fewer plugs than the run whose record passed
+`<test>[switch_plug-3]`, writes no record over one that passed that case, and says `Kept <record>`. A record is one
+file per integration and suite, so two profiles on one integration (one plug each, say) can't both hold their plugs'
+tests in it: list every plug the record should hold in one profile. Run a profile with the role, or, to narrow on purpose
 (a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's (through
 `.private-terms.rig`) and this repo's (`scripts/check_private.py`), keep every profile's entity IDs, members, supplies,
@@ -97,8 +108,8 @@ The rig classifies the work, not who runs it (`ha_rig/authorize.py`):
 
 - **Unrestricted** work goes at any time, whatever the sensor reads: a test run or `--recover` on a profile with
   `pre_authorized: true` (it covers everything that run does: pauses, DeviceSide reloads and disables, roaming, HA
-  restarts); `--deploy-only`, as HA restarts are always allowed; a probe declared `--visual none`, or
-  `--visual profile` on a pre-authorized profile.
+  restarts), unless it moves an entity the profile leaves out (below); `--deploy-only`, as HA restarts are always
+  allowed; a probe declared `--visual none`, or `--visual profile` on a pre-authorized profile.
 - **Restricted** work is everything else. It goes when either `RIG_RESTRICTED_ENTITY` in `.env.rig`, an HA
   binary_sensor that is on while someone might see the lights move, is off, or Jason has approved it:
   `DEVICE_SIDE_RIG_RESTRICTED=1`, or a y at the terminal's `Restricted: <why>. Proceed anyway?`. With the key unset,
@@ -110,9 +121,31 @@ devices back, when it turns on: two reads in a row of on, unknown or unavailable
 started while the sensor was on goes on until it goes off and on again. `DEVICE_SIDE_RIG_APPROVED`, the variable this
 replaced, is refused.
 
-An aborted run's changes are restricted by the profile that left it, and the journal from before per-run journals
-always is. `--recover`, and the replay before a run's gate, put back what the rig may now (never asking) and name the
-rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
+**One entity left out.** An entity listed with `pre_authorized: false` in a pre-authorized profile is left out of it
+(a plug whose light someone might see, say): a run is restricted work, whole, when any case it will run reaches that
+entity: as its target, a group's listed member, or through power, along any chain of `powered_by` either way (a case
+needs its supplies on and may switch them, which moves whatever draws power through them). A case on a fixed group
+without `members`, or a fixed scene, may hold any device of its integration, so it reaches every such entity there.
+The gate is decided before the device check, so a case `--ignore-unreachables` will skip still counts. A run that
+leaves them alone (another integration, `-k`, its cases saved in the ledger) is as unrestricted as before, and the
+Authorization line names the entities that make it restricted. A resumed run that loses its ledger after its gate
+(origin moved during the deploy, or the step files aren't the commit's) would rerun its saved cases: where they reach
+a left-out entity its unrestricted gate didn't count, it stops before any case, to be run again and gated for them.
+A `--visual profile` probe is restricted when an integration it holds lists one (any integration, for a probe holding
+HA alone). A restart of HA or a deploy (`--deploy-only`) moves no device, so it stays unrestricted whatever the
+profile leaves out.
+
+An entity takes only `pre_authorized: false`: being pre-authorized is the profile's to say, so `true` on an entity is
+refused (in a restricted profile, `false` only restates it), and so is any key an entity doesn't take, so a misspelt
+`pre_authorised` can't leave it pre-authorized. A pre-authorized profile can't list a left-out entity, or its supply, under
+`pause:`, which every run of its key turns off and on.
+
+An aborted run's changes are restricted by the profile that left it, and by the run: its journal says whether it was
+restricted work (`restricted`), and a restricted run's changes are restricted to put back whatever its profile. A
+journal from before that mark goes by its profile, and is restricted once the profile leaves an entity out; one marked
+unrestricted is restricted once the profile leaves out an entity it changed; one whose profile is gone or won't load is
+restricted. The journal from before per-run journals always is. `--recover`, and the
+replay before a run's gate, put back what the rig may now (never asking) and name the rest: `left <journal> (profile <name>, restricted): sensor off or DEVICE_SIDE_RIG_RESTRICTED=1 restores it`. A run
 whose locks cover one it can't put back stops before its gate rather than test on top of it.
 
 ### Deploys
@@ -172,7 +205,7 @@ empty: exit 0 and 1 both carry the list, and the rig points to `scripts/check_re
 why each needs one. A check that fails (any other exit, or exit 1 with nothing listed) or prints no JSON list stops the
 run, before anything moves.
 
-**Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`), or any case of a
+**Fact cases.** A fact case is the watched case of a test with `observe:` (`<name>[<role>] observed`, `[<role>-<n>]` for the n-th plug), or any case of a
 `firmware_fact: true` test, its watched one included (Writing a step file, below). It finds a fact, which stands once
 written down in the integration's `_facts.md` (Facts, below), so a default run skips it, `skipped` with `fact case: runs
 with --facts`. The automated case of a test with `observe:` is an ordinary check of a shipped call, and every default
@@ -235,7 +268,7 @@ action: turn_on_for        # the DeviceSide action every test in the file calls
 rig_seconds: 25            # the gate's duration estimate
 tests:
   - name: on_then_off
-    roles: [switch_plug, light_onoff]   # one run per role the profile names
+    roles: [switch_plug, light_onoff]   # one run per role the profile names; switch_plug, one per plug
     steps:
       - set: {state: off}
       - call: {duration: 6}
@@ -343,7 +376,7 @@ Such a test runs twice, so you are asked only what a machine can't check:
 1. **Automated**, with every other test first: setup and steps, every check applied. It runs in every run, as any
    test's does (unless the test is a firmware fact), and its result is the record's. It has no automated run if its
    steps check nothing or its setup has a `do`.
-2. **Observed** (`<name>[<role>] observed`), a fact case, so only with `--facts`, after all automated runs. Setup runs
+2. **Observed** (`<name>[<role>] observed`, or `[<role>-<n>]`), a fact case, so only with `--facts`, after all automated runs. Setup runs
    and settles for 2 s, then the runner prints `see` (in bold) and `watch` and waits for Enter. The steps run with their
    checks turned into waits, so the timing matches. As each `call` goes out the runner prints, and speaks with macOS
    `say` (when it exists), the action in words (`raise brightness`; a bare `call: {}` speaks the suite's action), so you know when a
@@ -434,7 +467,8 @@ A markdown record with fact cases ends with a line pointing to `_facts.md` and, 
 Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
 off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's. A record never
 narrows to a profile: a run never overwrites one with a record that skips, as not applying (a role the profile lacks, a
-group without the light, no adapter), a case the record passed (Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
+group without the light, no adapter), or doesn't plan (a plug beyond the profile's), a case the record passed
+(Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
 a record.
 
 ### Facts
