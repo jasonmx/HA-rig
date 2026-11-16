@@ -174,6 +174,14 @@ class Step:
     args: Any
     label: str
     only: frozenset[str] | None = None  # the integrations it runs on; None for every one the test runs on
+    # The target's DeviceSide classes it runs on (`classes`) or not on (`except_classes`), by integration, as prefixes;
+    # at most one is set. Decided per step at run time (Run.skips_class), as the class is learned from a response.
+    classes: dict[str, tuple[str, ...]] | None = None
+    except_classes: dict[str, tuple[str, ...]] | None = None
+
+    @property
+    def class_selector(self) -> dict[str, tuple[str, ...]] | None:
+        return self.classes if self.classes is not None else self.except_classes
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,8 +491,39 @@ PARSERS: dict[str, Callable[[Any], Any]] = {
 }
 
 
+def _parse_class_selector(value: Any, key: str, label: str) -> dict[str, tuple[str, ...]]:
+    """A `classes:` or `except_classes:` value: integration keys mapped to non-empty lists of class prefixes."""
+    ok = isinstance(value, dict) and value
+    if ok:
+        ok = all(
+            isinstance(name, str)
+            and name
+            and isinstance(prefixes, list)
+            and prefixes
+            and all(isinstance(p, str) and p for p in prefixes)
+            for name, prefixes in value.items()
+        )
+    if not ok:
+        raise ValueError(f"{label}: {key} must map integration keys to non-empty lists of class prefixes")
+    return {name: tuple(prefixes) for name, prefixes in value.items()}
+
+
+def _split_class_selectors(raw: Any, label: str) -> tuple[Any, dict[str, dict[str, tuple[str, ...]]]]:
+    """The step's mapping without its `classes:` or `except_classes:`, and the one it had, parsed, by key."""
+    if not isinstance(raw, dict) or not ({"classes", "except_classes"} & raw.keys()):
+        return raw, {}
+    if "classes" in raw and "except_classes" in raw:
+        raise ValueError(f"{label}: a step takes classes or except_classes, not both")
+    selectors = {
+        key: _parse_class_selector(raw[key], key, label) for key in ("classes", "except_classes") if key in raw
+    }
+    return {key: value for key, value in raw.items() if key not in selectors}, selectors
+
+
 def _parse_step(raw: Any, label: str) -> Step:
-    """One `kind: args` mapping, with an optional `only: [<integration>]` beside it limiting the step to those."""
+    """One `kind: args` mapping, with an optional `only: [<integration>]` beside it limiting the step to those, and
+    `classes:` or `except_classes:` limiting it to targets of some DeviceSide classes."""
+    raw, selectors = _split_class_selectors(raw, label)
     only = raw.get("only") if isinstance(raw, dict) else None
     if isinstance(raw, dict) and "only" in raw:
         raw = {key: value for key, value in raw.items() if key != "only"}
@@ -499,7 +538,7 @@ def _parse_step(raw: Any, label: str) -> Step:
     if kind not in PARSERS:
         raise ValueError(f"{label}: unknown step; use one of {', '.join(PARSERS)}")
     try:
-        return Step(kind, PARSERS[kind](args), label, frozenset(only) if only else None)
+        return Step(kind, PARSERS[kind](args), label, frozenset(only) if only else None, **selectors)
     except ValueError as err:
         raise ValueError(f"{label}: {err}") from None
 
@@ -557,6 +596,7 @@ def _parse_test(raw: Any) -> RigTest:
         test = RigTest(name, tuple(roles), frozenset(only) if only else None, steps, setup, observe, firmware_fact)
         _check_observe_scope(test)
         _check_step_scope(test)
+        _check_class_selectors(test)
     except ValueError as err:
         raise ValueError(f"test {name}, {err}") from None
     return test
@@ -582,6 +622,19 @@ def _check_step_scope(test: RigTest) -> None:
     for step in (*test.setup, *test.steps):
         if step.only is not None and (outside := sorted(step.only - test.only)):
             raise ValueError(f"{step.label}: only {', '.join(outside)} are not in the test's only")
+
+
+def _check_class_selectors(test: RigTest) -> None:
+    """A selector needs a class to read: a `call` step before it (setup, then steps), or no class can be known. Its
+    integrations are ones the test runs on, as a step's `only` is."""
+    called = False
+    for step in (*test.setup, *test.steps):
+        if (selector := step.class_selector) is not None:
+            if not called:
+                raise ValueError(f"{step.label}: a class selector needs a call step before it, to learn the class")
+            if test.only is not None and (outside := sorted(set(selector) - test.only)):
+                raise ValueError(f"{step.label}: classes of {', '.join(outside)} are not in the test's only")
+        called = called or step.kind == "call"
 
 
 def _parse_phases(raw: dict) -> tuple[tuple[Step, ...], tuple[Step, ...], Observe | None]:
@@ -679,6 +732,7 @@ def owned_step_file(step_file: StepFile, integration: str) -> StepFile:
     for test in step_file.tests:
         named = (test.only or mine) | ((test.observe and test.observe.only) or mine)
         named |= {key for step in (*test.setup, *test.steps) for key in step.only or ()}
+        named |= {key for step in (*test.setup, *test.steps) for key in step.class_selector or ()}
         if others := sorted(named - mine):
             raise SchemaError(f"{where}: {test.name} names {', '.join(others)}, but the file is {integration}'s own")
         tests.append(replace(test, only=mine))
@@ -1669,6 +1723,9 @@ class _CaseRun:
         # Another action's call can reach other members of a group (one action refuses a class another serves), so
         # it credits none.
         self.answers: list[dict[str, Any]] = []
+        # The classes the case's own target reported in the latest call's response with an entry for it, setup calls
+        # and every action included (empty: it reported none); None before any. What a step's selector reads.
+        self.target_classes: frozenset[str] | None = None
         self.error: HAError | None = None
         self.last_action = case.suite.action
         self.query = False
@@ -1787,6 +1844,36 @@ class _CaseRun:
         tested = action == self.case.suite.action and not self.in_setup
         return tested and entity_id == self.case.entities[self.case.role] and self.response is not None
 
+    async def learn_classes(self) -> None:
+        """Take the target's classes from the response just returned, when it has an entry for the case's own target
+        (else its members', as entries gives) and a step selects on class; a response with none leaves them as they
+        were."""
+        test = self.case.test
+        if not any(step.class_selector is not None for step in (*test.setup, *test.steps)):
+            return
+        if not isinstance(self.response, dict):
+            return
+        if entries := await self.entries(self.response, self.case.entities[self.case.role]):
+            self.target_classes = frozenset().union(
+                *(reported_classes(entry) or frozenset() for entry in entries.values())
+            )
+
+    def skips_class(self, step: Step) -> bool:
+        """Whether the step's `classes:` or `except_classes:` leaves it out here. A selector that doesn't name the
+        suite's integration is inert: `classes` skips, `except_classes` runs. Else the target's classes decide, by
+        prefix, and none known fails the case rather than guess."""
+        if (selector := step.class_selector) is None:
+            return False
+        if (prefixes := selector.get(self.integration)) is None:
+            return step.classes is not None
+        if not names_classes(self.registry, self.case.suite) or not self.target_classes:
+            raise StepFailure(
+                f"{self.integration}'s DeviceSide response has named no class for the target, which this step's "
+                f"{'classes' if step.classes is not None else 'except_classes'} needs"
+            )
+        matches = any(found.startswith(prefix) for found in self.target_classes for prefix in prefixes)
+        return matches != (step.classes is not None)
+
     async def entries(self, response: dict, entity_id: str) -> dict[str, Any]:
         """The response's entry for the entity, else its entries for those of the entity's members it has, by
         entity."""
@@ -1898,6 +1985,8 @@ class _CaseRun:
                     handler = getattr(self, f"_relaxed_{step.kind}", handler)
                 self.step = step
                 try:
+                    if self.skips_class(step):
+                        continue
                     await handler(step.args, following)
                 except StepFailure as err:
                     raise StepFailure(f"{step.label}: {err}") from None
@@ -2129,6 +2218,7 @@ class _CaseRun:
             self.call_times = self.call_windows[-1]
             if self.answers_for_class(action, entity_id):
                 self.answers.append(await self.entries(self.response, entity_id))
+            await self.learn_classes()
         except HAError as err:
             if following != "expect_error":
                 raise StepFailure(f"deviceside.{action} raised {err.translation_key}: {err}") from None
