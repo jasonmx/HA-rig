@@ -350,7 +350,7 @@ def step_suites(tmp_path: Path, text: str, *integrations: str) -> list:
 
 
 OPTIONS = fakes.RESTORED_MIDWAY.replace("tests:", "options: [opt]\ntests:", 1)
-LIFECYCLE = fakes.RESTORED_MIDWAY.replace("tests:", "name: lifecycle\ntests:", 1).replace(
+CONFIG_ENTRY = fakes.RESTORED_MIDWAY.replace("tests:", "name: config_entry\ntests:", 1).replace(
     "restore: null", "entry: reload"
 )
 NO_ADAPTER = SimpleNamespace(integrations={}, adapter=lambda action, integration: None)
@@ -371,7 +371,7 @@ NO_ADAPTER = SimpleNamespace(integrations={}, adapter=lambda action, integration
         pytest.param(fakes.RESTORED_MIDWAY, True, (), None, claim("shelly", ha="exclusive"), id="deploy"),
         pytest.param(fakes.RESTORED_MIDWAY, True, ("--no-deploy",), None, claim("shelly"), id="no-deploy"),
         pytest.param(OPTIONS, False, (), None, claim("shelly", ha="exclusive"), id="option suite"),
-        pytest.param(LIFECYCLE, False, (), None, claim("shelly", ha="exclusive"), id="entry steps"),
+        pytest.param(CONFIG_ENTRY, False, (), None, claim("shelly", ha="exclusive"), id="entry steps"),
         pytest.param(fakes.RESTORED_MIDWAY, False, (), NO_ADAPTER, SHARED, id="no adapter: nothing"),
     ],
 )

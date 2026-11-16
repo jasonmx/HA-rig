@@ -268,7 +268,7 @@ def select(
     and --action, each running its fact cases when `facts` (--facts) asks for them. A file with
     no adapter there stays, for the dry-run's `no adapter, will skip`. An action takes every step file for it
     (lower_brightness and lower_brightness-predicted_state), whole, so each still writes its record; a file with a
-    `name` (lifecycle) goes by that instead. Dropping the option files an adapter lacks is run_suites's job
+    `name` (config_entry) goes by that instead. Dropping the option files an adapter lacks is run_suites's job
     (engine.applies)."""
     return [
         Suite(step_file, integration, facts)

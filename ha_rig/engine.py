@@ -252,7 +252,8 @@ class StepFile:
     options: frozenset[str] = frozenset()
     # Patterns for the DeviceSide warnings and errors in HA's log its tests mean to cause (runlogs.RunLogs).
     expected_log: tuple[re.Pattern[str], ...] = ()
-    # The name its record takes in place of the action's, for a file that tests something else through it (lifecycle).
+    # The name its record takes in place of the action's, for a file that tests something else through it
+    # (config_entry).
     name: str | None = None
     # The integrations whose own step files (tests/integrations/<x>/rig/) added tests to it, each only on its own.
     owned_by: frozenset[str] = frozenset()

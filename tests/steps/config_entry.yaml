@@ -1,5 +1,5 @@
 action: get_attributes
-name: lifecycle
+name: config_entry
 rig_seconds: 15
 tests:
   - name: works_after_a_reload
