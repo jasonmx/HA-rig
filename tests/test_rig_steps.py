@@ -84,9 +84,13 @@ def test_an_integrations_own_file_with_no_shared_one_stands_alone(tmp_path):
         (OWN.replace("own_case", "on_then_off"), "shelly/rig/turn_on_for.yaml: test on_then_off is already in"),
         (OWN.replace("    roles:", "    only: [hue]\n    roles:"), "own_case names hue, but the file is shelly's own"),
         (OWN.replace("      - call: {duration: 1}", "      - {wait: 1, only: [zha]}"), "own_case names zha"),
+        (
+            OWN + "      - {wait: 1, except_classes: {zha: [x]}}\n",
+            "own_case names zha",
+        ),
         ("options: [x]\n" + OWN, "options and name are for shared step files"),
     ],
-    ids=["collision", "only_another", "step_only_another", "options"],
+    ids=["collision", "only_another", "step_only_another", "classes_another", "options"],
 )
 def test_an_integrations_own_file_refuses(tmp_path, text, message):
     with pytest.raises(SchemaError, match=message):
@@ -205,6 +209,30 @@ def observed(observe: str = "{see: s, watch: w, ask: a}", setup: str = "[{wait: 
             "firmware_fact",
         ),
         ("action: [\n", "while parsing"),
+        *[
+            (HEADER + f"      - call: {{duration: 1}}\n      - {{wait: 1, {step}}}\n", message)
+            for step, message in [
+                ("classes: [x]", "step 2: classes must map integration keys to non-empty lists"),
+                ("classes: {}", "classes must map integration keys"),
+                ("except_classes: {zha: []}", "except_classes must map integration keys"),
+                ("classes: {zha: x}", "classes must map integration keys"),
+                ("classes: {zha: [1]}", "classes must map integration keys"),
+                ("classes: {zha: ['']}", "classes must map integration keys"),
+                ("classes: {'': [x]}", "classes must map integration keys"),
+                ("classes: {zha: [x]}, except_classes: {zha: [y]}", "classes or except_classes, not both"),
+            ]
+        ],
+        (HEADER + "      - {wait: 1, classes: {zha: [x]}}\n", "step 1 (wait): a class selector needs a call step"),
+        (
+            HEADER.replace("    steps:\n", "    setup: [{wait: 0}]\n    steps:\n")
+            + "      - {wait: 1, except_classes: {zha: [x]}}\n      - call: {duration: 1}\n",
+            "step 1 (wait): a class selector needs a call step before it",
+        ),
+        (
+            HEADER.replace("    steps:\n", "    only: [hue]\n    steps:\n")
+            + "      - call: {duration: 1}\n      - {wait: 1, classes: {hue: [x], zha: [y]}}\n",
+            "step 2 (wait): classes of zha are not in the test's only",
+        ),
     ],
 )
 def test_a_schema_error_names_where_it_is(tmp_path: Path, text, message):
@@ -275,6 +303,23 @@ def test_a_step_takes_only_beside_its_kind(tmp_path: Path):
         ("wait", frozenset({"hue", "zha"})),
         ("wait", None),
     ]
+
+
+def test_a_step_takes_a_class_selector_beside_its_kind(tmp_path):
+    path = tmp_path / "classes.yaml"
+    path.write_text(
+        HEADER.replace("    steps:\n", "    setup: [{call: {duration: 1}}]\n    steps:\n")
+        + "      - {wait: 2, classes: {zigbee2mqtt: [tuya_countdown, other], zha: [x]}, only: [zigbee2mqtt]}\n"
+        + "      - wait: 1\n        except_classes: {zigbee2mqtt: [tuya_countdown]}\n"
+        + "      - wait: 3\n"
+    )
+    test = load_step_file(path).tests[0]
+    with_classes, without, plain = test.steps
+    assert with_classes.classes == {"zigbee2mqtt": ("tuya_countdown", "other"), "zha": ("x",)}
+    assert with_classes.except_classes is None and with_classes.only == frozenset({"zigbee2mqtt"})
+    assert (without.classes, without.except_classes) == (None, {"zigbee2mqtt": ("tuya_countdown",)})
+    assert (plain.classes, plain.except_classes, plain.class_selector) == (None, None, None)
+    assert without.kind == "wait"  # the selector key is not part of the step's arguments
 
 
 def test_firmware_fact_marks_the_test(tmp_path: Path):

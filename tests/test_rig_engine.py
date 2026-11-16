@@ -3495,3 +3495,207 @@ def test_a_malformed_zcl_step_is_a_parse_error(tmp_path, step, message):
     text = ZCL_STEPS.replace("{cluster: 8, command: 1, params: {move_mode: 1, rate: 25}}", step)
     with pytest.raises(Exception, match=message):
         cases(suite(tmp_path, text, "zha"), profile("zha", light_dimmable="light.bulb"))
+
+
+# A step that fails if it runs: the class selectors decide whether it does.
+TRAP = "expect_response: {status: never}"
+
+
+def reports(capability: str | None = None) -> Callable:
+    """DeviceSide answering every call with an entry for its target, reporting this class when given one."""
+
+    def _respond(ha, action, data):
+        return {data["entity_id"]: ran(**({"capability": capability} if capability else {}))}
+
+    return _respond
+
+
+async def selected(tmp_path, ha: FakeHA, *steps: str, integration: str = "shelly", setup: bool = False) -> tuple:
+    """The outcome and detail of a case sending these steps (after one setup call when `setup`)."""
+    text = calls(*steps)
+    if setup:
+        text = text.replace("    steps:\n", "    setup:\n      - call: {duration: 1}\n    steps:\n")
+    result = await run_one(
+        ha, suite(tmp_path, text, integration), profile(integration, switch_plug="switch.plug"), admin=ha
+    )
+    return outcomes(result)["called[switch_plug]"]
+
+
+@pytest.mark.parametrize(
+    ("selector", "runs"),
+    [
+        ("classes: {shelly: [tuya_countdown]}", True),
+        ("classes: {shelly: [tuya_countdown_tz3000_0zfrhq4i]}", True),  # the exact class
+        ("classes: {shelly: [other, tuya]}", True),  # any prefix
+        ("classes: {shelly: [tuya_countdown_other]}", False),
+        ("classes: {shelly: [countdown]}", False),  # a prefix, not a substring
+        ("except_classes: {shelly: [tuya_countdown]}", False),
+        ("except_classes: {shelly: [other]}", True),
+    ],
+)
+async def test_a_class_selector_matches_by_prefix(tmp_path, selector, runs):
+    ha = FakeHA({"switch.plug": {}}, reports("tuya_countdown_tz3000_0zfrhq4i"))
+    outcome, detail = await selected(tmp_path, ha, "call: {duration: 1}", f"{{{TRAP}, {selector}}}")
+    assert (outcome, "status" in detail) == ((Outcome.FAIL, True) if runs else (Outcome.PASS, False))
+
+
+async def test_a_target_matches_when_any_class_it_reports_does(tmp_path):
+    ha = FakeHA(
+        {"switch.plug": {}}, lambda ha, action, data: {data["entity_id"]: ran(capabilities=["Switch", "Cover"])}
+    )
+    steps = ("call: {duration: 1}", f"{{{TRAP}, classes: {{shelly: [Cov]}}}}")
+    assert (await selected(tmp_path, ha, *steps))[0] is Outcome.FAIL
+
+
+async def test_a_selector_reads_the_latest_response_and_setup_calls_count(tmp_path):
+    ha = FakeHA({"switch.plug": {}})
+    ha.respond = answering({"switch.plug": ran(capability="Early")}, {"switch.plug": ran(capability="Late")})
+    # Setup's call answers Early, which the first step sees; the call before the last step answers Late.
+    steps = (
+        f"{{{TRAP}, except_classes: {{shelly: [Early]}}}}",
+        "call: {duration: 1}",
+        f"{{{TRAP}, except_classes: {{shelly: [Late]}}}}",
+    )
+    assert await selected(tmp_path, ha, *steps, setup=True) == (Outcome.PASS, "")
+    assert [s for d, s, _ in ha.calls if d == "deviceside"] == ["turn_on_for", "turn_on_for"]
+
+
+async def test_a_response_without_an_entry_for_the_target_keeps_the_last_class(tmp_path):
+    ha = FakeHA({"switch.plug": {}, "light.bulb": {}})
+    inv = profile(switch_plug="switch.plug", light_color="light.bulb")
+    ha.respond = lambda ha, action, data: {data["entity_id"]: ran(capability=data["entity_id"])}
+    text = calls(
+        "call: {duration: 1}",
+        "call: {target: light_color, duration: 1}",
+        f"{{{TRAP}, except_classes: {{shelly: [switch.plug]}}}}",
+        roles="switch_plug, light_color",
+    )
+    result = await run_one(ha, suite(tmp_path, text), inv)
+    assert outcomes(result)["called[switch_plug]"] == (Outcome.PASS, "")
+
+
+async def test_a_selector_naming_another_integration_is_inert(tmp_path):
+    ha = FakeHA({"switch.plug": {}}, reports())  # no class reported: it is never read
+    steps = ("call: {duration: 1}", f"{{{TRAP}, classes: {{zigbee2mqtt: [x]}}}}")
+    assert await selected(tmp_path, ha, *steps, integration="zha") == (Outcome.PASS, "")  # a classes step is left out
+    steps = ("call: {duration: 1}", f"{{{TRAP}, except_classes: {{zigbee2mqtt: [x]}}}}")
+    outcome, detail = await selected(tmp_path, ha, *steps, integration="zha")
+    assert (outcome, "status" in detail) == (Outcome.FAIL, True)  # an except_classes step runs
+
+
+@pytest.mark.parametrize(
+    ("integration", "capability"),
+    [("shelly", None), ("zha", "Switch")],  # a response naming no class; an integration naming no classes
+)
+async def test_no_class_known_fails_the_case_at_the_step(tmp_path, integration, capability):
+    ha = FakeHA({"switch.plug": {}}, reports(capability))
+    for key in ("classes", "except_classes"):
+        steps = ("call: {duration: 1}", f"{{wait: 0, {key}: {{{integration}: [x]}}}}")
+        outcome, detail = await selected(tmp_path, ha, *steps, integration=integration)
+        assert outcome is Outcome.FAIL
+        assert "step 2 (wait): " in detail and key in detail and "named no class" in detail
+
+
+async def test_an_observed_case_applies_a_selector_the_same_way(tmp_path):
+    text = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: classed
+    roles: [switch_plug]
+    setup:
+      - call: {duration: 1}
+    steps:
+      - {call: {duration: 1}, classes: {shelly: [Switch]}}
+      - {call: {duration: 2}, except_classes: {shelly: [Switch]}}
+    observe: {see: s, watch: w, ask: 'ok?'}
+"""
+    ha = FakeHA({"switch.plug": {}}, reports("Switch"))
+    _, ask = answers("", "y")
+    result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug"), ask=ask)
+    assert outcomes(result) == {"classed[switch_plug] observed": (Outcome.PASS, "")}  # no checks: no automated case
+    durations = [data["duration"]["seconds"] for d, s, data in ha.calls if d == "deviceside"]
+    assert durations == [1, 1]  # the setup call and the classes step; the except_classes step is left out
+
+
+async def test_a_class_skipped_expect_error_does_not_change_the_calls_verdict(tmp_path):
+    """The call decides whether it may raise from the next step that runs, once its response gives the class."""
+    ha = FakeHA({"switch.plug": {}}, reports("X"))
+    steps = (
+        "call: {duration: 1}",
+        "{expect_error: {key: targets_failed, summary: timeout}, except_classes: {shelly: [X]}}",
+        "{expect_response: {status: sent}, classes: {shelly: [X]}}",
+    )
+    assert await selected(tmp_path, ha, *steps) == (Outcome.PASS, "")  # an X target: the call succeeds
+
+    # Not an X target: the first call (setup's) says so, the second raises, and the skipped step is not expect_error's.
+    ha = FakeHA({"switch.plug": {}}, in_turn(reports("Y"), refuse("timeout")))
+    steps = (
+        "call: {duration: 1}",
+        "{expect_response: {status: never}, classes: {shelly: [X]}}",
+        "expect_error: {key: targets_failed, summary: timeout}",
+    )
+    assert await selected(tmp_path, ha, *steps, setup=True) == (Outcome.PASS, "")
+
+
+async def test_a_class_skipped_expect_error_is_resolved_the_same_in_a_relaxed_run(tmp_path):
+    text = """
+action: turn_on_for
+rig_seconds: 5
+tests:
+  - name: classed
+    roles: [switch_plug]
+    setup:
+      - call: {duration: 1}
+    steps:
+      - call: {duration: 2}
+      - {expect_error: {key: targets_failed, summary: timeout}, except_classes: {shelly: [X]}}
+      - {call: {duration: 3}, classes: {shelly: [X]}}
+    observe: {see: s, watch: w, ask: 'ok?'}
+"""
+    ha = FakeHA({"switch.plug": {}}, reports("X"))
+    _, ask = answers("", "y")
+    result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug"), ask=ask)
+    assert outcomes(result) == {
+        "classed[switch_plug]": (Outcome.PASS, ""),
+        "classed[switch_plug] observed": (Outcome.PASS, ""),
+    }
+    assert [d["duration"]["seconds"] for dom, s, d in ha.calls if dom == "deviceside"] == [1, 2, 3] * 2
+
+
+@pytest.mark.parametrize(
+    ("step", "runs"),
+    [
+        ("only: [zha], classes: {shelly: [Switch]}", False),  # only: excludes it, though the class matches
+        ("only: [shelly], classes: {shelly: [Cover]}", False),  # the class excludes it, though only: names it
+        ("only: [shelly], classes: {shelly: [Switch]}", True),
+        ("only: [shelly], except_classes: {shelly: [Switch]}", False),
+        ("only: [zha], except_classes: {shelly: [Cover]}", False),
+    ],
+)
+async def test_a_steps_only_and_its_selector_must_both_hold(tmp_path, step, runs):
+    ha = FakeHA({"switch.plug": {}}, reports("Switch"))
+    outcome, _ = await selected(tmp_path, ha, "call: {duration: 1}", f"{{{TRAP}, {step}}}")
+    assert outcome is (Outcome.FAIL if runs else Outcome.PASS)
+
+
+async def test_no_call_answering_for_the_target_leaves_no_class_known(tmp_path):
+    ha = FakeHA({"switch.plug": {}, "light.bulb": {}})
+    ha.respond = lambda ha, action, data: {data["entity_id"]: ran(capability="Switch")}
+    text = calls(
+        "call: {target: light_color, duration: 1}",  # the target's role is not the case's own
+        "{wait: 0, classes: {shelly: [Switch]}}",
+        roles="switch_plug, light_color",
+    )
+    result = await run_one(ha, suite(tmp_path, text), profile(switch_plug="switch.plug", light_color="light.bulb"))
+    outcome, detail = outcomes(result)["called[switch_plug]"]
+    assert outcome is Outcome.FAIL and "step 2 (wait): " in detail and "named no class" in detail
+
+    ha = FakeHA({"switch.plug": {}}, refuse("timeout"))  # a call that raised has no response
+    steps = (
+        "call: {duration: 1}",
+        "expect_error: {key: targets_failed, summary: timeout}",
+        "{wait: 0, except_classes: {shelly: [Switch]}}",
+    )
+    outcome, detail = await selected(tmp_path, ha, *steps)
+    assert outcome is Outcome.FAIL and "step 3 (wait): " in detail and "named no class" in detail

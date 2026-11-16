@@ -306,6 +306,18 @@ some integrations; when those pile up, split the file. A step takes `only` too, 
 [zha]}`), for a step one integration needs and the others would only wait through; it names integrations the test
 runs on.
 
+A step takes `classes:` or `except_classes:` too (not both, and beside `only:` both must hold), to run only on, or
+skip, targets of some DeviceSide classes in one integration: each maps an integration key to a non-empty list of class
+prefixes (`except_classes: {zigbee2mqtt: [tuya_countdown]}`), so a shared step file can expect a class's designed
+behavior without leaving the other integrations' devices untested. A prefix matches the class and the ones that extend
+it (`tuya_countdown` matches `tuya_countdown_tz3000_0zfrhq4i`), and a target matches when any class it reports does. The
+class is the case's own target's as the most recent DeviceSide response with an entry for it reported it, setup calls
+and any action included, so it is read step by step as the run goes. In a suite of an integration the selector doesn't
+name it does nothing: a `classes` step is left out, an `except_classes` step runs. In one it names, a case that has
+learned no class (no call has answered yet, the response names none, or the integration names no classes) fails at the
+step, as the rig never guesses either way. A selector needs a `call` step before it in the test (setup, then steps),
+its keys must be integrations the test runs on, and an integration's own step file may name only its own.
+
 `firmware_fact: true` marks a test that proves how the device behaves (which of two calls wins, the bounds it takes, a
 timing it keeps), not a branch of the adapter's code. Its every case is a fact case (What runs, above), and it may also
 `observe`: its results, pass or fail, are facts in `_facts.md`, its suite's record lists its cases as `skipped`, and it
