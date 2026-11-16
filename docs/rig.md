@@ -99,7 +99,7 @@ actions and reads states and registries, and a non-admin token can't change your
 
 Some suites need an admin token in `HA_ADMIN_TOKEN`: ZHA (its cluster command is admin-only, and the adapter passes
 the caller's context through), Zigbee2MQTT (setting device options over MQTT), suites whose adapter has options
-(to set them), `lifecycle` (reloading and disabling DeviceSide's entry), and roaming. Without it, a run that
+(to set them), `config_entry` (reloading and disabling DeviceSide's entry), and roaming. Without it, a run that
 includes them stops before the gate; `--integration` or `--action` leaves them out.
 
 ### Authorization
@@ -316,10 +316,10 @@ The roles are listed in `ha_rig/profile.example.yaml`. `group_color` is a native
 color: color moves groupcast only to a group like that, so it runs the color cases a `group` can't. Everything this
 page says of a `group` holds for it too.
 
-A file with `entry` steps (`lifecycle.yaml`) tests DeviceSide's config entry through its action: reloading it, and
+A file with `entry` steps (`config_entry.yaml`) tests DeviceSide's config entry through its action: reloading it, and
 the action refusing with `not_loaded` while it is disabled. It runs alone, holding HA exclusively, like an option
-file, and needs a top-level `name:`, which its record takes (`lifecycle.md`) and `--action` picks it by, so it never
-replaces the action's own. A file with no test for an integration (every test `only:` elsewhere, as `lifecycle.yaml`
+file, and needs a top-level `name:`, which its record takes (`config_entry.json`) and `--action` picks it by, so it never
+replaces the action's own. A file with no test for an integration (every test `only:` elsewhere, as `config_entry.yaml`
 is for all but Hue) isn't selected there, so the record and the dry-run don't show it.
 
 An adapter with options runs each file for its action with them pinned through DeviceSide's options flow:

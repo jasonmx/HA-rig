@@ -938,7 +938,7 @@ async def test_recover_without_an_admin_token_leaves_the_entry_disabled_in_the_j
 
 def test_check_tokens_stops_a_run_with_entry_steps_without_an_admin_token():
     registry = AdapterRegistry.discover()
-    step_file = next(f for f in load_step_files(STEPS) if f.name == "lifecycle")
+    step_file = next(f for f in load_step_files(STEPS) if f.name == "config_entry")
     env = {"HA_URL": "http://ha:8123", "HA_TOKEN": "tok"}
     with pytest.raises(SystemExit, match="shelly needs HA_ADMIN_TOKEN"):
         rig.check_tokens(env, [rig.Suite(step_file, "shelly")], registry)
@@ -948,16 +948,16 @@ def test_check_tokens_stops_a_run_with_entry_steps_without_an_admin_token():
 def test_action_picks_a_named_file_by_its_name_not_its_action():
     step_files = load_step_files(STEPS)
     profile = fakes.profile("hue", light_color="light.lamp")
-    assert {suite.name for suite in rig.select(step_files, profile, None, ["lifecycle"])} == {"lifecycle"}
+    assert {suite.name for suite in rig.select(step_files, profile, None, ["config_entry"])} == {"config_entry"}
     assert {suite.name for suite in rig.select(step_files, profile, None, ["get_attributes"])} == {"get_attributes"}
 
 
 def test_a_file_with_no_test_for_an_integration_is_not_selected_there(profile, tmp_path, monkeypatch):
-    """lifecycle's tests are both `only: [hue]`: shelly has no cases, so no suite."""
+    """config_entry's tests are both `only: [hue]`: shelly has no cases, so no suite."""
     step_files = load_step_files(STEPS)
-    suites = rig.select(step_files, profile, None, ["lifecycle"])
-    assert [(suite.integration, suite.name) for suite in suites] == [("hue", "lifecycle")]
-    assert rig.select(step_files, profile, ["shelly"], ["lifecycle"]) == []
+    suites = rig.select(step_files, profile, None, ["config_entry"])
+    assert [(suite.integration, suite.name) for suite in suites] == [("hue", "config_entry")]
+    assert rig.select(step_files, profile, ["shelly"], ["config_entry"]) == []
 
 
 def test_main_recovers_before_the_plan_and_recover_alone_stops_there(tmp_path, monkeypatch, capsys):
