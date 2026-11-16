@@ -1726,6 +1726,7 @@ class _CaseRun:
         # The classes the case's own target reported in the latest call's response with an entry for it, setup calls
         # and every action included (empty: it reported none); None before any. What a step's selector reads.
         self.target_classes: frozenset[str] | None = None
+        self.upcoming: tuple[Step, ...] = ()  # the steps after the one running, in its phase (following)
         self.error: HAError | None = None
         self.last_action = case.suite.action
         self.query = False
@@ -1858,6 +1859,18 @@ class _CaseRun:
                 *(reported_classes(entry) or frozenset() for entry in entries.values())
             )
 
+    def following(self) -> str | None:
+        """The kind of the next step that will run, as the classes stand now: a call reads it once its response is
+        in, since a class-skipped step is no more the one that checks it (expect_error). A step whose selector
+        can't be decided runs, and fails there."""
+        for step in self.upcoming:
+            try:
+                if not self.skips_class(step):
+                    return step.kind
+            except StepFailure:
+                return step.kind
+        return None
+
     def skips_class(self, step: Step) -> bool:
         """Whether the step's `classes:` or `except_classes:` leaves it out here. A selector that doesn't name the
         suite's integration is inert: `classes` skips, `except_classes` runs. Else the target's classes decide, by
@@ -1980,6 +1993,7 @@ class _CaseRun:
         try:
             for index, step in enumerate(steps):
                 following = steps[index + 1].kind if index + 1 < len(steps) else None
+                self.upcoming = steps[index + 1 :]
                 handler = getattr(self, f"_{step.kind}")
                 if relaxed:
                     handler = getattr(self, f"_relaxed_{step.kind}", handler)
@@ -2192,7 +2206,7 @@ class _CaseRun:
                 f"zcl cluster {args['cluster']} command {args['command']} on {entity_id}: {err}"
             ) from None
 
-    async def _call(self, args: dict, following: str | None) -> None:
+    async def _call(self, args: dict, _following: str | None) -> None:
         action = args.get("action", self.case.suite.action)
         entity_id = self.entity(args)
         await self.snapshot.await_reload(entity_id)
@@ -2220,11 +2234,11 @@ class _CaseRun:
                 self.answers.append(await self.entries(self.response, entity_id))
             await self.learn_classes()
         except HAError as err:
-            if following != "expect_error":
+            if self.following() != "expect_error":
                 raise StepFailure(f"deviceside.{action} raised {err.translation_key}: {err}") from None
             self.error = err
             return
-        if following == "expect_error":
+        if self.following() == "expect_error":
             raise StepFailure(f"deviceside.{action} succeeded where an error was expected: {self.response}")
         await self.mark_busy(action, data)
         self.mark_reloading(action)
