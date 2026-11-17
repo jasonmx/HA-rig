@@ -1,5 +1,6 @@
-"""Runs deviceside's YAML step files against the live HA and renders test records from the results: JSON format 2
-where the checkout has deviceside's record schema (ha_rig/schema.py), else markdown.
+"""Runs deviceside's YAML step files against the live HA and renders test records from the results: JSON (format 3, or
+format 2 where the schema or the action's transcript lacks it) where the checkout has deviceside's record schema
+(ha_rig/schema.py), else markdown.
 
 The step files are the checkout under test's (`tests/rig/steps/`, target.steps_dir). One file per action
 (`<action>.yaml`) runs on every integration in the profile that has that action's adapter; a file with `options`
@@ -37,7 +38,7 @@ from .facts import JSON_FILE as JSON_FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
 from .profile import EACH_ENTITY, ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile, normalize_ieee
-from .schema import FORMAT, RecordSchema
+from .schema import CALLS_FORMAT, FORMAT, RecordSchema
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1184,7 +1185,7 @@ class Outcome(StrEnum):
     NOT_RUN = "not run"  # the case never tested DeviceSide (coordinator busy); never saved, so a resume runs it again
 
 
-# The outcomes of a case that ran, which a format 2 record lists with the devices it reached.
+# The outcomes of a case that ran, which a record lists with the devices it reached.
 RAN = frozenset({Outcome.PASS, Outcome.FAIL, Outcome.NOT_OBSERVED})
 
 
@@ -1205,7 +1206,7 @@ class CaseResult:
     # The classes its target reached (reached_classes), for an integration that names them; empty for none.
     classes: tuple[str, ...] = ()
     # A case that ran (RAN): the devices it reached, each with its model ID, firmware and class (_CaseRun.reached),
-    # for a format 2 record and _facts.json row. Saved, so a resumed suite has them; empty when the lookup failed.
+    # for a record and _facts.json row. Saved, so a resumed suite has them; empty when the lookup failed.
     reached: tuple[Reached, ...] = ()
 
 
@@ -1812,7 +1813,7 @@ class _CaseRun:
 
     async def note_reached(self, result: CaseResult) -> None:
         """What the case reached, on its result once it has its outcome, as the run's records name it: for JSON ones,
-        the devices a case that ran reached, for its format 2 record and _facts.json row; for markdown, a fact's
+        the devices a case that ran reached, for its record and _facts.json row; for markdown, a fact's
         devices for its _facts.md row and the classes for the Capability column."""
         if self.json_records:
             if result.outcome in RAN:
@@ -1896,7 +1897,7 @@ class _CaseRun:
 
     async def reached(self) -> tuple[Reached, ...]:
         """The devices the case reached (reached_entities), each with its model ID, firmware and the class its calls
-        reached (entity_classes), for a format 2 record and _facts.json row; none when the lookup fails, which costs
+        reached (entity_classes), for a record and _facts.json row; none when the lookup fails, which costs
         the record (a test that ran must list its devices), not the case."""
         try:
             entity_ids = await self.reached_entities()
@@ -2977,7 +2978,7 @@ async def devices_by_entity(ha: HAClient) -> dict[str, dict]:
 
 @dataclass(frozen=True, slots=True)
 class Reached:
-    """A device a case reached, as a format 2 record and _facts.json row list it (deviceside's schema: test_device):
+    """A device a case reached, as a record and _facts.json row list it (deviceside's schema: test_device):
     its model ID, maker string, firmware and class."""
 
     model: str | None  # its model ID (record_model); a record naming none doesn't hold to the schema
@@ -2997,7 +2998,7 @@ class Reached:
 
 
 def record_model(device: dict, z2m_devices: dict[str, dict]) -> str | None:
-    """The model ID a format 2 record names for a device-registry entry: a Zigbee device's own (the Basic cluster's,
+    """The model ID a record names for a device-registry entry: a Zigbee device's own (the Basic cluster's,
     such as LWA012) on every integration, else HA's registry `model_id`. Z2M's is its bridge/devices `model_id`
     (`z2m_devices`, its entries by IEEE), as HA's registry holds Z2M's product code (9290018217); ZHA's is the registry
     `model` here, and its diagnostics' in a record (zha_strings), as a quirks v2 friendly name replaces the registry's.
@@ -3010,7 +3011,7 @@ def record_model(device: dict, z2m_devices: dict[str, dict]) -> str | None:
 
 
 def record_manufacturer(device: dict, z2m_devices: dict[str, dict]) -> str | None:
-    """The maker string a format 2 record names for a device-registry entry, as its integration reports it, never a
+    """The maker string a record names for a device-registry entry, as its integration reports it, never a
     device name: Z2M's bridge/devices `manufacturer` (the Basic cluster's, such as `_TZ3000_…`, not the definition's
     vendor, which HA's registry holds), else HA's registry `manufacturer`: on Hue the bridge's
     product_data.manufacturer_name, which HA's Hue integration copies. None where it reports none. A ZHA device's is
@@ -3105,7 +3106,7 @@ class Record:
 
     @classmethod
     def _read_json(cls, path: Path) -> Record:
-        """A JSON record, format 1 or 2; one the rig can't read holds nothing, as a markdown one with no table."""
+        """A JSON record, any format; one the rig can't read holds nothing, as a markdown one with no table."""
         try:
             data = json.loads(path.read_text())
             source, tests = data.get("source") or {}, data.get("tests") or []
@@ -3185,19 +3186,33 @@ def render_record(
     return "\n".join(lines) + "\n"
 
 
-def record_json(suite_result: SuiteResult, ha_version: str, date: str, commit: str, package: str | None) -> dict:
-    """The format 2 record (deviceside's docs/test-records.schema.json): the suite's action and options, the run, and
-    a test per case in the suite's order, each case that ran with the devices it reached, a native group's its
-    members. No counts, notes or facts: deviceside derives what it needs from the tests, and facts are _facts.json's."""
+def record_json(
+    suite_result: SuiteResult,
+    ha_version: str,
+    date: str,
+    commit: str,
+    package: str | None,
+    calls: str | None = None,
+) -> dict:
+    """The record (deviceside's docs/test-records.schema.json): the suite's action and options, the run, and a test
+    per case in the suite's order, each case that ran with the devices it reached, a native group's its members. No
+    counts, notes or facts: deviceside derives what it needs from the tests, and facts are _facts.json's.
+
+    Format 3 with `calls`, the blob of the action's call transcript at the run's commit, which a sign-off stands on;
+    format 2 without, citing `package`, the integration's tree there, which credits classes and signs nothing off."""
     suite = suite_result.suite
-    record: dict[str, Any] = {"format": FORMAT, "integration": suite.integration, "action": suite.action}
+    record: dict[str, Any] = {
+        "format": FORMAT if calls is None else CALLS_FORMAT,
+        "integration": suite.integration,
+        "action": suite.action,
+    }
     if suite.file.options:
         record["options"] = sorted(suite.file.options)
     record |= {
         "result": "pass",
         "date": date,
         "source": {"kind": "rig", "commit": commit},
-        "package": package,
+        **({"package": package} if calls is None else {"calls": calls}),
         "home_assistant": ha_version,
         "tests": [_test_json(suite, case) for case in suite_result.cases],
     }
@@ -3255,6 +3270,7 @@ async def write_records(
     into: Records | None = None,
     package: Callable[[str], str] | None = None,
     *,
+    calls: Callable[[str, str], str | None] | None = None,
     schema: RecordSchema | None = None,
     commit: str | None = None,
     out: Callable[[str], None] = print,
@@ -3271,9 +3287,12 @@ async def write_records(
     `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
     after Source: what deviceside's release check compares to the tree that ships.
 
-    With the checkout's `schema`, each record is JSON format 2 (record_json) citing `commit`, the run's (abbreviated),
-    in place of `source`, and is written only once the schema takes it: one it refuses is said in `out`, and written
-    nowhere. Without, markdown (render_record)."""
+    With the checkout's `schema`, each record is JSON (record_json) citing `commit`, the run's (abbreviated), in place
+    of `source`, and is written only once the schema takes it: one it refuses is said in `out`, and written nowhere.
+    A schema that takes format 3 (`binds_calls`) gets it, citing `calls(integration, action)`, the blob of the
+    action's call transcript at the run's commit, in place of the package tree; where that is None (the commit has no
+    transcript of the action) the suite's record is format 2, citing `package`, and `out` says why. A schema without
+    format 3 gets format 2. Without a schema, markdown (render_record)."""
     if schema is not None and not commit:
         raise ValueError("a JSON record cites the run's commit: pass `commit` with `schema`")
     written, kept = [], []
@@ -3297,8 +3316,15 @@ async def write_records(
                     "(the registry lookup failed, or an older rig saved them): a run at this commit reruns those cases"
                 )
                 continue
+            blob = calls(suite.integration, suite.action) if schema.binds_calls and calls else None
+            if schema.binds_calls and blob is None:
+                out(
+                    f"{suite.integration} / {suite.name}: no call transcript of {suite.action} at {commit} "
+                    f"(tests/integrations/{suite.integration}/calls/{suite.action}.json), so the record is format 2: "
+                    "it credits classes but signs nothing off"
+                )
             try:
-                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree))
+                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree, blob))
             except (OSError, ValueError) as err:  # InvalidRecord, or a file that couldn't be written
                 out(f"{suite.integration} / {suite.name}: {err}")
                 continue

@@ -37,9 +37,9 @@ options:
   --no-deploy           test whatever HA already runs
   --integration {hue,matter,shelly,zha,zigbee2mqtt}
                         limit to an integration key (repeatable); with --wait-free, wait for it
-  --signoffs            run, whole, the integrations deviceside's check_release.py --signoffs
-                        --json lists as needing a sign-off, of those the profile has; names the
-                        rest for a manual sign-off, and stops when none needs one
+  --signoffs            run the suites deviceside's check_release.py --signoffs --reruns lists for
+                        each integration, of those the profile has; names the rest for a manual
+                        sign-off, and stops when none needs one
   --action ACTION       limit to an action's step files (repeatable)
   -k KEYWORD            run only test cases whose id contains this text
   --facts               also run the fact cases a default run skips, firmware facts and watched
