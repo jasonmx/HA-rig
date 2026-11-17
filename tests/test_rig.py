@@ -2133,8 +2133,21 @@ def test_signoffs_runs_only_the_suites_deviceside_lists_for_each_integration(cap
         ("hue", "stop-predicted_state"),
         ("zha", "set_scene"),
     ]
+    capsys.readouterr()
+    assert [suite.name for suite in rig.signoff_suites(suites, {"hue": ["stop"], "zha": ["gone"]})] == ["stop"]
+    assert "zha/gone" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="None of the suites"):
         rig.signoff_suites(suites, {"hue": ["gone"]})
+
+
+def test_signoffs_runs_every_suite_of_an_integration_listed_with_none():
+    """deviceside's --reruns lists an integration with no record yet as [], meaning all its suites."""
+    suites = [
+        types.SimpleNamespace(integration=integration, name=name)
+        for integration, name in [("hue", "stop"), ("zha", "stop"), ("zha", "set_scene")]
+    ]
+    chosen = rig.signoff_suites(suites, {"zha": []})
+    assert [(suite.integration, suite.name) for suite in chosen] == [("zha", "stop"), ("zha", "set_scene")]
 
 
 def test_a_failed_signoffs_check_stops_the_run_before_anything_else(monkeypatch):

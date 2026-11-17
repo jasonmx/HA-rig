@@ -195,7 +195,8 @@ A run runs the suites it is asked for: every one the profile has an adapter for,
 proven or stale, and a test record in the checkout never leaves a suite out.
 
 **`--signoffs`** runs what deviceside says needs a sign-off: the suites its `scripts/check_release.py --signoffs
---reruns` lists for each integration (a JSON object, `{integration: [suite, ...]}`), run in the checkout with the
+--reruns` lists for each integration (a JSON object, `{integration: [suite, ...]}`, where `[]` means every suite: an
+integration with no record yet), run in the checkout with the
 interpreter the rig imports it with, in place of `--integration` and `--action`. A sign-off is per action: an action
 whose calls changed needs only its own suites passing (its plain suite and each option suite), so the rest of the
 integration is not rerun, and a fix for a failing case reruns that suite at the new commit with `--integration <x>

@@ -1095,8 +1095,17 @@ def signoff_selection(needed: dict[str, list[str]], profile: Profile) -> list[st
 
 
 def signoff_suites(suites: list[Suite], needed: dict[str, list[str]]) -> list[Suite]:
-    """--signoffs: of the selected suites, those deviceside lists for their integration. Stops when none is one."""
-    chosen = [suite for suite in suites if suite.name in needed.get(suite.integration, ())]
+    """--signoffs: of the selected suites, those deviceside lists for their integration; an empty list (an integration
+    with no record yet) means every one. Names the listed suites no step file matches. Stops when none is chosen."""
+    chosen = [
+        suite
+        for suite in suites
+        if suite.integration in needed and (not needed[suite.integration] or suite.name in needed[suite.integration])
+    ]
+    found = {(suite.integration, suite.name) for suite in chosen}
+    unmatched = [f"{key}/{name}" for key, names in needed.items() for name in names if (key, name) not in found]
+    if unmatched:
+        print(f"deviceside lists suites with no selected step file here, so they stay unsigned: {', '.join(unmatched)}")
     if not chosen:
         raise SystemExit(f"None of the suites deviceside's check lists has a step file here: {needed}")
     return chosen
