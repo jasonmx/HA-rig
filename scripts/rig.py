@@ -74,7 +74,7 @@ those on fixed groups whose members the profile doesn't list and on fixed scenes
 
 A run runs the suites it is asked for; what needs testing is deviceside's to say. --signoffs takes deviceside's list of
 the integrations still needing a sign-off (target.signoffs_needed) as the selection and runs each whole, as a sign-off
-is one whole passing run at one package tree (so no --action or -k), naming those the profile lacks for a manual
+is one whole passing run at one commit (so no --action or -k), naming those the profile lacks for a manual
 sign-off, and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
 fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
 automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
@@ -203,7 +203,7 @@ def checkout_records(integration: str) -> Path:
 
 
 def record_schema() -> RecordSchema | None:
-    """The checkout's test-record schema, for JSON format 2 records; None for markdown (ha_rig/schema.py)."""
+    """The checkout's test-record schema, for JSON records; None for markdown (ha_rig/schema.py)."""
     return _schema(REPO)
 
 
@@ -2371,6 +2371,12 @@ async def report(
     def package_tree(integration: str) -> str:
         return git("rev-parse", "--short=12", f"{commit}:{COMPONENT}/integrations/{integration}")
 
+    def action_calls(integration: str, action: str) -> str | None:
+        """The blob of `action`'s call transcript at the run's commit, which a format 3 record binds to; None when
+        the commit has none."""
+        path = f"tests/integrations/{integration}/calls/{action}.json"
+        return git("rev-parse", "--verify", "--quiet", f"{commit}:{path}", check=False) or None
+
     short = git("rev-parse", "--short", commit)
     source = f"rig run (`scripts/rig.py`), commit `{short}`"
     if touched is not None:
@@ -2383,6 +2389,7 @@ async def report(
         source,
         into=staging.test_records_dir,
         package=package_tree,
+        calls=action_calls,
         schema=record_schema(),
         commit=short,
     )

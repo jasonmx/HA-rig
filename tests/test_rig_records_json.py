@@ -1,5 +1,7 @@
-"""JSON format 2 test records and `_facts.json`: what the rig writes for a checkout with deviceside's record schema,
-each file round-tripped through the paired checkout's own schema."""
+"""JSON test records and `_facts.json`: what the rig writes for a checkout with deviceside's record schema, each file
+round-tripped through the paired checkout's own schema. A record is format 3 (bound to the action's call transcript)
+against a schema that lists it, format 2 (bound to the package tree) against one that doesn't, and where the action has
+no transcript. The paired schema is patched to be each, so the tests hold whichever deviceside it is paired with."""
 
 import json
 import sys
@@ -36,7 +38,20 @@ if not (PAIRED / SCHEMA).is_file():
     pytest.skip(f"the paired deviceside checkout has no {SCHEMA}: its records are markdown", allow_module_level=True)
 
 CONTRACT = Draft202012Validator(json.loads((PAIRED / SCHEMA).read_text()))  # deviceside's, read apart from the rig's
+PAIRED_DOCUMENT = json.loads((PAIRED / SCHEMA).read_text())
 SCHEMA_OF = RecordSchema.load(PAIRED)
+
+
+def schema_listing(formats: list[int]) -> RecordSchema:
+    """The paired schema with its record's formats narrowed to `formats`: an older deviceside's takes [1, 2]."""
+    document = json.loads(json.dumps(PAIRED_DOCUMENT))
+    document["$defs"]["record"]["properties"]["format"]["enum"] = formats
+    return RecordSchema.parse(PAIRED / SCHEMA, json.dumps(document))
+
+
+SCHEMA_2 = schema_listing([1, 2])  # deviceside from before format 3
+needs_format_3 = pytest.mark.skipif(not SCHEMA_OF.binds_calls, reason="the paired deviceside schema has no format 3")
+BLOB = "0123456789abcdef0123456789abcdef01234567"  # a call transcript's git blob id, as git rev-parse prints it
 # Z2M and Shelly name classes, as on deviceside's device-classes branches; ZHA and Hue don't yet.
 REGISTRY = Roster(
     {
@@ -209,7 +224,9 @@ async def run_suite(ha, steps, inv: Profile) -> RunResult:
 async def write(
     result: RunResult, records: Path, printed: list[str] | None = None, registry=REGISTRY, **kwargs
 ) -> list[Path]:
-    """write_records in format 2, from a run at commit abc1234 whose packages are each tree PACKAGE."""
+    """write_records against a schema that takes only format 2 (`schema=` another), from a run at commit abc1234
+    whose packages are each tree PACKAGE."""
+    kwargs = {"schema": SCHEMA_2, **kwargs}
     written, _ = await write_records(
         result,
         registry,
@@ -217,7 +234,6 @@ async def write(
         "2026-11-14",
         "rig run",
         package=lambda key: PACKAGE,
-        schema=SCHEMA_OF,
         commit="abc1234",
         out=(printed if printed is not None else []).append,
         **kwargs,
@@ -232,6 +248,111 @@ def held(path: Path) -> dict:
     assert list(CONTRACT.iter_errors(data)) == []
     assert text == json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     return data
+
+
+async def test_a_checkout_without_format_3_gets_format_2_whatever_the_transcripts(tmp_path):
+    ha = RegistryHA({"switch.plug": {}}, answer({"switch.plug": {"switch.plug": {"status": "sent"}}}))
+    result = await run_suite(
+        ha, suite(tmp_path, ONE_CALL.format(roles="switch_plug")), profile(switch_plug="switch.plug")
+    )
+    [path] = await write(result, tmp_path / "records", calls=lambda integration, action: BLOB)
+    data = held(path)
+    assert (data["format"], data["package"], "calls" in data) == (2, PACKAGE, False)
+
+
+@needs_format_3
+async def test_a_checkout_with_format_3_binds_the_record_to_the_actions_transcript(tmp_path):
+    ha = RegistryHA({"switch.plug": {}}, answer({"switch.plug": {"switch.plug": {"status": "sent"}}}))
+    result = await run_suite(
+        ha, suite(tmp_path, ONE_CALL.format(roles="switch_plug")), profile(switch_plug="switch.plug")
+    )
+    asked = []
+
+    def calls(integration, action):
+        asked.append((integration, action))
+        return BLOB
+
+    [path] = await write(result, tmp_path / "records", schema=SCHEMA_OF, calls=calls)
+    data = held(path)
+    assert asked == [("shelly", "turn_on_for")]
+    assert (data["format"], data["calls"], "package" in data) == (3, BLOB, False)
+    assert list(data)[:8] == ["format", "integration", "action", "result", "date", "source", "calls", "home_assistant"]
+
+
+ENTRY = """
+action: get_attributes
+name: config_entry
+rig_seconds: 5
+tests:
+  - name: halts
+    roles: [light_ct]
+    steps:
+      - wait: 0
+"""
+
+
+@needs_format_3
+@pytest.mark.parametrize(
+    ("text", "record", "options"),
+    [
+        (
+            ENTRY.replace("get_attributes", "stop").replace("name: config_entry", "options: [predicted_state]"),
+            "stop-predicted_state",
+            ["predicted_state"],
+        ),
+        (ENTRY, "config_entry", None),
+    ],
+    ids=["an option suite", "a non-action suite"],
+)
+async def test_a_suite_named_for_more_than_its_action_binds_to_its_actions_blob(tmp_path, text, record, options):
+    passed = CaseResult(
+        "halts[light_ct]", "light_ct", "light", Outcome.PASS, reached=(Reached("S3BL", "2.0", "RGBCCT"),)
+    )
+    asked = []
+
+    def calls(integration, action):
+        asked.append((integration, action))
+        return BLOB
+
+    written, _ = await write_records(
+        canned(text, [passed], tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-14",
+        "rig run",
+        calls=calls,
+        schema=SCHEMA_OF,
+        commit="abc1234",
+    )
+    [path] = written
+    data = held(path)
+    action = "stop" if options else "get_attributes"
+    assert (path.name, asked, data["action"], data.get("options"), data["calls"]) == (
+        f"{record}.json",
+        [("shelly", action)],
+        action,
+        options,
+        BLOB,
+    )
+
+
+@needs_format_3
+async def test_a_suite_whose_action_has_no_transcript_is_format_2_and_says_why(tmp_path):
+    ha = RegistryHA({"switch.plug": {}}, answer({"switch.plug": {"switch.plug": {"status": "sent"}}}))
+    result = await run_suite(
+        ha, suite(tmp_path, ONE_CALL.format(roles="switch_plug")), profile(switch_plug="switch.plug")
+    )
+    printed: list[str] = []
+    [path] = await write(result, tmp_path / "records", printed, schema=SCHEMA_OF, calls=lambda i, a: None)
+    data = held(path)
+    assert (data["format"], data["package"], "calls" in data) == (2, PACKAGE, False)
+    [line] = printed
+    assert "no call transcript of turn_on_for at abc1234" in line and "signs nothing off" in line
+
+
+def test_the_schema_says_whether_it_takes_format_3():
+    assert SCHEMA_2.binds_calls is False
+    assert schema_listing([1, 2, 3]).binds_calls is True
 
 
 async def test_a_record_lists_each_case_kind_and_holds_to_deviceside_schema(tmp_path):

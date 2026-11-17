@@ -2166,7 +2166,8 @@ async def test_report_writes_json_records_against_a_checkout_with_the_schema_and
     (tmp_path / target.SCHEMA).write_text(paired.read_text())  # before the plan, which asks for the format
     profile, suites = resumable(tmp_path)
     progress = planned(tmp_path, monkeypatch, suites, profile).progress
-    monkeypatch.setattr(rig, "git", lambda *args, check=True: "c1short")
+    git_calls: list[tuple] = []
+    monkeypatch.setattr(rig, "git", lambda *args, check=True: git_calls.append(args) or "c1short")
     monkeypatch.setattr(rig, "write_report", lambda result, directory, title: tmp_path / "report.md")
     for case_id in ("t[light_ct]", "u[light_ct]"):
         result = engine.CaseResult(case_id, "light_ct", "light", engine.Outcome.PASS, entity_ids=("light.a",))
@@ -2188,6 +2189,11 @@ async def test_report_writes_json_records_against_a_checkout_with_the_schema_and
     )
     [kwargs] = called
     assert kwargs["schema"] is rig.record_schema() is not None and kwargs["commit"] == "c1short"
+    git_calls.clear()
+    assert kwargs["calls"]("shelly", "raise_brightness") == "c1short"
+    assert git_calls == [
+        ("rev-parse", "--verify", "--quiet", "c1:tests/integrations/shelly/calls/raise_brightness.json")
+    ]
     [(staged, entry)] = staging.records.items()
     assert staged == record_path("shelly").removesuffix(".md") + ".json"
     assert tuple(entry["entry"]) == progress.key(suites[0])

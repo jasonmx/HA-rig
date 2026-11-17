@@ -196,7 +196,7 @@ proven or stale, and a test record in the checkout never leaves a suite out.
 
 **`--signoffs`** runs what deviceside says needs a sign-off: the integrations its `scripts/check_release.py --signoffs
 --json` lists, run in the checkout with the interpreter the rig imports it with, in place of `--integration`. A record
-sign-off is one whole passing run of the integration at one package tree, so each is run whole, every suite it has, and
+sign-off is one whole passing run of the integration at one commit, so each is run whole, every suite it has, and
 `--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same commit with `--integration <x>
 --action <a>` to complete the run. Those the profile has no entities for are named as needing a manual sign-off
 (`_manual.md`), and the run goes on with the rest; when the list is empty, or the profile has none of it, the run says
@@ -447,14 +447,24 @@ sits in the temp folder, which the OS may clear: when every selected case is sav
 `--promote` or `--fresh` writes the record.
 
 **The format follows the checkout.** One with deviceside's record schema, `docs/test-records.schema.json`, gets JSON
-format 2, the schema's shape, and no markdown: the rig checks each record and `_facts.json` against that schema, from
+records, in the schema's shape, and no markdown: the rig checks each record and `_facts.json` against that schema, from
 the checkout under test, and writes none it refuses, saying why (`ha_rig/schema.py`). It loads the schema before
 anything else, `--check` included, so a checkout without `jsonschema` (`uv sync` there adds it) stops the run before
 anything moves. `--promote` refuses markdown records staged for a checkout that has since moved to JSON: rerun their
 suites. A checkout without the schema, deviceside `main` before its records moved to JSON, gets markdown as below.
 
-A format 2 record holds its integration, action and any options, the date, the commit, the package tree, Home
-Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker
+**Format 3 binds a record to a call transcript.** When the schema's record formats list 3 (`RecordSchema.binds_calls`,
+read from the schema itself), a record is format 3: `calls` holds the git blob id of the action's call transcript,
+`git rev-parse <commit>:tests/integrations/<integration>/calls/<action>.json` at the run's commit (full 40 hex, never
+HEAD), in place of the package tree. `<action>` is the record's action, so an option suite
+(`raise_brightness-predicted_state`) and a suite named for something else (`config_entry`, action `get_attributes`) bind
+to that action's transcript. Where the commit has no transcript of the action, that suite's record is format 2, citing
+the package tree, and the run prints a line saying so: it credits classes but signs nothing off (deviceside's
+`docs/evidence.md`). A schema that doesn't list format 3 gets format 2 for every record. `_facts.json` is format 2
+either way, as the schema pins it.
+
+A record holds its integration, action and any options, the date, the commit, its binding (format 3's `calls`, or format
+2's package tree), Home Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker
 string, firmware and class. On a Zigbee device the model ID and maker string are the device's own Basic-cluster ones:
 Z2M's `bridge/devices` `model_id` and `manufacturer` (HA's registry holds Z2M's product code and vendor), ZHA's
 device diagnostics' `model` and `manufacturer` (the registry holds a quirks v2 device's friendly name; zha's
@@ -494,5 +504,5 @@ with their firmware (a group's members included, as a record's Device row names 
 ever appended to, a row as each case ends, straight into the checkout, whether or not a record is written and however
 the run ends, except while the step files are uncommitted (The ledger, above): a fact stands whatever the code, until evidence contradicts it, and a line the rig can't read stays as it
 is. `_facts.json` is rewritten to add a row, with every row already there left as it was; one the rig can't read stays
-as it is, and the run prints the row to add by hand. Its rows' devices are as a format 2 record's. Nothing reruns a fact
+as it is, and the run prints the row to add by hand. Its rows' devices are as a record's. Nothing reruns a fact
 case by itself, and the rig decides nothing from the rows. Review the diff before committing it.
