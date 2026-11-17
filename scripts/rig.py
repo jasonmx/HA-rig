@@ -73,9 +73,9 @@ device left unpowered stops the run only when its phase comes, after the bulbs h
 those on fixed groups whose members the profile doesn't list and on fixed scenes; their suites write no record.
 
 A run runs the suites it is asked for; what needs testing is deviceside's to say. --signoffs takes deviceside's list of
-the integrations still needing a sign-off (target.signoffs_needed) as the selection and runs each whole, as a sign-off
-is one whole passing run at one commit (so no --action or -k), naming those the profile lacks for a manual
-sign-off, and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
+the suites to run, per integration (target.signoffs_needed), as the selection (so no --action or -k): a sign-off is
+per action, so only the suites of the actions it reopens run, each whole, naming the integrations the profile lacks
+for a manual sign-off, and stops, touching nothing, when none needs one. Fact cases (every case of a firmware
 fact, and the watched case of a test with observe:) run only with --facts: a default run skips them, and runs the
 automated case of an observed test like any other. It saves each case as it finishes in the profile's ledger
 (ha_rig/progress.py), keyed by the suite and the commit, so one that stops part way, on a signal, the restricted sensor
@@ -774,8 +774,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--signoffs",
         action="store_true",
-        help="run, whole, the integrations deviceside's check_release.py --signoffs --json lists as needing a "
-        "sign-off, of those the profile has; names the rest for a manual sign-off, and stops when none needs one",
+        help="run the suites deviceside's check_release.py --signoffs --reruns lists for each integration, of "
+        "those the profile has; names the rest for a manual sign-off, and stops when none needs one",
     )
     parser.add_argument("--action", action="append", help="limit to an action's step files (repeatable)")
     parser.add_argument("-k", dest="keyword", help="run only test cases whose id contains this text")
@@ -882,8 +882,7 @@ def refuse_conflicts(parser: argparse.ArgumentParser, args: argparse.Namespace, 
         args.integration or args.action or args.keyword or args.roam_check or args.recover or args.wait_free or command
     ):
         parser.error(
-            "--signoffs is for a test run or --check; it picks the integrations itself and runs them whole: no "
-            "--integration, --action or -k"
+            "--signoffs is for a test run or --check; it picks the suites itself: no --integration, --action or -k"
         )
     refuse_mode_conflicts(parser, args, command)
 
@@ -1042,8 +1041,8 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     its tokens. --signoffs asks deviceside first, and stops, exit 0, when it lists nothing for the profile."""
     record_schema()  # first, --check included: a schema jsonschema can't load would leave a run no record to write
     needed = target.signoffs_needed(REPO) if args.signoffs else None
-    if needed == []:
-        nothing_to_run("No integration needs a sign-off (deviceside's check_release.py --signoffs --json)")
+    if needed == {}:
+        nothing_to_run("No action needs a sign-off (deviceside's check_release.py --signoffs --reruns)")
     env = load_env()
     try:
         profile = Profile.load(choose_profile(args.profile, env))
@@ -1055,6 +1054,8 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     # The files are compared with HEAD as read, from the bytes they were parsed from, so what ran is what is checked.
     step_files, head, committed = ([], None, True) if args.roam_check else engine.load_checkout_steps(REPO)
     suites = run_suites(args, profile, registry, step_files)
+    if needed is not None:
+        suites = signoff_suites(suites, needed)
     setup = Setup(
         env,
         profile,
@@ -1078,19 +1079,27 @@ def prepare(args: argparse.Namespace, directory: Path | None = None) -> Setup:
     return setup
 
 
-def signoff_selection(needed: list[str], profile: Profile) -> list[str]:
-    """--signoffs: of the integrations deviceside lists as needing a sign-off, those the profile has; the rest are
+def signoff_selection(needed: dict[str, list[str]], profile: Profile) -> list[str]:
+    """--signoffs: of the integrations deviceside lists suites for, those the profile has; the rest are
     named for a manual sign-off. Stops, exit 0, when the profile has none of them."""
     print(f"Why each needs one: scripts/check_release.py --signoffs in {REPO}")
     reachable, manual = [], []
     for integration in needed:
         (reachable if integration in profile.integrations else manual).append(integration)
     if manual:
-        print(f"Needs a manual sign-off (_manual.md), out of profile {profile.name}'s reach: {', '.join(manual)}")
+        print(f"Needs a manual sign-off (_manual.json), out of profile {profile.name}'s reach: {', '.join(manual)}")
     if not reachable:
         nothing_to_run(f"No integration needing a sign-off is in profile {profile.name}")
     print(f"Needs a sign-off: {', '.join(reachable)}")
     return reachable
+
+
+def signoff_suites(suites: list[Suite], needed: dict[str, list[str]]) -> list[Suite]:
+    """--signoffs: of the selected suites, those deviceside lists for their integration. Stops when none is one."""
+    chosen = [suite for suite in suites if suite.name in needed.get(suite.integration, ())]
+    if not chosen:
+        raise SystemExit(f"None of the suites deviceside's check lists has a step file here: {needed}")
+    return chosen
 
 
 def nothing_to_run(why: str) -> NoReturn:

@@ -2062,7 +2062,7 @@ def test_each_answer_appends_a_row_even_the_same_one_again(tmp_path, monkeypatch
     assert [result for _, result in observed_rows(records)] == ["fail", "pass", "pass"]
 
 
-def signoffs_prepare(monkeypatch, needed: list[str], profile: Profile) -> types.SimpleNamespace:
+def signoffs_prepare(monkeypatch, needed: dict[str, list[str]], profile: Profile) -> types.SimpleNamespace:
     """prepare() under --signoffs with deviceside listing `needed`, up to choosing the suites: the arguments
     run_suites was given. The rest of the run is not reached."""
     monkeypatch.setattr(target, "signoffs_needed", lambda repo: needed)
@@ -2088,35 +2088,58 @@ def two_integration_profile() -> Profile:
 
 
 def test_signoffs_names_those_the_profile_cant_reach_for_a_manual_signoff_and_runs_the_rest(monkeypatch, capsys):
-    seen = signoffs_prepare(monkeypatch, ["hue", "shelly", "zha"], two_integration_profile())
+    seen = signoffs_prepare(
+        monkeypatch, {"hue": ["stop"], "shelly": ["stop"], "zha": ["stop"]}, two_integration_profile()
+    )
     assert seen.integration == ["hue", "zha"]
     out = capsys.readouterr().out
-    assert "Needs a manual sign-off (_manual.md), out of profile house's reach: shelly" in out
+    assert "Needs a manual sign-off (_manual.json), out of profile house's reach: shelly" in out
     assert "Needs a sign-off: hue, zha" in out
     assert "Why each needs one: scripts/check_release.py --signoffs in " in out
 
 
 def test_signoffs_with_none_in_the_profiles_reach_stops_with_success(capsys):
     with pytest.raises(SystemExit) as stopped:
-        rig.signoff_selection(["shelly"], two_integration_profile())
+        rig.signoff_selection({"shelly": ["stop"]}, two_integration_profile())
     assert stopped.value.code == 0
     out = capsys.readouterr().out
-    assert "manual sign-off (_manual.md), out of profile house's reach: shelly" in out
+    assert "manual sign-off (_manual.json), out of profile house's reach: shelly" in out
     assert "nothing to run" in out
 
 
 def test_signoffs_with_an_empty_list_stops_with_success_before_reading_the_profile(monkeypatch, capsys):
-    monkeypatch.setattr(target, "signoffs_needed", lambda repo: [])
+    monkeypatch.setattr(target, "signoffs_needed", lambda repo: {})
     monkeypatch.setattr(rig, "load_env", lambda: pytest.fail("read .env.rig with nothing to run"))
     with pytest.raises(SystemExit) as stopped:
         rig.prepare(run_args(signoffs=True, check=False, profile=None))
     assert stopped.value.code == 0
-    assert "No integration needs a sign-off" in capsys.readouterr().out
+    assert "No action needs a sign-off" in capsys.readouterr().out
+
+
+def test_signoffs_runs_only_the_suites_deviceside_lists_for_each_integration(capsys):
+    suites = [
+        types.SimpleNamespace(integration=integration, name=name)
+        for integration, name in [
+            ("hue", "stop"),
+            ("hue", "stop-predicted_state"),
+            ("hue", "set_scene"),
+            ("zha", "stop"),
+            ("zha", "set_scene"),
+        ]
+    ]
+    chosen = rig.signoff_suites(suites, {"hue": ["stop", "stop-predicted_state"], "zha": ["set_scene"]})
+    assert [(suite.integration, suite.name) for suite in chosen] == [
+        ("hue", "stop"),
+        ("hue", "stop-predicted_state"),
+        ("zha", "set_scene"),
+    ]
+    with pytest.raises(SystemExit, match="None of the suites"):
+        rig.signoff_suites(suites, {"hue": ["gone"]})
 
 
 def test_a_failed_signoffs_check_stops_the_run_before_anything_else(monkeypatch):
     def failed(repo):
-        raise SystemExit("deviceside's scripts/check_release.py --signoffs --json failed (exit 2): boom")
+        raise SystemExit("deviceside's scripts/check_release.py --signoffs --reruns failed (exit 2): boom")
 
     monkeypatch.setattr(target, "signoffs_needed", failed)
     monkeypatch.setattr(rig, "load_env", lambda: pytest.fail("read .env.rig after the check failed"))
@@ -2127,9 +2150,9 @@ def test_a_failed_signoffs_check_stops_the_run_before_anything_else(monkeypatch)
 @pytest.mark.parametrize(
     ("extra", "error"),
     [
-        (["--integration", "hue"], "picks the integrations itself and runs them whole"),
-        (["--action", "turn_on_for"], "picks the integrations itself and runs them whole"),
-        (["-k", "dimmable"], "picks the integrations itself and runs them whole"),
+        (["--integration", "hue"], "picks the suites itself"),
+        (["--action", "turn_on_for"], "picks the suites itself"),
+        (["-k", "dimmable"], "picks the suites itself"),
         (["--roam-check"], "--signoffs is for a test run or --check"),
         (["--recover"], "--signoffs is for a test run or --check"),
         (["--wait-free"], "--signoffs is for a test run or --check"),

@@ -12,7 +12,7 @@ integration's own, integration_steps_dirs), and its test records in
 the records' schema (SCHEMA, ha_rig/schema.py), else markdown.
 
 What needs testing is deviceside's to say: `signoffs_needed` asks its release check (SIGNOFFS) for the integrations
-still needing a sign-off, the run selection of --signoffs.
+still needing a sign-off and each one's suites to run, the run selection of --signoffs.
 
 Pure reading, of files, git and that check: the household check and the runner's preflight load it before anything
 mutates.
@@ -31,7 +31,7 @@ INTEGRATIONS = "tests/integrations"  # deviceside's integration test packages: e
 RECORDS = "docs/integrations/{integration}/test-records"  # deviceside's test records directory, per integration
 SCHEMA = "docs/test-records.schema.json"  # deviceside's test-record schema: JSON records where a checkout has it
 SIBLINGS = ("deviceside", "device-side")
-SIGNOFFS = ("scripts/check_release.py", "--signoffs", "--json")  # deviceside's list of integrations needing a sign-off
+SIGNOFFS = ("scripts/check_release.py", "--signoffs", "--reruns")  # deviceside's suites to run, per integration
 UNOWNED_OK = "HA_RIG_UNOWNED_CHECKOUT"  # set to 1 to run from a checkout with no worktree-and-PR owner
 
 
@@ -102,12 +102,14 @@ def committed_step_sources(repo: Path, commit: str) -> dict[str, bytes]:
     return sources
 
 
-def signoffs_needed(repo: Path) -> list[str]:
-    """The integrations `repo`'s release check lists as still needing a sign-off (SIGNOFFS), run with the interpreter
-    the rig already imports the checkout's code with. Exit 0 and 1 both carry the list: the exit code says whether the
+def signoffs_needed(repo: Path) -> dict[str, list[str]]:
+    """The suites `repo`'s release check lists to run, by integration (SIGNOFFS: each integration with an action
+    still needing a sign-off, and the suites that action needs run), with the interpreter the rig already imports
+    the checkout's code with. Exit 0 and 1 both carry the list: the exit code says whether the
     release gate fails, not whether the list is empty, so 0 can list some (an Untested fix caveat passes the gate) and
     1 with nothing listed means an error that is no missing sign-off, which raises SystemExit quoting the check's
-    stderr. Any other exit, or output that is no JSON list of names, raises SystemExit with what the check said."""
+    stderr. Any other exit, or output that is no JSON object of suite-name lists, raises SystemExit with what the check
+    said."""
     command = " ".join(SIGNOFFS)
     try:
         done = subprocess.run([sys.executable, *SIGNOFFS], cwd=repo, capture_output=True, text=True)
@@ -120,8 +122,10 @@ def signoffs_needed(repo: Path) -> list[str]:
         listed = json.loads(done.stdout)
     except ValueError:
         listed = None
-    if not isinstance(listed, list) or not all(isinstance(name, str) for name in listed):
-        raise SystemExit(f"deviceside's {command} printed no JSON list of integrations: {said}")
+    if not isinstance(listed, dict) or not all(
+        isinstance(suites, list) and all(isinstance(name, str) for name in suites) for suites in listed.values()
+    ):
+        raise SystemExit(f"deviceside's {command} printed no JSON object of integrations' suites: {said}")
     if done.returncode == 1 and not listed:
         raise SystemExit(f"deviceside's check failed with nothing listed: {done.stderr.strip() or 'no output'}")
     return listed

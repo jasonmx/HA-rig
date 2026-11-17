@@ -161,17 +161,20 @@ def release_check(repo: Path, body: str) -> Path:
 @pytest.mark.parametrize(
     ("body", "listed"),
     [
-        ("print('[\"hue\", \"zha\"]'); print('error: hue: no sign-off', file=sys.stderr); sys.exit(1)", ["hue", "zha"]),
-        ("print('[]')", []),
+        (
+            "print('{\"hue\": [\"stop\"], \"zha\": []}'); print('error: no sign-off', file=sys.stderr); sys.exit(1)",
+            {"hue": ["stop"], "zha": []},
+        ),
+        ("print('{}')", {}),
     ],
 )
-def test_the_release_checks_list_is_the_selection_whether_it_exits_1_or_0(tmp_path, body, listed):
+def test_the_release_checks_suites_are_the_selection_whether_it_exits_1_or_0(tmp_path, body, listed):
     assert target.signoffs_needed(release_check(tmp_path, body)) == listed
 
 
-def test_the_release_check_is_asked_for_its_json_list(tmp_path):
-    repo = release_check(tmp_path, "import json; print(json.dumps(sys.argv[1:]))")
-    assert target.signoffs_needed(repo) == ["--signoffs", "--json"]
+def test_the_release_check_is_asked_for_its_suites_to_rerun(tmp_path):
+    repo = release_check(tmp_path, 'import json; print(json.dumps({"hue": sys.argv[1:]}))')
+    assert target.signoffs_needed(repo) == {"hue": ["--signoffs", "--reruns"]}
 
 
 def test_a_release_check_that_crashes_stops_the_run_with_what_it_said(tmp_path):
@@ -181,26 +184,26 @@ def test_a_release_check_that_crashes_stops_the_run_with_what_it_said(tmp_path):
 
 
 def test_a_release_check_failing_with_nothing_listed_stops_the_run_with_its_stderr(tmp_path):
-    repo = release_check(tmp_path, "print('[]'); print('error: zha: failed to import', file=sys.stderr); sys.exit(1)")
+    repo = release_check(tmp_path, "print('{}'); print('error: zha: failed to import', file=sys.stderr); sys.exit(1)")
     with pytest.raises(SystemExit, match="failed with nothing listed: error: zha: failed to import"):
         target.signoffs_needed(repo)
 
 
 def test_the_target_checkouts_release_check_answers_with_a_list_of_names(monkeypatch):
-    """The contract with the real check: it takes --signoffs --json and prints a list of names."""
+    """The contract with the real check: it takes --signoffs --reruns and prints an object of suite-name lists."""
     try:
         repo = target.deviceside_repo()
     except SystemExit:
         pytest.skip("no deviceside checkout to test")
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     listed = target.signoffs_needed(repo)
-    assert isinstance(listed, list) and all(isinstance(name, str) for name in listed)
+    assert isinstance(listed, dict) and all(isinstance(name, str) for suites in listed.values() for name in suites)
 
 
-@pytest.mark.parametrize("output", ["Since v0.0.1:", "{}", "[1, 2]", ""])
+@pytest.mark.parametrize("output", ["Since v0.0.1:", "[]", '["hue"]', '{"hue": "stop"}', ""])
 def test_a_release_check_that_prints_no_list_of_names_stops_the_run(tmp_path, output):
     repo = release_check(tmp_path, f"print({output!r}); sys.exit(1)")
-    with pytest.raises(SystemExit, match="printed no JSON list of integrations"):
+    with pytest.raises(SystemExit, match="printed no JSON object of integrations"):
         target.signoffs_needed(repo)
 
 

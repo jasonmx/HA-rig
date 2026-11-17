@@ -194,12 +194,13 @@ A run runs the suites it is asked for: every one the profile has an adapter for,
 `--action` and `-k`. What needs testing is deviceside's to say, not the rig's: the rig keeps no record of what is
 proven or stale, and a test record in the checkout never leaves a suite out.
 
-**`--signoffs`** runs what deviceside says needs a sign-off: the integrations its `scripts/check_release.py --signoffs
---json` lists, run in the checkout with the interpreter the rig imports it with, in place of `--integration`. A record
-sign-off is one whole passing run of the integration at one commit, so each is run whole, every suite it has, and
-`--signoffs` takes no `--action` or `-k`; a suite that fails is rerun at the same commit with `--integration <x>
---action <a>` to complete the run. Those the profile has no entities for are named as needing a manual sign-off
-(`_manual.md`), and the run goes on with the rest; when the list is empty, or the profile has none of it, the run says
+**`--signoffs`** runs what deviceside says needs a sign-off: the suites its `scripts/check_release.py --signoffs
+--reruns` lists for each integration (a JSON object, `{integration: [suite, ...]}`), run in the checkout with the
+interpreter the rig imports it with, in place of `--integration` and `--action`. A sign-off is per action: an action
+whose calls changed needs only its own suites passing (its plain suite and each option suite), so the rest of the
+integration is not rerun, and a fix for a failing case reruns that suite at the new commit with `--integration <x>
+--action <a>`. `--signoffs` takes no `--action` or `-k`. Integrations the profile has no entities for are named as
+needing a manual sign-off (`_manual.json`), and the run goes on with the rest; when the list is empty, or the profile has none of it, the run says
 so and exits 0 before touching HA. The check's exit code says whether the release gate fails, not whether the list is
 empty: exit 0 and 1 both carry the list, and the rig points to `scripts/check_release.py --signoffs` in the checkout for
 why each needs one. A check that fails (any other exit, or exit 1 with nothing listed) or prints no JSON list stops the
@@ -458,7 +459,8 @@ read from the schema itself), a record is format 3: `calls` holds the git blob i
 `git rev-parse <commit>:tests/integrations/<integration>/calls/<action>.json` at the run's commit (full 40 hex, never
 HEAD), in place of the package tree. `<action>` is the record's action, so an option suite
 (`raise_brightness-predicted_state`) and a suite named for something else (`config_entry`, action `get_attributes`) bind
-to that action's transcript. Where the commit has no transcript of the action, that suite's record is format 2, citing
+to that action's transcript, though one named for something else stays outside deviceside's gate and signs nothing
+off. Where the commit has no transcript of the action, that suite's record is format 2, citing
 the package tree, and the run prints a line saying so: it credits classes but signs nothing off (deviceside's
 `docs/evidence.md`). A schema that doesn't list format 3 gets format 2 for every record. `_facts.json` is format 2
 either way, as the schema pins it.

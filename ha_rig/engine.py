@@ -1813,7 +1813,7 @@ class _CaseRun:
 
     async def note_reached(self, result: CaseResult) -> None:
         """What the case reached, on its result once it has its outcome, as the run's records name it: for JSON ones,
-        the devices a case that ran reached, for its format 2 record and _facts.json row; for markdown, a fact's
+        the devices a case that ran reached, for its record and _facts.json row; for markdown, a fact's
         devices for its _facts.md row and the classes for the Capability column."""
         if self.json_records:
             if result.outcome in RAN:
