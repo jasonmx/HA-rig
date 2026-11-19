@@ -70,11 +70,18 @@ repos:
   # -------------------------
   # Household details (terms from gitignored files; a no-op without them)
   # -------------------------
+  # write-terms first: it rewrites .private-terms.rig here from the profiles and .env.rig, and fails on an unreadable one.
   - repo: local
     hooks:
-      - id: check-private
-        name: check private details
-        entry: python scripts/check_private.py
+      - id: write-terms
+        name: write the household's terms
+        entry: python -m ha_rig.terms --here
         language: python
         additional_dependencies: [pyyaml]
+        pass_filenames: false
+        always_run: true
         stages: [pre-commit, commit-msg]
+  - repo: https://github.com/jasonmx/pre-commit-hooks
+    rev: v1.0.0
+    hooks:
+      - id: check-private

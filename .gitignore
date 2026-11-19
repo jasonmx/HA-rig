@@ -8,6 +8,7 @@ __pycache__/
 .env.rig
 profiles/
 .private-terms
+.private-terms.rig
 
 # Virtual environments
 .venv/

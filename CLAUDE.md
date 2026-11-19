@@ -7,7 +7,7 @@ proves needs a matching change there.
 
 **No household details in commits**: entity IDs, device names, MACs, hostnames and
 tokens stay in the gitignored `profiles/`, `.env.rig`, `.private-terms` and `CLAUDE.local.md`. The pre-commit
-household check (`scripts/check_private.py`) enforces it.
+household check (`check-private`, from jasonmx/pre-commit-hooks, fed by `ha_rig/terms.py`) enforces it.
 
 **The rig moves the household's real lights and restarts its HA.** Drive it only through `scripts/rig.py`, behind its
 authorization gate (`docs/rig.md`, Authorization); never set `DEVICE_SIDE_RIG_RESTRICTED=1` without Jason's yes for that run.
