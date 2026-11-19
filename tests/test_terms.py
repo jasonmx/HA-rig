@@ -1,6 +1,5 @@
-"""ha_rig/terms.py and scripts/check_private.py: the household's terms, for deviceside's check and this repo's."""
+"""ha_rig/terms.py: the household's terms, for deviceside's check and this repo's."""
 
-import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -9,10 +8,6 @@ import pytest
 from ha_rig import terms
 from tests.rig_fakes import write
 
-RIG_HOME = Path(__file__).parents[1]
-_spec = importlib.util.spec_from_file_location("check_private", RIG_HOME / "scripts" / "check_private.py")
-check_private = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(check_private)
 REAL_WRITE = terms.write  # conftest swaps the module's for a no-op
 
 
@@ -138,38 +133,20 @@ def test_main_fails_when_a_profile_cannot_be_read(tmp_path, monkeypatch, capsys)
     assert "not valid YAML" in capsys.readouterr().out
 
 
-def test_check_adds_private_terms(tmp_path, monkeypatch):
-    monkeypatch.setattr(check_private, "private_terms", lambda: {"light.a": "light.a"})
-    extra = write(tmp_path, ".private-terms", "# names\nAcme Street\n\n")
-    assert check_private.all_terms(extra) == {"light.a": "light.a", "acme street": "Acme Street"}
-    assert check_private.all_terms(tmp_path / "missing") == {"light.a": "light.a"}
+def test_main_here_writes_into_this_repo(monkeypatch, capsys):
+    monkeypatch.setattr(terms, "deviceside_repo", lambda: pytest.fail("--here never needs deviceside"))
+    monkeypatch.setattr(terms, "write", lambda target: target / terms.TERMS_FILE)
+    assert terms.main(["--here"]) == 0
+    assert str(terms.RIG_HOME / terms.TERMS_FILE) in capsys.readouterr().out
 
 
-def test_check_reports_matches_case_insensitively_by_label(tmp_path):
-    staged = write(tmp_path, "doc.md", "fine\nToken ABC.DEF here\n")
-    binary = tmp_path / "blob.bin"
-    binary.write_bytes(b"\xff\xfe")
-    hits = check_private.find([staged, binary], {"abc.def": "HA_TOKEN from .env.rig"})
-    assert hits == [f"{staged}:2: HA_TOKEN from .env.rig"]
-
-
-def test_check_passes_without_terms(tmp_path, monkeypatch):
-    monkeypatch.setattr(check_private, "all_terms", dict)
-    assert check_private.main([str(write(tmp_path, "doc.md", "anything"))]) == 0
-
-
-def test_check_fails_when_a_profile_cannot_be_read(tmp_path, monkeypatch, capsys):
+def test_main_here_fails_when_a_profile_cannot_be_read(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(terms, "RIG_HOME", git_repo(tmp_path / "rig"))
     monkeypatch.setattr(terms, "profile_paths", lambda: [write(tmp_path, "house.yaml", "pause: [a]1\n")])
-    assert check_private.main([str(write(tmp_path, "msg", "anything"))]) == 1
-    out = capsys.readouterr().out
-    assert "the commit is refused" in out
-    assert "house.yaml: not valid YAML" in out
-
-
-def test_check_fails_on_a_hit(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(check_private, "all_terms", lambda: {"acme street": "Acme Street"})
-    assert check_private.main([str(write(tmp_path, "msg", "Fix lamp on acme street"))]) == 1
-    assert "Acme Street" in capsys.readouterr().out
+    monkeypatch.setattr(terms, "write", REAL_WRITE)
+    assert terms.main(["--here"]) == 1
+    assert "house.yaml: not valid YAML" in capsys.readouterr().out
+    assert not (tmp_path / "rig" / terms.TERMS_FILE).exists()
 
 
 def test_write_makes_an_older_file_owner_only_on_a_change(tmp_path):

@@ -1,25 +1,27 @@
-"""The household's terms, for deviceside's household check, which can't read the rig's files itself.
+"""The household's terms, for the household check (check-private, from jasonmx/pre-commit-hooks), which reads only
+term files.
 
-deviceside is public, so its check (scripts/check_private.py there) refuses a commit naming a household detail. Its
-own blocklist is .private-terms; the rig adds every profile's entity IDs and roaming bulbs' IEEEs, and from .env.rig
-the HA and Hue bridge hosts, both tokens and the Hue app key, and the restricted sensor's entity ID, by writing them
-to TERMS_FILE in the deviceside main checkout on each rig invocation, as `term<TAB>label` lines. A secret is reported
-by its label, never echoed. `python -m ha_rig.terms` writes it by hand, after editing a profile.
+Both repos' check refuses a commit naming a household detail. Its own blocklist is .private-terms; the rig adds every
+profile's entity IDs and roaming bulbs' IEEEs, and from .env.rig the HA and Hue bridge hosts, both tokens and the Hue
+app key, and the restricted sensor's entity ID, by writing them to TERMS_FILE as `term<TAB>label` lines. A secret is
+reported by its label, never echoed. The rig writes deviceside's on each invocation, and `python -m ha_rig.terms` by
+hand after editing a profile; `python -m ha_rig.terms --here` writes this repo's, which its write-terms pre-commit
+hook runs before the check, so an unreadable profile refuses the commit.
 """
 
 import ipaddress
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .authorize import OLD_SENSOR_KEY, SENSOR_KEY
 from .profile import ENV_FILE, Profile, colon_ieee, load_env, profile_paths
-from .target import deviceside_repo, main_checkout
+from .target import RIG_HOME, deviceside_repo, main_checkout
 
-TERMS_FILE = ".private-terms.rig"  # gitignored in deviceside
-HEADER = "# Written by ha-rig on each run (python -m ha_rig.terms); edits are overwritten.\n"
+TERMS_FILE = ".private-terms.rig"  # gitignored in deviceside and here
+HEADER = "# Written by ha-rig (python -m ha_rig.terms); edits are overwritten.\n"
 # Hosts and the restricted sensor's name that the docs, examples and tests name on purpose.
 GENERIC_TERMS = frozenset({"homeassistant.local", "localhost", "127.0.0.1", "binary_sensor.rig_restricted"})
 SECRET_KEYS = ("HA_TOKEN", "HA_ADMIN_TOKEN", "HUE_APP_KEY")  # reported as "<KEY> from .env.rig"
@@ -80,9 +82,10 @@ def write(repo: Path, terms: dict[str, str] | None = None) -> Path:
     return path
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    here = "--here" in (sys.argv[1:] if argv is None else argv)
     try:
-        path = write(deviceside_repo())
+        path = write(RIG_HOME if here else deviceside_repo())
     except ValueError as err:
         print(f"Can't read the household's terms: {err}")
         return 1

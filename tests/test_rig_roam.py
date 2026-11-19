@@ -13,7 +13,6 @@ from ha_rig.home import HomeRecord
 from ha_rig.journal import Journal
 from ha_rig.profile import Profile, normalize_ieee
 from ha_rig.roam import Roamer, RoamError
-from scripts import check_private
 from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, LAB_OPTIONS, Lab, lab_profile, where
 
 A, B, OPTIONS, BULBS = LAB_A, LAB_B, LAB_OPTIONS, LAB_BULBS
@@ -480,8 +479,10 @@ def test_the_household_check_flags_a_roaming_bulbs_entity_id_and_ieee_in_any_spe
     terms = terms_module.private_terms([lab_profile(tmp_path)], tmp_path / "none")
     committed = tmp_path / "doc.md"
     committed.write_text(f"light.lab_b\nZ2M {A}\nZHA 00:17:88:01:0a:bc:de:f1\n")
-    hits = check_private.find([committed], terms)
-    assert [hit.split(": ", 1)[1] for hit in hits] == ["light.lab_b", A[2:], "00:17:88:01:0a:bc:de:f1"]
+    hits = [
+        label for line in committed.read_text().lower().splitlines() for term, label in terms.items() if term in line
+    ]
+    assert hits == ["light.lab_b", A[2:], "00:17:88:01:0a:bc:de:f1"]
 
 
 async def test_recovery_on_the_target_network_finishes_the_rename_and_options_a_crash_cut_short(
