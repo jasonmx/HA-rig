@@ -469,7 +469,7 @@ either way, as the schema pins it.
 
 A record holds its integration, action and any options, the date, the commit, its binding (format 3's `calls`, or format
 2's package tree), Home Assistant's version and a test per case. A test that ran lists the devices it reached, each with its model ID, maker
-string, firmware and class. On a Zigbee device the model ID and maker string are the device's own Basic-cluster ones:
+string, firmware (null where the integration reports none, Zigbee2MQTT's own `Zigbee2MQTT <version>` included) and class. On a Zigbee device the model ID and maker string are the device's own Basic-cluster ones:
 Z2M's `bridge/devices` `model_id` and `manufacturer` (HA's registry holds Z2M's product code and vendor), ZHA's
 device diagnostics' `model` and `manufacturer` (the registry holds a quirks v2 device's friendly name; zha's
 `unk_model` and `unk_manufacturer` read as null), and Hue's registry model ID and manufacturer, which HA takes from the

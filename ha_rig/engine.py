@@ -2962,7 +2962,7 @@ async def rig_facts(ha: HAClient, entity_ids: Iterable[str]) -> tuple[str, list[
     found: dict[Device, None] = {}
     for entity_id in entity_ids:
         if (device := device_of.get(entity_id)) is not None:
-            found[Device(device.get("model"), device.get("model_id"), device.get("sw_version"))] = None
+            found[Device(device.get("model"), device.get("model_id"), record_firmware(device))] = None
     return config["version"], list(found)
 
 
@@ -3008,6 +3008,22 @@ def record_model(device: dict, z2m_devices: dict[str, dict]) -> str | None:
     if device_ieee(device, "zha") is not None:
         return device.get("model")
     return device.get("model_id")
+
+
+Z2M_FALLBACK_FIRMWARE = re.compile(r"Zigbee2MQTT \d")  # Z2M's discovery sw_version until it reads a build ID
+
+
+def record_firmware(device: dict) -> str | None:
+    """A device-registry entry's firmware: its `sw_version`, None where it reports none: empty, or on a
+    Zigbee2MQTT device or group, Z2M's own `Zigbee2MQTT <version>`, which its discovery sends until it reads the
+    device's build ID."""
+    firmware = device.get("sw_version") or None
+    is_z2m = any(
+        domain == "mqtt" and str(value).startswith("zigbee2mqtt_") for domain, value in device.get("identifiers", [])
+    )
+    if firmware is not None and is_z2m and Z2M_FALLBACK_FIRMWARE.match(firmware):
+        return None
+    return firmware
 
 
 def record_manufacturer(device: dict, z2m_devices: dict[str, dict]) -> str | None:
@@ -3058,7 +3074,7 @@ async def reached_devices(
             model, manufacturer = await zha_strings(ha, device)
         else:
             model, manufacturer = record_model(device, z2m), record_manufacturer(device, z2m)
-        reached = Reached(model, device.get("sw_version") or None, classes.get(entity_id), manufacturer)
+        reached = Reached(model, record_firmware(device), classes.get(entity_id), manufacturer)
         if (known := found.get(device["id"])) is None:
             found[device["id"]] = reached
         elif known.capability != reached.capability:

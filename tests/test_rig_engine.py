@@ -1374,6 +1374,21 @@ async def test_rig_facts_maps_entities_to_their_devices():
     assert [str(device) for device in devices] == ["Mini (`S3`), firmware `2.0`"]
 
 
+async def test_rig_facts_reads_zigbee2mqtts_fallback_sw_version_as_no_firmware():
+    ha = FakeHA({})
+    ha.devices = [
+        {
+            "id": "d1",
+            "model": "Mini",
+            "model_id": "S3",
+            "sw_version": "Zigbee2MQTT 2.14.3",
+            "identifiers": [["mqtt", "zigbee2mqtt_0xabc"]],
+        }
+    ]
+    _, devices = await rig_facts(ha, ["switch.plug"])
+    assert [str(device) for device in devices] == ["Mini (`S3`), firmware `unknown`"]
+
+
 async def test_a_full_pass_writes_a_record_and_a_failure_writes_none(tmp_path):
     ha = FakeHA({"switch.plug": {}}, classed(timer_on, capability="Switch"))
     steps = suite(tmp_path, ON_THEN_OFF)

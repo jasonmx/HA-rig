@@ -66,6 +66,7 @@ PACKAGE = "0123456789ab"  # a package's git tree, abbreviated as the runner does
 HUE_BULB = "0x0017880100000001"
 TUYA_PLUG = "0xa4c1380000000001"
 OTHER_BULB = "0x0017880100000002"
+FALLBACK_BULB = "0x0017880100000003"
 # HA's device registry as each integration fills it: Z2M's model_id is its product code, ZHA's model the bulb's own.
 DEVICES = {
     "plug": {
@@ -89,6 +90,20 @@ DEVICES = {
         "model": "Hue Essential White and Color Ambiance A60",
         "model_id": "8720169392182",
         "sw_version": "",  # Z2M has read none
+    },
+    "z2m_fallback": {
+        "id": "z2m_fallback",
+        "identifiers": [["mqtt", f"zigbee2mqtt_{FALLBACK_BULB}"]],
+        "model": "Hue Essential White and Color Ambiance A60",
+        "model_id": "8720169392182",
+        "sw_version": "Zigbee2MQTT 2.14.3",  # Z2M's discovery fallback, before it reads a build ID
+    },
+    "other_zigbee2mqtt": {
+        "id": "other_zigbee2mqtt",
+        "identifiers": [["hue", "xyz"]],
+        "model": "Hue white lamp",
+        "model_id": "LWA012",
+        "sw_version": "Zigbee2MQTT 2.14.3",  # not a Z2M device: its firmware is its own
     },
     "z2m_group": {"id": "z2m_group", "identifiers": [["mqtt", "zigbee2mqtt_1"]], "model": "Group", "sw_version": "2.1"},
     "zha_bulb": {
@@ -126,6 +141,8 @@ ENTITIES = {
     "switch.plug": "plug",
     "light.z2m_a": "z2m_a",
     "light.z2m_b": "z2m_b",
+    "light.z2m_fallback": "z2m_fallback",
+    "light.other_zigbee2mqtt": "other_zigbee2mqtt",
     "light.z2m_room": "z2m_group",
     "light.zha_bulb": "zha_bulb",
     "light.hue_bulb": "hue_bulb",
@@ -152,6 +169,7 @@ DIAGNOSTICS = {
 BRIDGE_DEVICES = [
     {"ieee_address": HUE_BULB, "model_id": "LWA012", "manufacturer": "Signify Netherlands B.V."},
     {"ieee_address": OTHER_BULB, "model_id": "LCA016"},  # Z2M reports no maker string for it
+    {"ieee_address": FALLBACK_BULB, "model_id": "LWA012"},
 ]
 
 
@@ -594,6 +612,14 @@ async def test_reached_devices_reads_bridge_devices_only_for_a_z2m_device():
     assert found == (Reached("LWA012", "1.116.3", None, signify), Reached("LCA016", None)) and ha.reads == 1
     with pytest.raises(LookupError, match="light.unknown"):
         await reached_devices(ha, ["light.unknown"], {})
+
+
+async def test_zigbee2mqtts_fallback_sw_version_is_no_firmware():
+    ha = RegistryHA({})
+    [fallback] = await reached_devices(ha, ["light.z2m_fallback"], {})
+    assert fallback.firmware is None  # "Zigbee2MQTT 2.14.3" is Z2M's own version, not the bulb's
+    [other] = await reached_devices(ha, ["light.other_zigbee2mqtt"], {})
+    assert other.firmware == "Zigbee2MQTT 2.14.3"  # the guard is for Z2M devices only
 
 
 async def test_a_record_naming_a_device_with_no_model_id_is_not_written(tmp_path):
