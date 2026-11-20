@@ -310,3 +310,38 @@ lets the rig put back what it changed, and writes a dated note where the target 
 Intent: Make the rig a standalone, installable framework with DeviceSide as its first target, after v0.1.0, starting
 with an in-place tidy.
 Touches: (this plan only; each stage's PRs name their own)
+
+## Handoff
+
+2026-11-20, from the refresh session (context past 120k, so the grilling runs in a fresh one).
+
+**Done:** Context refreshed against rig `main` ef15d5f and DeviceSide `main` 9158aea8; 0.4 proposed; draft PR #106,
+branch `wt/standalone-rig-plan`, worktree `../ha-rig-wt/standalone-rig-plan`.
+
+**Next:** Jason said every decision is open again and asked for a design that is efficient and scales. He agreed to
+`/grilling` on the recommendations below, then a rewrite of this plan from what is settled (record each as a
+numbered Decision, dated). Recommendations put to him, not yet agreed:
+
+1. **The results file is a raw observation log**, not interpreted output: every call with its full response, samples,
+   raw HA device-registry entries and Z2M bridge data for each device a case reached, the commit and step-file
+   hashes. No derived firmware, class or outcome. Then #85, #89, #99 and #105 would each have been DeviceSide-only
+   (its renderer derives them), and a format change re-renders stored results with no rerun. Option (b), "the rig
+   renders to DeviceSide's JSON Schema", is now cheap but still pairs every content change, so it doesn't fix the cost.
+2. **Decisions go in the step language, not the engine:** a step captures a response field by path and later cases
+   select on the captured value. This replaces the engine reading DeviceSide's class shape for the class selector (#97).
+3. **A static `ha-rig.toml` in the target plus target commands, instead of a committed generated manifest:** the TOML
+   holds the contract version, step dirs, component dir, service domain and command names; `describe` (adapters,
+   options), `signoffs` and `render` are commands run in the target's environment. Nothing to go stale. A plain HA
+   target has only the TOML.
+4. **Order the stages by payback, not by the start gates.** Now, justified by DeviceSide alone: 0.4, the raw results
+   file and DeviceSide's renderer, step-level selectors, `describe`. When an outside owner wants the rig: XDG paths,
+   subcommands, journaled mutations, probe credentials, `init`, going public. The second-target proof still comes
+   before publishing.
+5. **Revisit:** the repo's home (a neutral name and org rather than `DeviceSide/ha-rig`, for owners of other
+   integrations); fresh history (decision 6) and no daemon still hold.
+
+Clarifications already given: "cheaper alternative" meant DeviceSide's existing record JSON Schema makes option (b)
+cheap; the sign-off point was a factual fix (`--signoffs --reruns` returns integration → suites, not `--json`'s list).
+
+**Open decisions:** 1 to 5 above; plus the three from Before starting (an interested owner, the 1.5 integration and
+where it runs, 0.4).
