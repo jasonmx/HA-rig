@@ -82,6 +82,16 @@ An entity is listed once per integration. Light roles stay first-entity on purpo
 roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
 first entity too.
 
+**`class:`** on a fixed entity that isn't a group declares its device's DeviceSide class (`class: aqara`). A case
+whose call on that entity names an action the checkout's scope doesn't serve on the class (DeviceSide would refuse it
+`not_built` or `no_known_method`) skips as not applying, `<action> is not built on <class>`. It is decided when the
+run plans, from the code under test (`engine.unbuilt`), so `--dry-run` shows it, and a refusal in a case that was
+planned still fails it. A call that wouldn't run there (`only:` elsewhere, a class selector leaving the class out, a
+`target:` on another role) doesn't count. The run checks the declaration: a response naming another class for the
+entity fails the case, and a suite's record stands on such a skip only beside a pass on the same entity whose response
+named that class. A class the integration doesn't name stops the plan. Declare it only on a device some action isn't
+built on; other cases run as before.
+
 `--profile <name>` picks one, and can be left out while there is only one. A record never narrows to a profile: a
 run whose profile lacks a role (a bulb-only profile has no `switch_plug` or `group`), or whose group lacks the light a
 case targets, or that lists fewer plugs than the run whose record passed `<test>[switch_plug-3]`, writes the cases it
@@ -487,8 +497,8 @@ A markdown record holds the date, a `Ran` row (`N passed, M skipped`), the Home 
 firmware, any `Options`, and each test's result; deviceside reads its commit (the Source row), its Package row (the integration's package tree at that commit, which a sign-off is checked by) and Result. It needs every
 default case that applies to pass. The only skips it allows are of fact cases, which it always lists as `skipped`,
 whatever they did in the run, and of cases that don't apply here: an action a test calls has no adapter, the profile
-lacks the role, or a group lacks the light the case targets. Any other skip, a failure, or a case not yet run (left out
-by `-k`, unreachable, or cut short) writes nothing until a later run at the same commit completes it (What runs, above).
+lacks the role, a group lacks the light the case targets, or a call isn't built on the target's declared class
+(Profiles, above). Any other skip, a failure, or a case not yet run (left out by `-k`, unreachable, or cut short) writes nothing until a later run at the same commit completes it (What runs, above).
 A markdown record with fact cases ends with a line pointing to `_facts.md` and, for each, the latest row on file (``last on file
 2026-11-12, on Mini (`S3`), firmware `2.0`: fail``, or `none on file`), which only reports what is there. The record's
 Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
@@ -500,8 +510,8 @@ with the maker string, as a Tuya model ID is many makers'; not the class, which 
 device. A run's row replaces the existing record's row of that case on the same devices, in its place, and adds one
 beside it on other devices. The existing record's passing rows this run doesn't replace are carried over as they are,
 devices and all: of a case it ran on other devices; of a case it skips as not applying (a role the profile lacks, a
-group without the light, no adapter), in the skip's place; and of a case it doesn't plan, whose test and role it does
-(a plug beyond the profile's), after that test and role's rows. The run says which. Its skips, fact cases and cases no
+group without the light, no adapter, a call not built on the declared class), in the skip's place; and of a case it
+doesn't plan, whose test and role it does (a plug beyond the profile's), after that test and role's rows. The run says which. Its skips, fact cases and cases no
 longer planned go. The rest of the record is this run's: its `calls`, and its date, commit and Home Assistant version, which a carried
 row takes too, as a verified fact stands across HA and code changes (deviceside's CLAUDE.md, Evidence 3); its own run
 is in the record's git history. Rows are carried only between format 3 records citing the same call transcript

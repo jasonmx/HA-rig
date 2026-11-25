@@ -28,7 +28,7 @@ PAUSABLE = ("automation", "switch")
 GROUP_ROLES = frozenset({"group", "group_color"})
 ZHA_GROUP_MIN = 2  # ZHA makes no light entity for a group with fewer members
 # The keys a listed entity takes; any other (a typo of pre_authorized, say) fails the load rather than be ignored.
-ENTITY_KEYS = frozenset({"entity_id", "roles", "powered_by", "members", "pre_authorized"})
+ENTITY_KEYS = frozenset({"entity_id", "roles", "powered_by", "members", "pre_authorized", "class"})
 # The roles whose cases run once per entity the profile lists with them, so each device gets its own test (several
 # plugs, one per maker string). Every other role tests its first entity: a roaming bulb is listed beside a network's
 # fixed lights (Profile.add_roaming), so light roles often hold several, and only the first is meant.
@@ -97,6 +97,10 @@ class RigEntity:
     # False: work that moves this entity is restricted, though its profile is pre-authorized (`pre_authorized: false`
     # on the entity; Profile.restricts).
     pre_authorized: bool = True
+    # The DeviceSide class its device is in (`class:`), for a single device: its cases that call an action the
+    # checkout doesn't build on that class skip as not applying (engine.unbuilt), and a response naming another class
+    # fails the case.
+    declared_class: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +231,12 @@ class Profile:
     def entities(self, integration: str, role: str) -> tuple[str, ...]:
         """Every entity with the role on the integration, in profile order."""
         return tuple(e.entity_id for e in self.integrations.get(integration, ()) if role in e.roles)
+
+    def declared_class(self, integration: str, entity_id: str) -> str | None:
+        """The DeviceSide class the profile declares for the entity (`class:`), or None."""
+        return next(
+            (e.declared_class for e in self.integrations.get(integration, ()) if e.entity_id == entity_id), None
+        )
 
     def members(self, integration: str, entity_id: str) -> tuple[str, ...]:
         return next((e.members for e in self.integrations.get(integration, ()) if e.entity_id == entity_id), ())
@@ -393,7 +403,8 @@ def pause_list(path: Path, entity_ids: object) -> tuple[str, ...]:
 
 
 def fixed_entity(path: Path, integration: str, item: object) -> RigEntity:
-    """One entity listed under an integration: its ID, roles, supply, members and `pre_authorized`, and no other key."""
+    """One entity listed under an integration: its ID, roles, supply, members, `pre_authorized` and class, and no other
+    key."""
     if not isinstance(item, dict) or "entity_id" not in item:
         raise ValueError(f"{path.name}: each {integration} entity needs an entity_id")
     entity_id = item["entity_id"]
@@ -407,7 +418,14 @@ def fixed_entity(path: Path, integration: str, item: object) -> RigEntity:
         raise ValueError(f"{path.name}: {entity_id} members must be a list of entity IDs")
     if members and not roles & GROUP_ROLES:
         raise ValueError(f"{path.name}: {entity_id} lists members but has no group role")
-    return RigEntity(entity_id, roles, item.get("powered_by"), tuple(members), entity_pre_authorized(path, item))
+    declared = item.get("class")
+    if declared is not None and (not isinstance(declared, str) or not declared):
+        raise ValueError(f"{path.name}: {entity_id} class must be a DeviceSide class name")
+    if declared is not None and roles & GROUP_ROLES:
+        raise ValueError(f"{path.name}: {entity_id} is a group, whose members each have their own class")
+    return RigEntity(
+        entity_id, roles, item.get("powered_by"), tuple(members), entity_pre_authorized(path, item), declared
+    )
 
 
 def entity_pre_authorized(path: Path, item: dict) -> bool:

@@ -314,5 +314,6 @@ def _result(case: dict) -> CaseResult:
         absent=case.get("absent", False),
         classes=tuple(case.get("classes", ())),
         inapplicable=case.get("inapplicable", case.get("absent", False)),
+        declared=tuple(declared) if (declared := case.get("declared")) else None,
         reached=tuple(Reached(**device) for device in case.get("reached", ())),
     )

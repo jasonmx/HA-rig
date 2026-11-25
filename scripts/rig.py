@@ -326,7 +326,7 @@ def plan_lines(
     with none is left out: another part of the run has its cases."""
     lines = []
     for suite in suites:
-        suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry))
+        suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry), registry)
         if only is not None and not (suite_cases := [case for case in suite_cases if only(case)]):
             continue
         if registry.adapter(suite.action, suite.integration) is None:
@@ -376,7 +376,7 @@ def estimate(
     def seconds_left(suite: Suite) -> float:
         if not done or profile_for is None:
             return float(suite.file.rig_seconds)
-        suite_cases = cases(suite, profile_for, None, adapters_for(suite, registry))
+        suite_cases = cases(suite, profile_for, None, adapters_for(suite, registry), registry)
         unfinished_cases = [c for c in suite_cases if (suite.integration, suite.name, c.id) not in done]
         return suite.file.rig_seconds * (len(unfinished_cases) / len(suite_cases) if suite_cases else 1.0)
 
@@ -386,7 +386,7 @@ def estimate(
         lanes: dict[str, float] = {}
         seconds = 0.0
         for suite in runnable:
-            suite_cases = cases(suite, profile, None, adapters_for(suite, registry))
+            suite_cases = cases(suite, profile, None, adapters_for(suite, registry), registry)
             if done:
                 suite_cases = [c for c in suite_cases if (suite.integration, suite.name, c.id) not in done]
             share = sum(in_head(case, profile) for case in suite_cases) / len(suite_cases) if suite_cases else 0.0
@@ -1134,7 +1134,7 @@ def plan_resume(args: argparse.Namespace, setup: Setup, directory: Path) -> None
     setup.planned_commit = commit = setup.deploy.commit
     profile, registry = setup.profile, setup.registry
     for suite in runnable_suites(setup.selected, registry):
-        planned = cases(suite, profile, None, adapters_for(suite, registry))
+        planned = cases(suite, profile, None, adapters_for(suite, registry), registry)
         progress.resume(
             suite, commit, planned, fresh=args.fresh, unattended=args.unattended, devices=record_schema() is not None
         )
@@ -1154,7 +1154,7 @@ def left(suite: Suite, profile: Profile, registry: AdapterRegistry, done: Done, 
     which runs nothing."""
     if not runnable_suite(suite, registry):
         return []
-    suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry))
+    suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry), registry)
     return [case.id for case in suite_cases if (suite.integration, suite.name, case.id) not in done]
 
 
@@ -1352,7 +1352,7 @@ def print_resume(args: argparse.Namespace, setup: Setup) -> None:
     if done := [key for key in setup.done if key[:2] in running]:
         registry = setup.registry
         total = sum(
-            len(cases(suite, setup.profile, None, adapters_for(suite, registry)))
+            len(cases(suite, setup.profile, None, adapters_for(suite, registry), registry))
             for suite in setup.suites
             if runnable_suite(suite, registry)
         )
@@ -2567,7 +2567,7 @@ def will_run(
     only = unfinished(done, only)
     for suite in suites:
         if registry.adapter(suite.action, suite.integration):
-            for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+            for case in cases(suite, profile, keyword, adapters_for(suite, registry), registry):
                 if not case.skip and (only is None or only(case)):
                     yield case
 
@@ -2584,7 +2584,7 @@ def platforms(
         if not registry.adapter(suite.action, suite.integration):
             continue
         domain = HA_DOMAINS.get(suite.integration, suite.integration)
-        for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+        for case in cases(suite, profile, keyword, adapters_for(suite, registry), registry):
             if case.skip or (only is not None and not only(case)):
                 continue
             for role, entity in case.entities.items():
@@ -2703,7 +2703,7 @@ def print_unreachable(
     only = unfinished(done)
     print("Unreachable, skipped (their suites write no record this run):")
     for suite in runnable_suites(suites, registry):
-        for case in cases(suite, profile, keyword, adapters_for(suite, registry)):
+        for case in cases(suite, profile, keyword, adapters_for(suite, registry), registry):
             if case.unreachable and (only is None or only(case)):
                 print(f"  {suite.integration} / {suite.name} {case.id}: {case.skip}")
 
