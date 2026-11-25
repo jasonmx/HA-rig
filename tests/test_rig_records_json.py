@@ -849,6 +849,41 @@ async def test_a_row_on_another_device_keeps_the_record_whole_on_another_transcr
     assert json.loads(old.read_text()) == document
 
 
+PLAIN = """  - name: plain
+    roles: [light_ct]
+    steps:
+      - wait: 0
+"""
+
+
+@needs_format_3
+async def test_a_pass_from_before_a_test_became_a_fact_case_is_not_carried(tmp_path):
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    format_3(old, [hue_row, GROUP_ROW])
+    fact = CaseResult(
+        "sets[light_ct]", "light_ct", "light", Outcome.PASS, reached=(Reached("LTA009", "1.163.1", "hue"),)
+    )
+    text = GROUP_AND_BULB.replace("    steps:", "    firmware_fact: true\n    steps:") + PLAIN
+    plain = CaseResult("plain[light_ct]", "light_ct", "light", Outcome.PASS, reached=fact.reached)
+    written, _ = await write_records(
+        canned(text, [fact, *single_bulb(tmp_path).suites[0].cases[1:], plain], tmp_path, "zigbee2mqtt"),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    assert written == [old]
+    assert held(old)["tests"][:2] == [  # the old passes, from before the test became a firmware fact, credit nothing
+        {"id": "sets[light_ct]", "role": "light_ct", "result": "skipped", "fact": True},
+        {"id": "sets[group]", "role": "group", "result": "skipped", "fact": True},
+    ]
+
+
 @needs_format_3
 async def test_a_plug_beyond_the_profiles_keeps_its_row_after_its_siblings(tmp_path):
     old = tmp_path / "records" / "shelly" / "turn_on_for.json"

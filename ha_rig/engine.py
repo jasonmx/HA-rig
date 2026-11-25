@@ -842,7 +842,7 @@ class Case:
     absent: bool = False
     # The skip is for a case that doesn't apply here: the role is not in the profile (absent), a group lacks the
     # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult), and
-    # never narrows to them: one the existing record passed keeps its row (narrows, carried).
+    # never narrows to them: one the existing record passed keeps its row (narrows, merge_rows).
     inapplicable: bool = False
     # Which of the role's entities it targets, from 1 in profile order, for an EACH_ENTITY role: each runs its own case.
     index: int = 1
@@ -3151,7 +3151,7 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     """The IDs of the cases `record` passed that this profile skips as not applying (Case.inapplicable: a role it
     lacks, a group without the light, no adapter), or doesn't plan at all though it plans their test on their role
     (an EACH_ENTITY role with fewer entities listed): a record with these rewritten would lose what an earlier profile
-    proved, so their rows are carried into it (carried), or it is kept."""
+    proved, so their rows are carried into it (merge_rows), or it is kept."""
     if record is None:
         return []
     cases = list(cases)
@@ -3196,6 +3196,8 @@ def merge_rows(tests: list[dict], old: list[dict]) -> list[dict]:
 def _beside(row: dict, olds: list[dict]) -> list[dict]:
     """For merge_rows: this run's `row` of a case with the old passing rows of it, `olds`: the old rows in for a skip;
     else `row` in place of the old one on its devices (or of one naming none), the rest beside it, in their order."""
+    if row.get("fact"):  # its result is _facts.json's: an old pass from before it was one credits nothing now
+        return [row]
     if not row.get("devices"):
         return olds or [row]
     mine, placed, rows = row_devices(row), False, []
@@ -3287,7 +3289,7 @@ def record_json(
     Format 3 with `calls`, the blob of the action's call transcript at the run's commit, which a sign-off stands on;
     format 2 without, citing `package`, the integration's tree there, which credits classes and signs nothing off.
 
-    `old` (format 3 only: prior) holds the existing record's rows, merged with this run's (merge_rows)."""
+    `old` holds the existing record's rows (prior), merged with this run's (merge_rows)."""
     suite = suite_result.suite
     tests = merge_rows([_test_json(suite, case) for case in suite_result.cases], old or [])
     record: dict[str, Any] = {
