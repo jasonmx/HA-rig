@@ -768,16 +768,11 @@ def single_bulb(tmp_path) -> RunResult:
 
 @needs_format_3
 async def test_a_run_without_a_role_carries_the_rows_the_record_passed_on_it(tmp_path):
-    """A single-bulb profile's run writes its bulb's row, and keeps the group's row the record passed on another
-    profile, as it was: the record holds both, citing this run."""
+    """A single-bulb profile's run on another maker's bulb adds its row beside the Hue bulb's the record passed on
+    another profile, and keeps the group's row it skips, each as it was: the record holds all three, citing this run."""
     old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
-    format_3(
-        old,
-        [
-            {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]},
-            GROUP_ROW,
-        ],
-    )
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    format_3(old, [hue_row, GROUP_ROW])
     printed: list[str] = []
     written, kept = await write_records(
         single_bulb(tmp_path),
@@ -793,13 +788,40 @@ async def test_a_run_without_a_role_carries_the_rows_the_record_passed_on_it(tmp
     assert (written, kept) == ([old], [])
     data = held(old)
     assert (data["date"], data["source"]["commit"], data["calls"]) == ("2026-11-25", "abc1234", BLOB)
-    assert [test["id"] for test in data["tests"]] == ["sets[light_ct]", "sets[group]"]
-    assert data["tests"][0]["devices"][0]["model"] == "lumi.light.agl003"
-    assert data["tests"][1] == GROUP_ROW
+    assert [test["id"] for test in data["tests"]] == ["sets[light_ct]", "sets[light_ct]", "sets[group]"]
+    assert data["tests"][0] == hue_row
+    assert data["tests"][1]["devices"][0]["model"] == "lumi.light.agl003"
+    assert data["tests"][2] == GROUP_ROW
     assert printed == [
-        "zigbee2mqtt / set_attributes: kept the rows of sets[group], which this profile skips as not applying or "
-        "doesn't plan, from the record's earlier run"
+        "zigbee2mqtt / set_attributes: kept the record's rows of sets[group], sets[light_ct] from earlier runs: "
+        "cases this profile skips as not applying or doesn't plan, or ran on other devices"
     ]
+
+
+@needs_format_3
+async def test_a_rerun_on_the_same_device_replaces_its_row_in_place(tmp_path):
+    """A row is its case and its devices: the Aqara bulb's rerun replaces its own row, where it was, and the Hue
+    bulb's stays."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    aqara = {"model": "lumi.light.agl003", "manufacturer": "Aqara", "firmware": "0.9", "class": None}
+    aqara_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [aqara]}
+    format_3(old, [aqara_row, hue_row, GROUP_ROW])
+    written, _ = await write_records(
+        single_bulb(tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    assert written == [old]
+    tests = held(old)["tests"]
+    assert [test["devices"][0]["firmware"] for test in tests] == ["1.0", "1.163.1", "1.163.1"]
+    assert tests[1:] == [hue_row, GROUP_ROW]
 
 
 @needs_format_3
@@ -829,6 +851,31 @@ async def test_a_row_is_carried_only_where_its_transcript_holds_in_the_runs(tmp_
     assert json.loads(old.read_text()) == document
     assert await write_with(holds=True) == ([old], [])
     assert [test["id"] for test in held(old)["tests"]] == ["sets[light_ct]", "sets[group]"]
+
+
+@needs_format_3
+async def test_a_row_on_another_device_keeps_the_record_whole_where_its_transcript_doesnt_hold(tmp_path):
+    """Another maker's bulb never takes the Hue bulb's row: on a transcript that no longer holds, the record stays."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    document = format_3(old, [hue_row], calls="f" * 40)
+    run = single_bulb(tmp_path)
+    run.suites[0].cases.pop()  # no group case planned: nothing narrows, the Hue row is beside the new one alone
+    written, kept = await write_records(
+        run,
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        holds=lambda was, now: False,
+        out=lambda _: None,
+    )
+    why = "a segment of the call transcript it was run on (ffffffff) changed or went since"
+    assert (written, kept) == ([], [(old, ["sets[light_ct]"], why)])
+    assert json.loads(old.read_text()) == document
 
 
 @needs_format_3
