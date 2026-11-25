@@ -711,7 +711,7 @@ async def test_a_record_never_narrows_a_json_record(tmp_path):
         commit="abc1234",
         calls=lambda integration, action: BLOB,
     )
-    assert (written, kept) == ([], [(old, ["lit[switch_plug]"], "it isn't format 3, bound to a call transcript")])
+    assert (written, kept) == ([], [(old, ["lit[switch_plug]"], "the record isn't JSON format 3")])
 
 
 GROUP_AND_BULB = """
@@ -825,37 +825,9 @@ async def test_a_rerun_on_the_same_device_replaces_its_row_in_place(tmp_path):
 
 
 @needs_format_3
-async def test_a_row_is_carried_only_where_its_transcript_holds_in_the_runs(tmp_path):
-    """A row run on another transcript is carried where every segment of it occurs in this run's (`holds`), and
-    otherwise keeps the record as it was."""
-    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
-    before = "f" * 40
-    document = format_3(old, [GROUP_ROW], calls=before)
-
-    async def write_with(holds: bool) -> tuple:
-        return await write_records(
-            single_bulb(tmp_path),
-            REGISTRY,
-            under(tmp_path / "records"),
-            "2026-11-25",
-            "rig run",
-            schema=SCHEMA_OF,
-            commit="abc1234",
-            calls=lambda integration, action: BLOB,
-            holds=lambda was, now: holds and (was, now) == (before, BLOB),
-            out=lambda _: None,
-        )
-
-    why = "a segment of the call transcript it was run on (ffffffff) changed or went since"
-    assert await write_with(holds=False) == ([], [(old, ["sets[group]"], why)])
-    assert json.loads(old.read_text()) == document
-    assert await write_with(holds=True) == ([old], [])
-    assert [test["id"] for test in held(old)["tests"]] == ["sets[light_ct]", "sets[group]"]
-
-
-@needs_format_3
-async def test_a_row_on_another_device_keeps_the_record_whole_where_its_transcript_doesnt_hold(tmp_path):
-    """Another maker's bulb never takes the Hue bulb's row: on a transcript that no longer holds, the record stays."""
+async def test_a_row_on_another_device_keeps_the_record_whole_on_another_transcript(tmp_path):
+    """Another maker's bulb never takes the Hue bulb's row: where the record cites another transcript, even one whose
+    every segment this run's still holds, no row is carried onto it, and the record stays as it was."""
     old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
     hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
     document = format_3(old, [hue_row], calls="f" * 40)
@@ -870,10 +842,9 @@ async def test_a_row_on_another_device_keeps_the_record_whole_where_its_transcri
         schema=SCHEMA_OF,
         commit="abc1234",
         calls=lambda integration, action: BLOB,
-        holds=lambda was, now: False,
         out=lambda _: None,
     )
-    why = "a segment of the call transcript it was run on (ffffffff) changed or went since"
+    why = "the record's call transcript (ffffffff) isn't this run's (01234567)"
     assert (written, kept) == ([], [(old, ["sets[light_ct]"], why)])
     assert json.loads(old.read_text()) == document
 
@@ -922,15 +893,6 @@ async def test_a_plug_beyond_the_profiles_keeps_its_row_after_its_siblings(tmp_p
         "called[switch_plug-3]",
         "called[light_ct]",
     ]
-
-
-def test_a_transcript_holds_where_every_segment_of_it_occurs_unchanged():
-    one, two = {"call": "a", "args": [1]}, {"call": "b"}
-    assert engine.transcript_holds(json.dumps([one]), json.dumps([two, {"args": [1], "call": "a"}]))
-    assert not engine.transcript_holds(json.dumps([one, two]), json.dumps([one]))
-    assert not engine.transcript_holds(json.dumps([{**one, "args": [2]}]), json.dumps([one]))
-    assert not engine.transcript_holds("", json.dumps([one]))
-    assert not engine.transcript_holds(json.dumps([]), json.dumps([one]))
 
 
 def test_a_json_record_the_rig_cant_read_holds_nothing(tmp_path):

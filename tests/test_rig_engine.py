@@ -1719,9 +1719,7 @@ async def test_a_record_never_narrows_to_a_profile_that_lacks_a_role_it_passed(t
 
     written, kept = await write_records(bulb, REGISTRY, under(tmp_path / "test-records"), "2026-11-08", "rig run")
 
-    assert written == [] and kept == [
-        (path, ["on_then_off[switch_plug]"], "this run's record isn't format 3, bound to a call transcript")
-    ]
+    assert written == [] and kept == [(path, ["on_then_off[switch_plug]"], "the record isn't JSON format 3")]
     assert path.read_text() == OLD_RECORD.format(plug="pass")
 
     both = planned_result(steps, profile(switch_plug="switch.plug", light_dimmable="light.bulb"))
@@ -1768,7 +1766,7 @@ async def test_a_record_never_narrows_to_a_group_that_lacks_the_light_it_passed(
     )
     assert (written, kept) == (
         [],
-        [(path, ["both[group]"], "this run's record isn't format 3, bound to a call transcript")],
+        [(path, ["both[group]"], "the record isn't JSON format 3")],
     )
     assert path.read_text() == GROUP_RECORD
 

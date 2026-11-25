@@ -3162,27 +3162,6 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     return sorted(skipped | dropped)
 
 
-def transcript_holds(old: str, new: str) -> bool:
-    """Whether every segment of the call transcript `old` (a transcript file's text) occurs, unchanged, in `new`'s:
-    deviceside's own test (scripts/check_release.py, segments_hold), so a row run on `old` stands on `new`. False
-    where either is no transcript (a non-empty JSON list of segments)."""
-
-    def segments(text: str) -> set[str] | None:
-        try:
-            listed = json.loads(text)
-        except ValueError:
-            return None
-        if not (isinstance(listed, list) and listed and all(isinstance(segment, dict) for segment in listed)):
-            return None
-        return {json.dumps(segment, sort_keys=True, separators=(",", ":")) for segment in listed}
-
-    had, has = segments(old), segments(new)
-    return had is not None and has is not None and had <= has
-
-
-Holds = Callable[[str, str], bool]  # whether the transcript blob first named holds in the second's (transcript_holds)
-
-
 def row_devices(row: dict) -> tuple[tuple[str, str], ...]:
     """A record row's devices as (model ID, maker string) pairs, sorted: with its case ID, the row's identity in a
     record (merge_rows). The model, as every device of a format 2 or 3 row names one and the card credits it; with the
@@ -3229,11 +3208,12 @@ def _beside(row: dict, olds: list[dict]) -> list[dict]:
     return rows if placed else [*rows, row]
 
 
-def prior(path: Path, blob: str | None, holds: Holds | None) -> tuple[list[dict], str | None]:
+def prior(path: Path, blob: str | None) -> tuple[list[dict], str | None]:
     """The rows of the JSON record at `path` (none where there is none, or the rig can't read it), to merge into the
     format 3 record a run citing the transcript `blob` writes over it (merge_rows), and why a row of them can't be
-    carried into it, if so: this run's record isn't format 3, the existing one isn't, or its transcript doesn't hold
-    in `blob`'s (`holds`), so a row carried would cite calls it never made."""
+    carried into it, if so: this run's record isn't format 3, the existing one isn't, or it cites another transcript.
+    Only the same one: `calls` is the transcript as tested, so a row carried onto another would cite calls it never
+    made, and could sign off segments it never ran (deviceside's check_release, reopened)."""
     if not path.is_file():
         return [], None
     try:
@@ -3243,11 +3223,11 @@ def prior(path: Path, blob: str | None, holds: Holds | None) -> tuple[list[dict]
     except OSError, ValueError, AttributeError, KeyError, TypeError:
         return [], None
     if blob is None:
-        return rows, "this run's record isn't format 3, bound to a call transcript"
+        return rows, "this run's record isn't JSON format 3"
     if data.get("format") != CALLS_FORMAT or not isinstance(old, str):
-        return rows, "it isn't format 3, bound to a call transcript"
-    if old != blob and (holds is None or not holds(old, blob)):
-        return rows, f"a segment of the call transcript it was run on ({old[:8]}) changed or went since"
+        return rows, "the record isn't JSON format 3"
+    if old != blob:
+        return rows, f"the record's call transcript ({old[:8]}) isn't this run's ({blob[:8]})"
     return rows, None
 
 
@@ -3375,7 +3355,6 @@ def _prior(
     path: Path,
     schema: RecordSchema | None,
     blob: str | None,
-    holds: Holds | None,
     out: Callable[[str], None],
 ) -> tuple[list[dict], list[str], str | None]:
     """For write_records: the existing record at `path`'s rows (prior), the IDs of the cases whose rows the merge
@@ -3384,8 +3363,8 @@ def _prior(
     suite = suite_result.suite
     if schema is None:
         narrowed = narrows(suite_result.cases, Record.read(path))
-        return [], narrowed, "this run's record isn't format 3, bound to a call transcript" if narrowed else None
-    rows, why = prior(path, blob, holds)
+        return [], narrowed, "the record isn't JSON format 3" if narrowed else None
+    rows, why = prior(path, blob)
     merged = merge_rows([_test_json(suite, case) for case in suite_result.cases], rows)
     carried = sorted({row["id"] for row in merged if any(row is was for was in rows)})
     if carried and why is None:
@@ -3406,7 +3385,6 @@ async def write_records(
     package: Callable[[str], str] | None = None,
     *,
     calls: Callable[[str, str], str | None] | None = None,
-    holds: Holds | None = None,
     schema: RecordSchema | None = None,
     commit: str | None = None,
     out: Callable[[str], None] = print,
@@ -3417,9 +3395,9 @@ async def write_records(
 
     A record never narrows, nor loses a device: the existing record's passing rows of the cases this run skips as not
     applying or doesn't plan, or ran on other devices, are carried into the record this run writes, as they are
-    (merge_rows), and `out` says so. Where they can't be (a markdown or format 2 record on either side, or a
-    transcript they were run on that doesn't hold in this run's, by `holds`), the file in `records` stays as it is,
-    and the suite is `kept` with those case IDs and why (its `records` path). To narrow on purpose, delete the record.
+    (merge_rows), and `out` says so. Where they can't be (a markdown or format 2 record on either side, or one citing
+    another call transcript than this run's: prior), the file in `records` stays as it is, and the suite is `kept`
+    with those case IDs and why (its `records` path). To narrow on purpose, delete the record.
 
     `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
     after Source: what deviceside's release check compares to the tree that ships.
@@ -3442,7 +3420,7 @@ async def write_records(
         path = records(suite.integration) / record_name(suite, schema)
         binds = schema is not None and schema.binds_calls
         blob = calls(suite.integration, suite.action) if binds and calls else None
-        old, carried, why = _prior(suite_result, path, schema, blob, holds, out)
+        old, carried, why = _prior(suite_result, path, schema, blob, out)
         if why is not None:
             kept.append((path, carried, why))
             continue

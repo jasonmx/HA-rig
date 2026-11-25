@@ -226,7 +226,7 @@ async def test_a_run_with_two_plugs_keeps_a_record_that_passed_three(tmp_path):
     )
     assert (written, kept) == (
         [],
-        [(old, ["on_then_off[switch_plug-3]"], "this run's record isn't format 3, bound to a call transcript")],
+        [(old, ["on_then_off[switch_plug-3]"], "the record isn't JSON format 3")],
     )
 
 

@@ -502,12 +502,12 @@ beside it on other devices. The existing record's passing rows this run doesn't 
 devices and all: of a case it ran on other devices; of a case it skips as not applying (a role the profile lacks, a
 group without the light, no adapter), in the skip's place; and of a case it doesn't plan, whose test and role it does
 (a plug beyond the profile's), after that test and role's rows. The run says which. Its skips, fact cases and cases no
-longer planned go. The rest of the record is this run's: its date, commit, Home Assistant version and `calls`. A
-carried row's own run is in the record's git history. Rows are carried only between format 3 records, and only where every segment of the transcript the old
-record cites occurs, unchanged, in this run's (deviceside's `segments_hold`): evidence binds to the call transcript
-(deviceside's `docs/evidence.md`), so a row on a transcript that still holds stands at the new one, which is the stricter
-binding. Otherwise (a markdown or format 2 record, either side, or a segment of the old transcript changed or gone)
-the run writes no record over it, and says `Kept <record>` and why: rerun those cases on a profile with their roles and devices.
+longer planned go. The rest of the record is this run's: its `calls`, and its date, commit and Home Assistant version, which a carried
+row takes too, as a verified fact stands across HA and code changes (deviceside's CLAUDE.md, Evidence 3); its own run
+is in the record's git history. Rows are carried only between format 3 records citing the same call transcript
+(`calls`): `calls` is the transcript as tested, so a row carried onto another would cite calls it never made.
+Otherwise (a markdown or format 2 record, either side, or another transcript) the run writes no record over it, and
+says `Kept <record>` and why: rerun those cases on a profile with their roles and devices.
 A failure, or a case left to run, still writes nothing, so nothing carried covers up a regression. Facts live in `_facts.md` (`_facts.json`), never in
 a record.
 
