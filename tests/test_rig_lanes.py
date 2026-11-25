@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from ha_rig import engine, roam
-from ha_rig.engine import CaseResult, Device, Outcome, Suite, SuiteResult, cases, in_head, load_step_file, merge, run
+from ha_rig.engine import CaseResult, Device, Outcome, Suite, SuiteResult, in_head, load_step_file, merge, run
 from ha_rig.journal import Journal
 from ha_rig.profile import Profile, RigEntity, RoamBulb, RoamGroup
 from tests import rig_fakes as fakes
+from tests.rig_fakes import planned_cases
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("rig_for_lanes", RIG_HOME / "scripts" / "rig.py")
@@ -164,9 +165,9 @@ def test_the_head_leaves_out_option_files_roaming_and_made_entities_and_power(tm
     plain = load_step_file(path)
     with_options = engine.StepFile(path, plain.action, plain.rig_seconds, plain.tests, frozenset({"predicted_state"}))
 
-    head = {case.role for case in cases(Suite(plain, "zha"), profile) if in_head(case, profile)}
+    head = {case.role for case in planned_cases(Suite(plain, "zha"), profile) if in_head(case, profile)}
     assert head == {"light_ct"}
-    assert not any(in_head(case, profile) for case in cases(Suite(with_options, "zha"), profile))
+    assert not any(in_head(case, profile) for case in planned_cases(Suite(with_options, "zha"), profile))
 
 
 def result(suite: Suite, *ids: str, outcome: Outcome = Outcome.PASS) -> SuiteResult:
@@ -234,7 +235,7 @@ async def test_a_roaming_run_starts_with_the_lanes_at_home_then_runs_the_rest_by
         accepted = [
             f"{suite.integration} {case.id}"
             for suite in run_suites
-            for case in cases(suite, run_profile)
+            for case in planned_cases(suite, run_profile)
             if only is None or only(case)
         ]
         ran.append((lanes, where, accepted))
@@ -324,7 +325,7 @@ def roaming_run(tmp_path, monkeypatch) -> tuple:
                 [
                     f"{suite.integration} {case.id}"
                     for suite in run_suites
-                    for case in cases(suite, run_profile)
+                    for case in planned_cases(suite, run_profile)
                     if accepted is None or accepted(case)
                 ],
             )
@@ -345,7 +346,7 @@ async def test_a_resume_with_only_one_networks_cases_left_visits_only_it(tmp_pat
     for suite in suites:
         progress.track(suite, "fp")
     for suite in suites:
-        for case in cases(suite, profile):
+        for case in planned_cases(suite, profile):
             if case.id != "t[light_ct]" or suite.integration != "zigbee2mqtt":
                 progress.record(suite, CaseResult(case.id, case.role, "light", Outcome.PASS))
     remaining = [suite for suite in suites if rig.left(suite, profile, fakes.OPTION_REGISTRY, progress.done(), None)]

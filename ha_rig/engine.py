@@ -841,11 +841,15 @@ class Case:
     # narrow what an earlier profile proved.
     absent: bool = False
     # The skip is for a case that doesn't apply here: the role is not in the profile (absent), a group lacks the
-    # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult), and
+    # light it targets, another action it calls has no adapter, or a call isn't built on its declared class (unbuilt).
+    # A record allows these skips (SuiteResult), and
     # never narrows to them: one the existing record passed keeps its row (narrows, merge_rows).
     inapplicable: bool = False
     # Which of the role's entities it targets, from 1 in profile order, for an EACH_ENTITY role: each runs its own case.
     index: int = 1
+    # The DeviceSide class the profile declares for its own target (`class:`): a call it makes that DeviceSide's scope
+    # doesn't serve on it skips the case as not applying (unbuilt), and a response naming another class fails it.
+    declared: str | None = None
 
     @property
     def id(self) -> str:
@@ -946,11 +950,16 @@ def check_options(step_files: Iterable[StepFile], registry: Any) -> None:
 
 
 def cases(
-    suite: Suite, profile: Profile, keyword: str | None = None, adapters: frozenset[str] | None = None
+    suite: Suite,
+    profile: Profile,
+    keyword: str | None,
+    adapters: frozenset[str] | None,
+    registry: Any,
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
     ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped, and
-    so is a fact case the suite didn't opt in to (`opt_out`)."""
+    so is a fact case the suite didn't opt in to (`opt_out`), and, from `registry`, a case on a target whose
+    declared class one of its calls isn't built on (unbuilt)."""
     result = []
     for test in suite.file.tests:
         if not test.runs_on(suite.integration):
@@ -967,24 +976,75 @@ def cases(
                 if lacking:
                     result.append(replace(case, skip=f"no {lacking} adapter on {suite.integration}", inapplicable=True))
                     continue
-                entities = case_entities(test, role, index, profile, suite.integration)
-                if missing := [name for name, entity_id in entities.items() if entity_id is None]:
-                    why = f"no {missing[0]} entity in the profile"
-                    case = Case(suite, test, role, {}, why, observed, absent=True, inapplicable=True, index=index)
-                else:
-                    group = next((name for name in entities if name in GROUP_ROLES), None)
-                    members = profile.members(suite.integration, entities[group]) if group else ()
-                    # A group case that also targets a light means one of the group's: where the profile lists them.
-                    lights = [name for name in entities if name.startswith("light_")]
-                    outside = [name for name in lights if members and entities[name] not in members]
-                    skip = f"{outside[0]} is not one of the group's members" if outside else None
-                    case = Case(
-                        suite, test, role, entities, skip, observed, members, inapplicable=bool(outside), index=index
-                    )
-                    if skip is None and (why := unreachable(case, profile)):
-                        case = replace(case, skip=why, unreachable=True)
-                result.append(case)
+                result.append(_planned(case, profile, registry))
     return result
+
+
+def _planned(case: Case, profile: Profile, registry: Any) -> Case:
+    """A case with its entities, or skipped for why it can't run here: a role the profile lacks, a light outside the
+    group, a call not built on the target's declared class (unbuilt), or a device offline."""
+    suite, test, role, index = case.suite, case.test, case.role, case.index
+    entities = case_entities(test, role, index, profile, suite.integration)
+    if missing := [name for name, entity_id in entities.items() if entity_id is None]:
+        why = f"no {missing[0]} entity in the profile"
+        return replace(case, skip=why, absent=True, inapplicable=True)
+    group = next((name for name in entities if name in GROUP_ROLES), None)
+    members = profile.members(suite.integration, entities[group]) if group else ()
+    # A group case that also targets a light means one of the group's: where the profile lists them.
+    lights = [name for name in entities if name.startswith("light_")]
+    if outside := [name for name in lights if members and entities[name] not in members]:
+        why = f"{outside[0]} is not one of the group's members"
+        return replace(case, entities=entities, members=members, skip=why, inapplicable=True)
+    declared = profile.declared_class(suite.integration, entities[role])
+    case = replace(case, entities=entities, members=members, declared=declared)
+    if why := unbuilt(case, registry):
+        return replace(case, skip=why, inapplicable=True)
+    if why := unreachable(case, profile):
+        return replace(case, skip=why, unreachable=True)
+    return case
+
+
+# DeviceSide's refusal reasons (its core/errors.py Reason) for a class its scope doesn't serve, as a skip reads them.
+UNBUILT = {"not_built": "is not built on", "no_known_method": "has no known method on"}
+
+
+def unbuilt(case: Case, registry: Any) -> str | None:
+    """Why the case doesn't apply to its target's declared class (Case.declared), or None: a call on its own target
+    that would run there (its `only` and class selector, judged on that class) names an action whose scope, in the
+    checkout under test, refuses the class as not built or no known method (AdapterScope.refusal, as DeviceSide's
+    dispatcher refuses it). Decided before the case runs, from the code under test, so a refusal in a case that runs
+    still fails it. Raises ValueError for a class the integration doesn't name: a typo would skip every case."""
+    if (declared := case.declared) is None:
+        return None
+    integration = case.suite.integration
+    if declared not in (named := getattr(registry.integrations[integration], "classes", None) or {}):
+        raise ValueError(f"the profile's class {declared!r} is not one {integration} names: {sorted(named)}")
+    domain = case.entities[case.role].partition(".")[0]
+    for step in (*case.test.setup, *case.test.steps):
+        args = step.args if isinstance(step.args, dict) else {}
+        if step.kind != "call" or args.get("target", case.role) != case.role:
+            continue
+        if (step.only is not None and integration not in step.only) or not _selects(step, integration, declared):
+            continue
+        action = args.get("action") or case.suite.action
+        if (adapter := registry.adapter(action, integration)) is None:
+            continue  # no adapter at all: cases() skips the test for that
+        refused = adapter.scope.refusal([declared], domain=domain, failure_harms=adapter.failure_harms)
+        if refused is not None and (phrase := UNBUILT.get(str(refused[0]))):
+            return f"{action} {phrase} {declared}"
+    return None
+
+
+def _selects(step: Step, integration: str, name: str) -> bool:
+    """Whether a step's class selector lets it run on a target of class `name`, as Run.skips_class decides it once the
+    class is known: one that doesn't name the integration is inert there, `classes` leaving the step out and
+    `except_classes` letting it run."""
+    if (selector := step.class_selector) is None:
+        return True
+    if integration not in selector:
+        return step.classes is None
+    matches = any(name.startswith(prefix) for prefix in selector[integration])
+    return matches if step.classes is not None else not matches
 
 
 def roles_by_entity(test: RigTest, profile: Profile, integration: str) -> list[tuple[str, int]]:
@@ -1201,6 +1261,9 @@ class CaseResult:
     unreachable: bool = False  # Case.unreachable
     absent: bool = False  # Case.absent
     inapplicable: bool = False  # Case.inapplicable
+    # Its own target and the class the profile declares for it (Case.declared): on a skip, the class a call isn't built
+    # on (unbuilt); on a pass, the class DeviceSide's response named for it. A record needs each skip's beside a pass's.
+    declared: tuple[str, str] | None = None
     # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()
     # The classes its target reached (reached_classes), for an integration that names them; empty for none.
@@ -1240,12 +1303,18 @@ class SuiteResult:
     def recordable(self) -> bool:
         """A complete run in which every default case that applies passed: the only skips allowed are of opt-in cases,
         whose results are facts, not the record's, and of cases that don't apply (Case.inapplicable). At least one
-        passed: a record of nothing would replace one that proved something."""
+        passed: a record of nothing would replace one that proved something. A skip for a declared class (unbuilt)
+        stands only beside a pass whose response named that class for the same entity, so a profile's stale class
+        never drops cases unseen."""
         default = [case for case in self.cases if not opt_in(self.suite, case.id)]
         allowed = all(
             case.outcome is Outcome.PASS or (case.outcome is Outcome.SKIPPED and case.inapplicable) for case in default
         )
-        return self.complete and allowed and any(case.outcome is Outcome.PASS for case in default)
+        confirmed = {case.declared for case in default if case.outcome is Outcome.PASS}
+        declared = all(
+            case.declared in confirmed for case in default if case.declared and case.outcome is Outcome.SKIPPED
+        )
+        return self.complete and allowed and declared and any(case.outcome is Outcome.PASS for case in default)
 
 
 @dataclass(slots=True)
@@ -1809,6 +1878,8 @@ class _CaseRun:
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
         else:
             await self.note_reached(result)
+        if result.outcome is Outcome.PASS and case.declared in (self.target_classes or ()):
+            result.declared = (case.entities[case.role], case.declared)
         return result
 
     async def note_reached(self, result: CaseResult) -> None:
@@ -1848,10 +1919,10 @@ class _CaseRun:
 
     async def learn_classes(self) -> None:
         """Take the target's classes from the response just returned, when it has an entry for the case's own target
-        (else its members', as entries gives) and a step selects on class; a response with none leaves them as they
-        were."""
-        test = self.case.test
-        if not any(step.class_selector is not None for step in (*test.setup, *test.steps)):
+        (else its members', as entries gives) and a step selects on class or the profile declares one (Case.declared),
+        which a response naming other classes fails; a response with none leaves them as they were."""
+        test, declared = self.case.test, self.case.declared
+        if declared is None and not any(step.class_selector is not None for step in (*test.setup, *test.steps)):
             return
         if not isinstance(self.response, dict):
             return
@@ -1859,6 +1930,9 @@ class _CaseRun:
             self.target_classes = frozenset().union(
                 *(reported_classes(entry) or frozenset() for entry in entries.values())
             )
+        if declared is not None and self.target_classes and declared not in self.target_classes:
+            named = ", ".join(sorted(self.target_classes))
+            raise StepFailure(f"DeviceSide named the target's class {named}; the profile declares {declared}")
 
     def following(self) -> str | None:
         """The kind of the next step that will run, as the classes stand now: a call reads it once its response is
@@ -2693,7 +2767,7 @@ def _plan(
     suite with no case `only` accepts is left out unsaid: another part of the run has its cases."""
     planned = []
     for suite in suites:
-        suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry))
+        suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry), registry)
         if only is not None and not (suite_cases := [case for case in suite_cases if only(case)]):
             continue
         adapter = registry.adapter(suite.action, suite.integration)
@@ -2870,6 +2944,7 @@ def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
         unreachable=case.unreachable,
         absent=case.absent,
         inapplicable=case.inapplicable,
+        declared=(case.entities[case.role], case.declared) if case.declared and case.inapplicable else None,
     )
 
 
@@ -2895,7 +2970,9 @@ def merge(parts: Iterable[SuiteResult], profile: Profile, registry: Any) -> RunR
                 classes=names_classes(registry, part.suite),
             )
     for result in joined.values():
-        planned = [case.id for case in cases(result.suite, profile, None, adapters_for(result.suite, registry))]
+        planned = [
+            case.id for case in cases(result.suite, profile, None, adapters_for(result.suite, registry), registry)
+        ]
         position = {case_id: index for index, case_id in enumerate(planned)}
         result.cases.sort(key=lambda case: position.get(case.id, len(position)))
         result.planned = len(planned)
@@ -3149,9 +3226,10 @@ class Record:
 
 def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[str]:
     """The IDs of the cases `record` passed that this profile skips as not applying (Case.inapplicable: a role it
-    lacks, a group without the light, no adapter), or doesn't plan at all though it plans their test on their role
-    (an EACH_ENTITY role with fewer entities listed): a record with these rewritten would lose what an earlier profile
-    proved, so their rows are carried into it (merge_rows), or it is kept."""
+    lacks, a group without the light, no adapter, a call not built on the declared class), or doesn't plan at all
+    though it plans their test on their role (an EACH_ENTITY role with fewer entities listed): a record with these
+    rewritten would lose what an earlier profile proved, so their rows are carried into it (merge_rows), or it is
+    kept."""
     if record is None:
         return []
     cases = list(cases)
@@ -3168,6 +3246,25 @@ def row_devices(row: dict) -> tuple[tuple[str, str], ...]:
     maker string, as a Tuya model ID is many makers'. Not the class, which moves when DeviceSide reclassifies a device,
     and can be null. Empty for a row naming none: a skip, a fact case, a format 1 row."""
     return tuple(sorted((d.get("model") or "", d.get("manufacturer") or "") for d in row.get("devices") or ()))
+
+
+def unbuilt_rows(rows: list[dict], cases: Iterable[CaseResult]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """`rows` less the passing rows of each case this run skips as not built on its declared class (unbuilt) on a
+    device of that class, and the (case, class) of each dropped: the code now refuses a call the row shows passing, so
+    the record mustn't carry it. Rows on other classes (a Hue bulb's) stay, to be carried (merge_rows)."""
+    refused = {case.id: case.declared[1] for case in cases if case.outcome is Outcome.SKIPPED and case.declared}
+    kept, dropped = [], []
+    for row in rows:
+        name = refused.get(row["id"])
+        if (
+            name is not None
+            and row.get("result") == "pass"
+            and any(isinstance(device, dict) and device.get("class") == name for device in row.get("devices") or ())
+        ):
+            dropped.append((row["id"], name))
+        else:
+            kept.append(row)
+    return kept, dropped
 
 
 def merge_rows(tests: list[dict], old: list[dict]) -> list[dict]:
@@ -3367,6 +3464,13 @@ def _prior(
         narrowed = narrows(suite_result.cases, Record.read(path))
         return [], narrowed, "the record isn't JSON format 3" if narrowed else None
     rows, why = prior(path, blob)
+    rows, dropped = unbuilt_rows(rows, suite_result.cases)
+    if dropped and why is None:
+        for case_id, name in dropped:
+            out(
+                f"{suite.integration} / {suite.name}: {case_id}: "
+                f"passed on {name} in the record, now not built: row dropped"
+            )
     merged = merge_rows([_test_json(suite, case) for case in suite_result.cases], rows)
     carried = sorted({row["id"] for row in merged if any(row is was for was in rows)})
     if carried and why is None:

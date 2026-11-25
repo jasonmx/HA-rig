@@ -73,6 +73,14 @@ class Roster:
         return getattr(_discovered(), name)
 
 
+def planned_cases(suite, profile, keyword=None, adapters=None, registry=None):
+    """engine.cases with the rig's own tests' defaults: no keyword, no adapter or registry check (registry is used only
+    for a profile that declares a class)."""
+    from ha_rig import engine
+
+    return engine.cases(suite, profile, keyword, adapters, registry)
+
+
 PENDING: list[asyncio.TimerHandle | asyncio.Task] = []
 
 

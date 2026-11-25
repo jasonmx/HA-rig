@@ -23,7 +23,6 @@ from ha_rig.engine import (
     RunResult,
     Suite,
     SuiteResult,
-    cases,
     load_step_file,
     render_record,
     rig_facts,
@@ -48,6 +47,7 @@ from tests.rig_fakes import (
     FakeAdmin,
     FakeHA,
     Roster,
+    planned_cases,
     profile,
 )
 
@@ -744,7 +744,7 @@ def test_runs_on_is_true_where_any_test_runs(tmp_path):
 def test_observe_only_watches_in_those_integrations_and_runs_automated_elsewhere(tmp_path):
     text = OBSERVED.replace("ask: 'Did it click twice?'}", "ask: 'Did it click twice?', only: [zha]}")
     inv = Profile({key: [RigEntity("switch.plug", frozenset({"switch_plug"}))] for key in ("shelly", "zha")})
-    shelly, zha = (cases(suite(tmp_path, text, key), inv) for key in ("shelly", "zha"))
+    shelly, zha = (planned_cases(suite(tmp_path, text, key), inv) for key in ("shelly", "zha"))
     assert [case.id for case in shelly] == [AUTOMATED]
     assert [case.id for case in zha] == [AUTOMATED, WATCHED]
     assert shelly[0].twin is None
@@ -1107,7 +1107,7 @@ def test_a_case_calling_an_action_with_an_adapter_runs(tmp_path):
     steps = suite(tmp_path, CROSS_ACTION, "hue")
     adapters = engine.adapters_for(steps, GROUP_REGISTRY)
     assert adapters == {"turn_on_for"}
-    (case,) = cases(steps, profile("hue", switch_plug="switch.plug"), adapters=adapters)
+    (case,) = planned_cases(steps, profile("hue", switch_plug="switch.plug"), adapters=adapters)
     assert case.skip is None
 
 
@@ -1694,7 +1694,7 @@ def planned_result(steps: Suite, inv: Profile) -> RunResult:
             absent=case.absent,
             inapplicable=case.inapplicable,
         )
-        for case in cases(steps, inv)
+        for case in planned_cases(steps, inv)
     ]
     return RunResult([SuiteResult(steps, results, complete=True, ha_version="2026.10.1")])
 
@@ -1759,7 +1759,7 @@ async def test_a_record_never_narrows_to_a_group_that_lacks_the_light_it_passed(
     path.write_text(GROUP_RECORD)
     lights = [RigEntity("light.a", frozenset({"light_ct"})), RigEntity("light.b", frozenset())]
     outside = Profile({"shelly": [RigEntity("light.room", frozenset({"group"}), members=("light.b",)), *lights]}, {})
-    case = cases(steps, outside)[0]
+    case = planned_cases(steps, outside)[0]
     assert case.skip == "light_ct is not one of the group's members" and case.inapplicable
     written, kept = await write_records(
         planned_result(steps, outside), REGISTRY, under(tmp_path / "test-records"), "2026-11-08", "rig run"
@@ -2640,7 +2640,7 @@ async def test_entry_steps_need_the_admin_token(tmp_path):
 
 async def test_an_entry_step_without_an_admin_connection_fails(tmp_path):
     steps = suite(tmp_path, CONFIG_ENTRY, "fake")
-    [case] = [case for case in cases(steps, profile("fake", light_ct="light.a")) if "reload" in case.id]
+    [case] = [case for case in planned_cases(steps, profile("fake", light_ct="light.a")) if "reload" in case.id]
     result = await engine._CaseRun(case, entry_admin(), ENTRY_REGISTRY, TOL, None).run()
     assert (result.outcome, result.detail) == (
         Outcome.FAIL,
@@ -2662,7 +2662,7 @@ def test_a_file_with_entry_steps_runs_alone(tmp_path):
     assert steps.file.moves_entry and steps.file.reloads
     assert not any(
         engine.in_head(case, profile("fake", light_ct="light.a"))
-        for case in cases(steps, profile("fake", light_ct="light.a"))
+        for case in planned_cases(steps, profile("fake", light_ct="light.a"))
     )
 
 
@@ -3196,7 +3196,7 @@ async def test_skipped_cases_are_still_reported_after_the_budget_is_spent(tmp_pa
     reported = []
     run_ = engine._Run(REGISTRY, TOLERANCE, {}, {}, None, lambda _: None, budget=budget)
     run_.on_result = lambda s, r: reported.append((r.id, r.outcome))
-    case = engine.cases(steps, profile(switch_plug="switch.plug"), None, engine.adapters_for(steps, REGISTRY))[0]
+    case = planned_cases(steps, profile(switch_plug="switch.plug"), None, engine.adapters_for(steps, REGISTRY))[0]
     skipped = dataclasses.replace(case, skip="no reason")
     await run_.automated(steps, ha, [skipped])
     assert reported == [(case.id, Outcome.SKIPPED)]
@@ -3323,14 +3323,16 @@ async def test_a_default_run_runs_an_observed_tests_automated_twin_and_skips_onl
 
 
 def test_a_fact_case_is_a_watched_one_or_any_of_a_firmware_fact(tmp_path):
-    planned = cases(suite(tmp_path, OBSERVED + FIRMWARE_FACT.partition("tests:\n")[2]), profile(switch_plug="s.p"))
+    planned = planned_cases(
+        suite(tmp_path, OBSERVED + FIRMWARE_FACT.partition("tests:\n")[2]), profile(switch_plug="s.p")
+    )
     assert {case.id: case.fact for case in planned} == {
         AUTOMATED: False,
         WATCHED: True,
         "plain[switch_plug]": False,
         "wins[switch_plug]": True,
     }
-    assert {case.id: case.fact for case in cases(suite(tmp_path, BOTH), profile(switch_plug="s.p"))} == {
+    assert {case.id: case.fact for case in planned_cases(suite(tmp_path, BOTH), profile(switch_plug="s.p"))} == {
         AUTOMATED: True,  # a firmware fact's: both its cases
         WATCHED: True,
     }
@@ -3346,7 +3348,7 @@ def test_a_fact_case_is_a_watched_one_or_any_of_a_firmware_fact(tmp_path):
     ],
 )
 def test_facts_adds_the_fact_cases(tmp_path, text, facts, ran):
-    planned = cases(suite(tmp_path, text, facts=facts), profile(switch_plug="switch.plug"))
+    planned = planned_cases(suite(tmp_path, text, facts=facts), profile(switch_plug="switch.plug"))
     assert {case.id for case in planned if not case.skip} == ran
 
 
@@ -3512,7 +3514,7 @@ async def test_a_zcl_error_from_ha_fails_the_case(tmp_path):
 def test_a_malformed_zcl_step_is_a_parse_error(tmp_path, step, message):
     text = ZCL_STEPS.replace("{cluster: 8, command: 1, params: {move_mode: 1, rate: 25}}", step)
     with pytest.raises(Exception, match=message):
-        cases(suite(tmp_path, text, "zha"), profile("zha", light_dimmable="light.bulb"))
+        planned_cases(suite(tmp_path, text, "zha"), profile("zha", light_dimmable="light.bulb"))
 
 
 # A step that fails if it runs: the class selectors decide whether it does.

@@ -8,11 +8,11 @@ import pytest
 
 from ha_rig import roam
 from ha_rig import terms as terms_module
-from ha_rig.engine import Suite, cases, load_step_file
+from ha_rig.engine import Suite, load_step_file
 from ha_rig.journal import Journal
 from ha_rig.profile import Profile, RigEntity, RoamGroup
 from ha_rig.roam import Roamer, RoamError
-from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, Lab, lab_profile
+from tests.rig_fakes import LAB_A, LAB_B, LAB_BULBS, Lab, lab_profile, planned_cases
 
 A, B, BULBS = LAB_A, LAB_B, LAB_BULBS
 GROUP = RoamGroup("light.test_group", frozenset({"group"}), ("light.lab_a", "light.lab_b"), "scene.test_relax")
@@ -372,7 +372,9 @@ def skips(tmp_path, offline: set[str], members=("light.a", "light.b"), made: boo
     )
     path = tmp_path / "steps.yaml"
     path.write_text(SKIP_STEPS)
-    return {case.role: (case.skip, case.unreachable) for case in cases(Suite(load_step_file(path), "hue"), profile)}
+    return {
+        case.role: (case.skip, case.unreachable) for case in planned_cases(Suite(load_step_file(path), "hue"), profile)
+    }
 
 
 RUNS, LISTED, SUPPLY_DOWN = (None, False), ("light.a", "light.b"), ("switch.supply unreachable", True)

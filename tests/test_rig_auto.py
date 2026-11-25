@@ -10,7 +10,7 @@ from ha_rig import engine
 from ha_rig.engine import Outcome, RunResult, load_step_file, run
 from ha_rig.engine import Suite as EngineSuite
 from ha_rig.journal import Journal
-from tests.rig_fakes import FakeHA, Roster, ShellyAuto, profile
+from tests.rig_fakes import FakeHA, Roster, ShellyAuto, planned_cases, profile
 
 REGISTRY = Roster({"shelly": {"clear_auto_off", "get_attributes", "set_auto_off", "set_auto_on"}})
 TOLERANCE = {"shelly": 0.2}
@@ -192,7 +192,7 @@ async def test_expect_no_reload(tmp_path, config, result):
 async def test_an_observed_run_waits_out_expect_no_reload(tmp_path):
     ha = FakeHA({PLUG: {}}, ShellyAuto())
     case_run = engine._CaseRun(
-        engine.cases(steps(tmp_path, "set_auto_off", "      - wait: 0\n"), profile("shelly", switch_plug=PLUG))[0],
+        planned_cases(steps(tmp_path, "set_auto_off", "      - wait: 0\n"), profile("shelly", switch_plug=PLUG))[0],
         ha,
         REGISTRY,
         0.2,
