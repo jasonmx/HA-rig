@@ -507,7 +507,7 @@ carried row's own run is in the record's git history. Rows are carried only betw
 record cites occurs, unchanged, in this run's (deviceside's `segments_hold`): evidence binds to the call transcript
 (deviceside's `docs/evidence.md`), so a row on a transcript that still holds stands at the new one, which is the stricter
 binding. Otherwise (a markdown or format 2 record, either side, or a segment of the old transcript changed or gone)
-the run writes no record over it, and says `Kept <record>` and why: rerun those cases on a profile with their roles.
+the run writes no record over it, and says `Kept <record>` and why: rerun those cases on a profile with their roles and devices.
 A failure, or a case left to run, still writes nothing, so nothing carried covers up a regression. Facts live in `_facts.md` (`_facts.json`), never in
 a record.
 
