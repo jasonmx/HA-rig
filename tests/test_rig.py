@@ -1738,7 +1738,7 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
         path = into("zha") / "raise_brightness.md"
         path.parent.mkdir(parents=True)
         path.write_text("zha\n")
-        return [path], [(records("shelly") / "raise_brightness.md", ["t[switch_plug]", "u[switch_plug]"])]
+        return [path], [(records("shelly") / "raise_brightness.md", ["t[switch_plug]", "u[switch_plug]"], "why")]
 
     monkeypatch.setattr(rig, "write_records", write_records)
     staging = rig.staging_for("2026-11-09 10:00:00", profile, progress)
@@ -1747,7 +1747,10 @@ async def test_a_kept_record_is_reported_and_its_suite_stays_in_the_ledger(tmp_p
 
     out = capsys.readouterr().out
     assert f"Kept {record_path('shelly')}:" in out
-    assert "skips or doesn't plan t[switch_plug], u[switch_plug], which it passed; run a profile with those" in out
+    assert (
+        "skips, doesn't plan or ran on other devices t[switch_plug], u[switch_plug], which it passed, and its rows "
+        "can't be carried: why. Rerun" in out
+    )
     staging.promote(progress)
     assert {key[0] for key in progress.done()} == {"shelly"}  # the kept suite still needs its run; zha's is promoted
 

@@ -224,7 +224,10 @@ async def test_a_run_with_two_plugs_keeps_a_record_that_passed_three(tmp_path):
     written, kept = await engine.write_records(
         result, registry, lambda integration: tmp_path / "records" / integration, "2026-11-15", "rig run"
     )
-    assert (written, kept) == ([], [(old, ["on_then_off[switch_plug-3]"])])
+    assert (written, kept) == (
+        [],
+        [(old, ["on_then_off[switch_plug-3]"], "the record isn't JSON format 3")],
+    )
 
 
 def test_an_offline_second_plug_skips_only_its_own_case(tmp_path):

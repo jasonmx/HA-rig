@@ -82,13 +82,14 @@ An entity is listed once per integration. Light roles stay first-entity on purpo
 roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
 first entity too.
 
-`--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
-a record never narrows to a profile: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`), or
-whose group lacks the light a case targets, or that lists fewer plugs than the run whose record passed
-`<test>[switch_plug-3]`, writes no record over one that passed that case, and says `Kept <record>`. A record is one
-file per integration and suite, so two profiles on one integration (one plug each, say) can't both hold their plugs'
-tests in it: list every plug the record should hold in one profile. Run a profile with the role, or, to narrow on purpose
-(a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
+`--profile <name>` picks one, and can be left out while there is only one. A record never narrows to a profile: a
+run whose profile lacks a role (a bulb-only profile has no `switch_plug` or `group`), or whose group lacks the light a
+case targets, or that lists fewer plugs than the run whose record passed `<test>[switch_plug-3]`, writes the cases it
+ran and keeps, as they are, the existing record's rows of the cases it passed that this run skips as not applying or
+doesn't plan, or ran on other devices (Test records, below). So one record holds what several profiles proved: Hue's
+group and single-bulb cases from a lab profile beside another maker's bulb's from a profile of its own. Run a profile
+with the role to retest those cases, or, to narrow on purpose (a retired device, say), delete the record by hand in
+the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's and this
 repo's (both `check-private`, reading `.private-terms.rig`), keep every profile's entity IDs, members, supplies,
 pause list and IEEEs out of commits.
@@ -491,10 +492,23 @@ by `-k`, unreachable, or cut short) writes nothing until a later run at the same
 A markdown record with fact cases ends with a line pointing to `_facts.md` and, for each, the latest row on file (``last on file
 2026-11-12, on Mini (`S3`), firmware `2.0`: fail``, or `none on file`), which only reports what is there. The record's
 Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
-off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's. A record never
-narrows to a profile: a run never overwrites one with a record that skips, as not applying (a role the profile lacks, a
-group without the light, no adapter), or doesn't plan (a plug beyond the profile's), a case the record passed
-(Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
+off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's.
+
+A record never narrows to a profile, nor loses a device (Profiles, above). A row is its case and the devices it ran
+on, each as its model ID and maker string: the model, as every device of a row names one and the card credits it,
+with the maker string, as a Tuya model ID is many makers'; not the class, which moves when DeviceSide reclassifies a
+device. A run's row replaces the existing record's row of that case on the same devices, in its place, and adds one
+beside it on other devices. The existing record's passing rows this run doesn't replace are carried over as they are,
+devices and all: of a case it ran on other devices; of a case it skips as not applying (a role the profile lacks, a
+group without the light, no adapter), in the skip's place; and of a case it doesn't plan, whose test and role it does
+(a plug beyond the profile's), after that test and role's rows. The run says which. Its skips, fact cases and cases no
+longer planned go. The rest of the record is this run's: its `calls`, and its date, commit and Home Assistant version, which a carried
+row takes too, as a verified fact stands across HA and code changes (deviceside's CLAUDE.md, Evidence 3); its own run
+is in the record's git history. Rows are carried only between format 3 records citing the same call transcript
+(`calls`): `calls` is the transcript as tested, so a row carried onto another would cite calls it never made.
+Otherwise (a markdown or format 2 record, either side, or another transcript) the run writes no record over it, and
+says `Kept <record>` and why: rerun those cases on a profile with their roles and devices.
+A failure, or a case left to run, still writes nothing, so nothing carried covers up a regression. Facts live in `_facts.md` (`_facts.json`), never in
 a record.
 
 ### Facts

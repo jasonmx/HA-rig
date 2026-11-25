@@ -2417,10 +2417,11 @@ async def report(
     for path in written:
         suite = by_path.get((path.parent, path.stem))
         staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
-    for path, narrowed in kept:
+    for path, narrowed, why in kept:
         print(
-            f"Kept {display(path, REPO)}: profile {profile.name} skips or doesn't plan {', '.join(narrowed)}, which "
-            "it passed; run a profile with those roles and as many plugs, or delete the record to narrow it."
+            f"Kept {display(path, REPO)}: profile {profile.name} skips, doesn't plan or ran on other devices "
+            f"{', '.join(narrowed)}, which it passed, and its rows can't be carried: {why}. Rerun those cases on a "
+            "profile with their roles and devices, or delete the record to narrow it."
         )
 
 

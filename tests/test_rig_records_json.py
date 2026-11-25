@@ -681,7 +681,8 @@ async def test_an_option_files_record_is_named_for_it_and_lists_its_options(tmp_
 
 
 async def test_a_record_never_narrows_a_json_record(tmp_path):
-    """A converted format 1 record that passed the switch case keeps it from a profile without the role."""
+    """A converted format 1 record that passed the switch case keeps it from a profile without the role: its row,
+    bound to no transcript, can't be carried into a format 3 record."""
     old = tmp_path / "records" / "shelly" / "turn_on_for.json"
     old.parent.mkdir(parents=True)
     old.write_text(
@@ -708,8 +709,225 @@ async def test_a_record_never_narrows_a_json_record(tmp_path):
         "rig run",
         schema=SCHEMA_OF,
         commit="abc1234",
+        calls=lambda integration, action: BLOB,
     )
-    assert (written, kept) == ([], [(old, ["lit[switch_plug]"])])
+    assert (written, kept) == ([], [(old, ["lit[switch_plug]"], "the record isn't JSON format 3")])
+
+
+GROUP_AND_BULB = """
+action: set_attributes
+rig_seconds: 5
+tests:
+  - name: sets
+    roles: [light_ct, group]
+    steps:
+      - wait: 0
+"""
+HUE = {"model": "LTA009", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.163.1", "class": "hue"}
+GROUP_ROW = {
+    "id": "sets[group]",
+    "domain": "light",
+    "role": "group",
+    "result": "pass",
+    "group": True,
+    "devices": [HUE, {**HUE, "model": "LWA012"}],
+}
+
+
+def format_3(path: Path, tests: list[dict], calls: str = BLOB) -> dict:
+    """A format 3 record of the zigbee2mqtt set_attributes suite at `path`, from an earlier run."""
+    document = {
+        "format": 3,
+        "integration": "zigbee2mqtt",
+        "action": "set_attributes",
+        "result": "pass",
+        "date": "2026-11-18",
+        "source": {"kind": "rig", "commit": "c05e616"},
+        "calls": calls,
+        "home_assistant": "2026.10.4",
+        "tests": tests,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2) + "\n")
+    return document
+
+
+def single_bulb(tmp_path) -> RunResult:
+    """A run of GROUP_AND_BULB on a profile with one bulb of another maker and no group."""
+    bulb = CaseResult(
+        "sets[light_ct]",
+        "light_ct",
+        "light",
+        Outcome.PASS,
+        reached=(Reached("lumi.light.agl003", "1.0", None, "Aqara"),),
+    )
+    group = CaseResult("sets[group]", "group", None, Outcome.SKIPPED, "no group entity in the profile")
+    group.inapplicable = group.absent = True
+    return canned(GROUP_AND_BULB, [bulb, group], tmp_path, "zigbee2mqtt")
+
+
+@needs_format_3
+async def test_a_run_without_a_role_carries_the_rows_the_record_passed_on_it(tmp_path):
+    """A single-bulb profile's run on another maker's bulb adds its row beside the Hue bulb's the record passed on
+    another profile, and keeps the group's row it skips, each as it was: the record holds all three, citing this run."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    format_3(old, [hue_row, GROUP_ROW])
+    printed: list[str] = []
+    written, kept = await write_records(
+        single_bulb(tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=printed.append,
+    )
+    assert (written, kept) == ([old], [])
+    data = held(old)
+    assert (data["date"], data["source"]["commit"], data["calls"]) == ("2026-11-25", "abc1234", BLOB)
+    assert [test["id"] for test in data["tests"]] == ["sets[light_ct]", "sets[light_ct]", "sets[group]"]
+    assert data["tests"][0] == hue_row
+    assert data["tests"][1]["devices"][0]["model"] == "lumi.light.agl003"
+    assert data["tests"][2] == GROUP_ROW
+    assert printed == [
+        "zigbee2mqtt / set_attributes: kept the record's rows of sets[group], sets[light_ct] from earlier runs: "
+        "cases this profile skips as not applying or doesn't plan, or ran on other devices"
+    ]
+
+
+@needs_format_3
+async def test_a_rerun_on_the_same_device_replaces_its_row_in_place(tmp_path):
+    """A row is its case and its devices: the Aqara bulb's rerun replaces its own row, where it was, and the Hue
+    bulb's stays."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    aqara = {"model": "lumi.light.agl003", "manufacturer": "Aqara", "firmware": "0.9", "class": None}
+    aqara_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [aqara]}
+    format_3(old, [aqara_row, hue_row, GROUP_ROW])
+    written, _ = await write_records(
+        single_bulb(tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    assert written == [old]
+    tests = held(old)["tests"]
+    assert [test["devices"][0]["firmware"] for test in tests] == ["1.0", "1.163.1", "1.163.1"]
+    assert tests[1:] == [hue_row, GROUP_ROW]
+
+
+@needs_format_3
+async def test_a_row_on_another_device_keeps_the_record_whole_on_another_transcript(tmp_path):
+    """Another maker's bulb never takes the Hue bulb's row: where the record cites another transcript, even one whose
+    every segment this run's still holds, no row is carried onto it, and the record stays as it was."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    document = format_3(old, [hue_row], calls="f" * 40)
+    run = single_bulb(tmp_path)
+    run.suites[0].cases.pop()  # no group case planned: nothing narrows, the Hue row is beside the new one alone
+    written, kept = await write_records(
+        run,
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    why = "the record's call transcript (ffffffff) isn't this run's (01234567)"
+    assert (written, kept) == ([], [(old, ["sets[light_ct]"], why)])
+    assert json.loads(old.read_text()) == document
+
+
+PLAIN = """  - name: plain
+    roles: [light_ct]
+    steps:
+      - wait: 0
+"""
+
+
+@needs_format_3
+async def test_a_pass_from_before_a_test_became_a_fact_case_is_not_carried(tmp_path):
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    hue_row = {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]}
+    format_3(old, [hue_row, GROUP_ROW])
+    fact = CaseResult(
+        "sets[light_ct]", "light_ct", "light", Outcome.PASS, reached=(Reached("LTA009", "1.163.1", "hue"),)
+    )
+    text = GROUP_AND_BULB.replace("    steps:", "    firmware_fact: true\n    steps:") + PLAIN
+    plain = CaseResult("plain[light_ct]", "light_ct", "light", Outcome.PASS, reached=fact.reached)
+    written, _ = await write_records(
+        canned(text, [fact, *single_bulb(tmp_path).suites[0].cases[1:], plain], tmp_path, "zigbee2mqtt"),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    assert written == [old]
+    assert held(old)["tests"][:2] == [  # the old passes, from before the test became a firmware fact, credit nothing
+        {"id": "sets[light_ct]", "role": "light_ct", "result": "skipped", "fact": True},
+        {"id": "sets[group]", "role": "group", "result": "skipped", "fact": True},
+    ]
+
+
+@needs_format_3
+async def test_a_plug_beyond_the_profiles_keeps_its_row_after_its_siblings(tmp_path):
+    old = tmp_path / "records" / "shelly" / "turn_on_for.json"
+    plug = {"model": "S3SW-001X8EU", "manufacturer": "Shelly", "firmware": "1.7.4", "class": "shelly"}
+    row = {
+        "id": "called[switch_plug-3]",
+        "domain": "switch",
+        "role": "switch_plug",
+        "result": "pass",
+        "devices": [plug],
+    }
+    format_3(old, [row])
+    ran = [
+        CaseResult(
+            case_id,
+            "switch_plug",
+            "switch",
+            Outcome.PASS,
+            reached=(Reached("S3SW-001X8EU", "1.7.4", "shelly", "Shelly"),),
+        )
+        for case_id in ("called[switch_plug]", "called[switch_plug-2]")
+    ]
+    tail = CaseResult(
+        "called[light_ct]", "light_ct", "light", Outcome.PASS, reached=(Reached("S3BL", "2.0", "shelly", "Shelly"),)
+    )
+    text = ONE_CALL.format(roles="switch_plug, light_ct")
+    written, _ = await write_records(
+        canned(text, [*ran, tail], tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    assert written == [old]
+    assert [test["id"] for test in held(old)["tests"]] == [
+        "called[switch_plug]",
+        "called[switch_plug-2]",
+        "called[switch_plug-3]",
+        "called[light_ct]",
+    ]
 
 
 def test_a_json_record_the_rig_cant_read_holds_nothing(tmp_path):

@@ -842,7 +842,7 @@ class Case:
     absent: bool = False
     # The skip is for a case that doesn't apply here: the role is not in the profile (absent), a group lacks the
     # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult), and
-    # never narrows to them (narrows).
+    # never narrows to them: one the existing record passed keeps its row (narrows, merge_rows).
     inapplicable: bool = False
     # Which of the role's entities it targets, from 1 in profile order, for an EACH_ENTITY role: each runs its own case.
     index: int = 1
@@ -3151,7 +3151,7 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     """The IDs of the cases `record` passed that this profile skips as not applying (Case.inapplicable: a role it
     lacks, a group without the light, no adapter), or doesn't plan at all though it plans their test on their role
     (an EACH_ENTITY role with fewer entities listed): a record with these rewritten would lose what an earlier profile
-    proved."""
+    proved, so their rows are carried into it (merge_rows), or it is kept."""
     if record is None:
         return []
     cases = list(cases)
@@ -3160,6 +3160,77 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     skipped = {case.id for case in cases if case.inapplicable and case.id in record.passed}
     dropped = {done for done in record.passed if done not in planned and case_family(done) in families}
     return sorted(skipped | dropped)
+
+
+def row_devices(row: dict) -> tuple[tuple[str, str], ...]:
+    """A record row's devices as (model ID, maker string) pairs, sorted: with its case ID, the row's identity in a
+    record (merge_rows). The model, as every device of a format 2 or 3 row names one and the card credits it; with the
+    maker string, as a Tuya model ID is many makers'. Not the class, which moves when DeviceSide reclassifies a device,
+    and can be null. Empty for a row naming none: a skip, a fact case, a format 1 row."""
+    return tuple(sorted((d.get("model") or "", d.get("manufacturer") or "") for d in row.get("devices") or ()))
+
+
+def merge_rows(tests: list[dict], old: list[dict]) -> list[dict]:
+    """`tests`, a run's rows in its suite's order, merged with `old`, the existing record's (prior). A row is its case
+    ID and its devices (row_devices). This run's row of a case replaces the old one on the same devices, in its place,
+    and an old one naming none (format 1); an old passing row on other devices stays beside it. An old passing row of
+    a case this run skips (as not applying, the only skip a record allows but a fact case's) stands in for the skip.
+    One of a case it doesn't plan, whose test and role it does (a plug beyond the profile's), goes after that test and
+    role's last row. Every other old row goes: a skip, a fact case, a case no longer planned."""
+    standing: dict[str, list[dict]] = {}
+    for row in old:
+        if row.get("result") == "pass" and not row.get("fact"):
+            standing.setdefault(row["id"], []).append(row)
+    merged: list[dict] = []
+    for row in tests:
+        olds = standing.pop(row["id"], [])
+        merged += _beside(row, olds)
+    families = {case_family(row["id"]) for row in tests}
+    for case_id, rows in standing.items():
+        if (family := case_family(case_id)) in families:
+            at = max(n for n, test in enumerate(merged) if case_family(test["id"]) == family)
+            merged[at + 1 : at + 1] = rows
+    return merged
+
+
+def _beside(row: dict, olds: list[dict]) -> list[dict]:
+    """For merge_rows: this run's `row` of a case with the old passing rows of it, `olds`: the old rows in for a skip;
+    else `row` in place of the old one on its devices (or of one naming none), the rest beside it, in their order."""
+    if row.get("fact"):  # its result is _facts.json's: an old pass from before it was one credits nothing now
+        return [row]
+    if not row.get("devices"):
+        return olds or [row]
+    mine, placed, rows = row_devices(row), False, []
+    for was in olds:
+        if not placed and (not was.get("devices") or row_devices(was) == mine):
+            rows.append(row)
+            placed = True
+        elif was.get("devices"):
+            rows.append(was)
+    return rows if placed else [*rows, row]
+
+
+def prior(path: Path, blob: str | None) -> tuple[list[dict], str | None]:
+    """The rows of the JSON record at `path` (none where there is none, or the rig can't read it), to merge into the
+    format 3 record a run citing the transcript `blob` writes over it (merge_rows), and why a row of them can't be
+    carried into it, if so: this run's record isn't format 3, the existing one isn't, or it cites another transcript.
+    Only the same one: `calls` is the transcript as tested, so a row carried onto another would cite calls it never
+    made, and could sign off segments it never ran (deviceside's check_release, reopened)."""
+    if not path.is_file():
+        return [], None
+    try:
+        data = json.loads(path.read_text())
+        old = data.get("calls")
+        rows = [test for test in data["tests"] if isinstance(test, dict) and isinstance(test.get("id"), str)]
+    except OSError, ValueError, AttributeError, KeyError, TypeError:
+        return [], None
+    if blob is None:
+        return rows, "this run's record isn't JSON format 3"
+    if data.get("format") != CALLS_FORMAT or not isinstance(old, str):
+        return rows, "the record isn't JSON format 3"
+    if old != blob:
+        return rows, f"the record's call transcript ({old[:8]}) isn't this run's ({blob[:8]})"
+    return rows, None
 
 
 def render_record(
@@ -3209,14 +3280,18 @@ def record_json(
     commit: str,
     package: str | None,
     calls: str | None = None,
+    old: list[dict] | None = None,
 ) -> dict:
     """The record (deviceside's docs/test-records.schema.json): the suite's action and options, the run, and a test
     per case in the suite's order, each case that ran with the devices it reached, a native group's its members. No
     counts, notes or facts: deviceside derives what it needs from the tests, and facts are _facts.json's.
 
     Format 3 with `calls`, the blob of the action's call transcript at the run's commit, which a sign-off stands on;
-    format 2 without, citing `package`, the integration's tree there, which credits classes and signs nothing off."""
+    format 2 without, citing `package`, the integration's tree there, which credits classes and signs nothing off.
+
+    `old` holds the existing record's rows (prior), merged with this run's (merge_rows)."""
     suite = suite_result.suite
+    tests = merge_rows([_test_json(suite, case) for case in suite_result.cases], old or [])
     record: dict[str, Any] = {
         "format": FORMAT if calls is None else CALLS_FORMAT,
         "integration": suite.integration,
@@ -3230,7 +3305,7 @@ def record_json(
         "source": {"kind": "rig", "commit": commit},
         **({"package": package} if calls is None else {"calls": calls}),
         "home_assistant": ha_version,
-        "tests": [_test_json(suite, case) for case in suite_result.cases],
+        "tests": tests,
     }
     return record
 
@@ -3277,6 +3352,31 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
     return path
 
 
+def _prior(
+    suite_result: SuiteResult,
+    path: Path,
+    schema: RecordSchema | None,
+    blob: str | None,
+    out: Callable[[str], None],
+) -> tuple[list[dict], list[str], str | None]:
+    """For write_records: the existing record at `path`'s rows (prior), the IDs of the cases whose rows the merge
+    would carry into this run's record (merge_rows), said in `out`, and, where they can't be carried, why: the record
+    is then kept. A markdown record carries nothing, so it is kept where this run would lose a case it passed."""
+    suite = suite_result.suite
+    if schema is None:
+        narrowed = narrows(suite_result.cases, Record.read(path))
+        return [], narrowed, "the record isn't JSON format 3" if narrowed else None
+    rows, why = prior(path, blob)
+    merged = merge_rows([_test_json(suite, case) for case in suite_result.cases], rows)
+    carried = sorted({row["id"] for row in merged if any(row is was for was in rows)})
+    if carried and why is None:
+        out(
+            f"{suite.integration} / {suite.name}: kept the record's rows of {', '.join(carried)} from earlier runs: "
+            "cases this profile skips as not applying or doesn't plan, or ran on other devices"
+        )
+    return rows, carried, why if carried else None
+
+
 async def write_records(
     result: RunResult,
     registry: Any,
@@ -3290,15 +3390,16 @@ async def write_records(
     schema: RecordSchema | None = None,
     commit: str | None = None,
     out: Callable[[str], None] = print,
-) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
+) -> tuple[list[Path], list[tuple[Path, list[str], str]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
     in its integration's directory of `into` (a run's staging, ha_rig/staging.py), else of `records`.
 
-    A record never narrows: where a case the existing record passed doesn't apply to this profile (an inapplicable skip:
-    a role it lacks, a group without the light) or isn't planned (a plug beyond the profile's: narrows), the file in
-    `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To narrow on purpose,
-    delete the record.
+    A record never narrows, nor loses a device: the existing record's passing rows of the cases this run skips as not
+    applying or doesn't plan, or ran on other devices, are carried into the record this run writes, as they are
+    (merge_rows), and `out` says so. Where they can't be (a markdown or format 2 record on either side, or one citing
+    another call transcript than this run's: prior), the file in `records` stays as it is, and the suite is `kept`
+    with those case IDs and why (its `records` path). To narrow on purpose, delete the record.
 
     `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
     after Source: what deviceside's release check compares to the tree that ships.
@@ -3319,8 +3420,11 @@ async def write_records(
         suite = suite_result.suite
         title = registry.integrations[suite.integration].title
         path = records(suite.integration) / record_name(suite, schema)
-        if narrowed := narrows(suite_result.cases, Record.read(path)):
-            kept.append((path, narrowed))
+        binds = schema is not None and schema.binds_calls
+        blob = calls(suite.integration, suite.action) if binds and calls else None
+        old, carried, why = _prior(suite_result, path, schema, blob, out)
+        if why is not None:
+            kept.append((path, carried, why))
             continue
         path = into(suite.integration) / record_name(suite, schema)
         tree = package(suite.integration) if package else None
@@ -3332,15 +3436,14 @@ async def write_records(
                     "(the registry lookup failed, or an older rig saved them): a run at this commit reruns those cases"
                 )
                 continue
-            blob = calls(suite.integration, suite.action) if schema.binds_calls and calls else None
-            if schema.binds_calls and blob is None:
+            if binds and blob is None:
                 out(
                     f"{suite.integration} / {suite.name}: no call transcript of {suite.action} at {commit} "
                     f"(tests/integrations/{suite.integration}/calls/{suite.action}.json), so the record is format 2: "
                     "it credits classes but signs nothing off"
                 )
             try:
-                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree, blob))
+                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree, blob, old))
             except (OSError, ValueError) as err:  # InvalidRecord, or a file that couldn't be written
                 out(f"{suite.integration} / {suite.name}: {err}")
                 continue
