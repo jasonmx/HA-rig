@@ -842,7 +842,7 @@ class Case:
     absent: bool = False
     # The skip is for a case that doesn't apply here: the role is not in the profile (absent), a group lacks the
     # light it targets, or another action it calls has no adapter. A record allows these skips (SuiteResult), and
-    # never narrows to them (narrows).
+    # never narrows to them: one the existing record passed keeps its row (narrows, carried).
     inapplicable: bool = False
     # Which of the role's entities it targets, from 1 in profile order, for an EACH_ENTITY role: each runs its own case.
     index: int = 1
@@ -3151,7 +3151,7 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     """The IDs of the cases `record` passed that this profile skips as not applying (Case.inapplicable: a role it
     lacks, a group without the light, no adapter), or doesn't plan at all though it plans their test on their role
     (an EACH_ENTITY role with fewer entities listed): a record with these rewritten would lose what an earlier profile
-    proved."""
+    proved, so their rows are carried into it (carried), or it is kept."""
     if record is None:
         return []
     cases = list(cases)
@@ -3160,6 +3160,48 @@ def narrows(cases: Iterable[Case | CaseResult], record: Record | None) -> list[s
     skipped = {case.id for case in cases if case.inapplicable and case.id in record.passed}
     dropped = {done for done in record.passed if done not in planned and case_family(done) in families}
     return sorted(skipped | dropped)
+
+
+def transcript_holds(old: str, new: str) -> bool:
+    """Whether every segment of the call transcript `old` (a transcript file's text) occurs, unchanged, in `new`'s:
+    deviceside's own test (scripts/check_release.py, segments_hold), so a row run on `old` stands on `new`. False
+    where either is no transcript (a non-empty JSON list of segments)."""
+
+    def segments(text: str) -> set[str] | None:
+        try:
+            listed = json.loads(text)
+        except ValueError:
+            return None
+        if not (isinstance(listed, list) and listed and all(isinstance(segment, dict) for segment in listed)):
+            return None
+        return {json.dumps(segment, sort_keys=True, separators=(",", ":")) for segment in listed}
+
+    had, has = segments(old), segments(new)
+    return had is not None and has is not None and had <= has
+
+
+Holds = Callable[[str, str], bool]  # whether the transcript blob first named holds in the second's (transcript_holds)
+
+
+def carried(path: Path, narrowed: Iterable[str], blob: str | None, holds: Holds | None) -> dict[str, dict] | str:
+    """The rows of `narrowed` (narrows) in the JSON record at `path`, in its order, to carry into the format 3 record
+    a run citing the transcript `blob` writes over it; or why they can't be, so the record is kept: this run's record
+    is format 2, the existing one isn't format 3, or its transcript doesn't hold in `blob`'s (`holds`), so a row
+    carried would cite calls it never made."""
+    if blob is None:
+        return "this run's record isn't format 3, bound to a call transcript"
+    try:
+        data = json.loads(path.read_text())
+        old, tests = data.get("calls"), data.get("tests")
+        rows = {test["id"]: test for test in tests if isinstance(test, dict)}
+    except OSError, ValueError, AttributeError, KeyError, TypeError:
+        return "the rig can't read its rows"
+    if data.get("format") != CALLS_FORMAT or not isinstance(old, str):
+        return "it isn't format 3, bound to a call transcript"
+    if old != blob and (holds is None or not holds(old, blob)):
+        return f"a segment of the call transcript it was run on ({old[:8]}) changed or went since"
+    wanted = set(narrowed)
+    return {case_id: row for case_id, row in rows.items() if case_id in wanted}
 
 
 def render_record(
@@ -3209,14 +3251,26 @@ def record_json(
     commit: str,
     package: str | None,
     calls: str | None = None,
+    carry: dict[str, dict] | None = None,
 ) -> dict:
     """The record (deviceside's docs/test-records.schema.json): the suite's action and options, the run, and a test
     per case in the suite's order, each case that ran with the devices it reached, a native group's its members. No
     counts, notes or facts: deviceside derives what it needs from the tests, and facts are _facts.json's.
 
     Format 3 with `calls`, the blob of the action's call transcript at the run's commit, which a sign-off stands on;
-    format 2 without, citing `package`, the integration's tree there, which credits classes and signs nothing off."""
+    format 2 without, citing `package`, the integration's tree there, which credits classes and signs nothing off.
+
+    `carry` (format 3 only: carried) holds the existing record's rows, as they are, of the cases this run skips as not
+    applying, each in its case's place, or, for a case the run doesn't plan, after the last row of its test and role."""
     suite = suite_result.suite
+    carry = carry or {}
+    tests = [carry.get(case.id) or _test_json(suite, case) for case in suite_result.cases]
+    planned = {case.id for case in suite_result.cases}
+    for case_id, row in carry.items():
+        if case_id not in planned:
+            family = case_family(case_id)
+            at = max((n for n, test in enumerate(tests) if case_family(test["id"]) == family), default=len(tests) - 1)
+            tests.insert(at + 1, row)
     record: dict[str, Any] = {
         "format": FORMAT if calls is None else CALLS_FORMAT,
         "integration": suite.integration,
@@ -3230,7 +3284,7 @@ def record_json(
         "source": {"kind": "rig", "commit": commit},
         **({"package": package} if calls is None else {"calls": calls}),
         "home_assistant": ha_version,
-        "tests": [_test_json(suite, case) for case in suite_result.cases],
+        "tests": tests,
     }
     return record
 
@@ -3277,6 +3331,23 @@ def write_report(result: RunResult, directory: Path, title: str) -> Path:
     return path
 
 
+def _narrowed(
+    suite_result: SuiteResult, path: Path, blob: str | None, holds: Holds | None, out: Callable[[str], None]
+) -> tuple[list[str], dict[str, dict] | str]:
+    """For write_records: the cases the record at `path` passed that this run would narrow (narrows), with the rows
+    to carry for them into the record citing `blob` (None: not format 3), said in `out`, or why the record is kept."""
+    if not (narrowed := narrows(suite_result.cases, Record.read(path))):
+        return [], {}
+    found = carried(path, narrowed, blob, holds)
+    if not isinstance(found, str):
+        suite = suite_result.suite
+        out(
+            f"{suite.integration} / {suite.name}: kept the rows of {', '.join(narrowed)}, which this profile skips as "
+            "not applying or doesn't plan, from the record's earlier run"
+        )
+    return narrowed, found
+
+
 async def write_records(
     result: RunResult,
     registry: Any,
@@ -3287,18 +3358,21 @@ async def write_records(
     package: Callable[[str], str] | None = None,
     *,
     calls: Callable[[str, str], str | None] | None = None,
+    holds: Holds | None = None,
     schema: RecordSchema | None = None,
     commit: str | None = None,
     out: Callable[[str], None] = print,
-) -> tuple[list[Path], list[tuple[Path, list[str]]]]:
+) -> tuple[list[Path], list[tuple[Path, list[str], str]]]:
     """`(written, kept)`: one record per suite that fully passed with its facts taken; a partial or failed suite, or
     one whose facts lookup failed, writes nothing: a record naming no device would replace one that did. Each goes
     in its integration's directory of `into` (a run's staging, ha_rig/staging.py), else of `records`.
 
     A record never narrows: where a case the existing record passed doesn't apply to this profile (an inapplicable skip:
-    a role it lacks, a group without the light) or isn't planned (a plug beyond the profile's: narrows), the file in
-    `records` stays as it is, and the suite is `kept` with those case IDs (its `records` path). To narrow on purpose,
-    delete the record.
+    a role it lacks, a group without the light) or isn't planned (a plug beyond the profile's: narrows), its row is
+    carried into the record this run writes, as it is (carried, record_json), and `out` says so. Where they can't be
+    (markdown, a format 2 record on either side, or a transcript a carried row was run on that doesn't hold in this
+    run's, by `holds`), the file in `records` stays as it is, and the suite is `kept` with those case IDs and why
+    (its `records` path). To narrow on purpose, delete the record.
 
     `package` gives an integration's package tree at the run's commit, which each of its records cites in a Package row
     after Source: what deviceside's release check compares to the tree that ships.
@@ -3319,8 +3393,11 @@ async def write_records(
         suite = suite_result.suite
         title = registry.integrations[suite.integration].title
         path = records(suite.integration) / record_name(suite, schema)
-        if narrowed := narrows(suite_result.cases, Record.read(path)):
-            kept.append((path, narrowed))
+        binds = schema is not None and schema.binds_calls
+        blob = calls(suite.integration, suite.action) if binds and calls else None
+        narrowed, carry = _narrowed(suite_result, path, blob, holds, out)
+        if isinstance(carry, str):
+            kept.append((path, narrowed, carry))
             continue
         path = into(suite.integration) / record_name(suite, schema)
         tree = package(suite.integration) if package else None
@@ -3332,15 +3409,14 @@ async def write_records(
                     "(the registry lookup failed, or an older rig saved them): a run at this commit reruns those cases"
                 )
                 continue
-            blob = calls(suite.integration, suite.action) if schema.binds_calls and calls else None
-            if schema.binds_calls and blob is None:
+            if binds and blob is None:
                 out(
                     f"{suite.integration} / {suite.name}: no call transcript of {suite.action} at {commit} "
                     f"(tests/integrations/{suite.integration}/calls/{suite.action}.json), so the record is format 2: "
                     "it credits classes but signs nothing off"
                 )
             try:
-                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree, blob))
+                schema.write(path, record_json(suite_result, suite_result.ha_version, date, commit, tree, blob, carry))
             except (OSError, ValueError) as err:  # InvalidRecord, or a file that couldn't be written
                 out(f"{suite.integration} / {suite.name}: {err}")
                 continue

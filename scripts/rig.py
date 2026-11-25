@@ -168,6 +168,7 @@ from ha_rig.engine import (  # noqa: E402
     merge,
     report_path,
     run,
+    transcript_holds,
     unfinished,
     write_fact,
     write_records,
@@ -2395,6 +2396,11 @@ async def report(
         path = f"tests/integrations/{integration}/calls/{action}.json"
         return git("rev-parse", "--verify", "--quiet", f"{commit}:{path}", check=False) or None
 
+    def holds(old: str, new: str) -> bool:
+        """Whether every segment of the transcript blob `old` occurs in `new`'s, so a record's row run on `old` is
+        carried into one citing `new`; a blob git doesn't have holds nothing."""
+        return transcript_holds(git("cat-file", "blob", old, check=False), git("cat-file", "blob", new, check=False))
+
     short = git("rev-parse", "--short", commit)
     source = f"rig run (`scripts/rig.py`), commit `{short}`"
     if touched is not None:
@@ -2408,6 +2414,7 @@ async def report(
         into=staging.test_records_dir,
         package=package_tree,
         calls=action_calls,
+        holds=holds,
         schema=record_schema(),
         commit=short,
     )
@@ -2417,10 +2424,11 @@ async def report(
     for path in written:
         suite = by_path.get((path.parent, path.stem))
         staging.add(path, progress.key(suite) if progress is not None and suite is not None else None)
-    for path, narrowed in kept:
+    for path, narrowed, why in kept:
         print(
             f"Kept {display(path, REPO)}: profile {profile.name} skips or doesn't plan {', '.join(narrowed)}, which "
-            "it passed; run a profile with those roles and as many plugs, or delete the record to narrow it."
+            f"it passed, and their rows can't be carried, as {why}; run a profile with those roles and as many "
+            "plugs, or delete the record to narrow it."
         )
 
 

@@ -681,7 +681,8 @@ async def test_an_option_files_record_is_named_for_it_and_lists_its_options(tmp_
 
 
 async def test_a_record_never_narrows_a_json_record(tmp_path):
-    """A converted format 1 record that passed the switch case keeps it from a profile without the role."""
+    """A converted format 1 record that passed the switch case keeps it from a profile without the role: its row,
+    bound to no transcript, can't be carried into a format 3 record."""
     old = tmp_path / "records" / "shelly" / "turn_on_for.json"
     old.parent.mkdir(parents=True)
     old.write_text(
@@ -708,8 +709,181 @@ async def test_a_record_never_narrows_a_json_record(tmp_path):
         "rig run",
         schema=SCHEMA_OF,
         commit="abc1234",
+        calls=lambda integration, action: BLOB,
     )
-    assert (written, kept) == ([], [(old, ["lit[switch_plug]"])])
+    assert (written, kept) == ([], [(old, ["lit[switch_plug]"], "it isn't format 3, bound to a call transcript")])
+
+
+GROUP_AND_BULB = """
+action: set_attributes
+rig_seconds: 5
+tests:
+  - name: sets
+    roles: [light_ct, group]
+    steps:
+      - wait: 0
+"""
+HUE = {"model": "LTA009", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.163.1", "class": "hue"}
+GROUP_ROW = {
+    "id": "sets[group]",
+    "domain": "light",
+    "role": "group",
+    "result": "pass",
+    "group": True,
+    "devices": [HUE, {**HUE, "model": "LWA012"}],
+}
+
+
+def format_3(path: Path, tests: list[dict], calls: str = BLOB) -> dict:
+    """A format 3 record of the zigbee2mqtt set_attributes suite at `path`, from an earlier run."""
+    document = {
+        "format": 3,
+        "integration": "zigbee2mqtt",
+        "action": "set_attributes",
+        "result": "pass",
+        "date": "2026-11-18",
+        "source": {"kind": "rig", "commit": "c05e616"},
+        "calls": calls,
+        "home_assistant": "2026.10.4",
+        "tests": tests,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2) + "\n")
+    return document
+
+
+def single_bulb(tmp_path) -> RunResult:
+    """A run of GROUP_AND_BULB on a profile with one bulb of another maker and no group."""
+    bulb = CaseResult(
+        "sets[light_ct]",
+        "light_ct",
+        "light",
+        Outcome.PASS,
+        reached=(Reached("lumi.light.agl003", "1.0", None, "Aqara"),),
+    )
+    group = CaseResult("sets[group]", "group", None, Outcome.SKIPPED, "no group entity in the profile")
+    group.inapplicable = group.absent = True
+    return canned(GROUP_AND_BULB, [bulb, group], tmp_path, "zigbee2mqtt")
+
+
+@needs_format_3
+async def test_a_run_without_a_role_carries_the_rows_the_record_passed_on_it(tmp_path):
+    """A single-bulb profile's run writes its bulb's row, and keeps the group's row the record passed on another
+    profile, as it was: the record holds both, citing this run."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    format_3(
+        old,
+        [
+            {"id": "sets[light_ct]", "domain": "light", "role": "light_ct", "result": "pass", "devices": [HUE]},
+            GROUP_ROW,
+        ],
+    )
+    printed: list[str] = []
+    written, kept = await write_records(
+        single_bulb(tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=printed.append,
+    )
+    assert (written, kept) == ([old], [])
+    data = held(old)
+    assert (data["date"], data["source"]["commit"], data["calls"]) == ("2026-11-25", "abc1234", BLOB)
+    assert [test["id"] for test in data["tests"]] == ["sets[light_ct]", "sets[group]"]
+    assert data["tests"][0]["devices"][0]["model"] == "lumi.light.agl003"
+    assert data["tests"][1] == GROUP_ROW
+    assert printed == [
+        "zigbee2mqtt / set_attributes: kept the rows of sets[group], which this profile skips as not applying or "
+        "doesn't plan, from the record's earlier run"
+    ]
+
+
+@needs_format_3
+async def test_a_row_is_carried_only_where_its_transcript_holds_in_the_runs(tmp_path):
+    """A row run on another transcript is carried where every segment of it occurs in this run's (`holds`), and
+    otherwise keeps the record as it was."""
+    old = tmp_path / "records" / "zigbee2mqtt" / "set_attributes.json"
+    before = "f" * 40
+    document = format_3(old, [GROUP_ROW], calls=before)
+
+    async def write_with(holds: bool) -> tuple:
+        return await write_records(
+            single_bulb(tmp_path),
+            REGISTRY,
+            under(tmp_path / "records"),
+            "2026-11-25",
+            "rig run",
+            schema=SCHEMA_OF,
+            commit="abc1234",
+            calls=lambda integration, action: BLOB,
+            holds=lambda was, now: holds and (was, now) == (before, BLOB),
+            out=lambda _: None,
+        )
+
+    why = "a segment of the call transcript it was run on (ffffffff) changed or went since"
+    assert await write_with(holds=False) == ([], [(old, ["sets[group]"], why)])
+    assert json.loads(old.read_text()) == document
+    assert await write_with(holds=True) == ([old], [])
+    assert [test["id"] for test in held(old)["tests"]] == ["sets[light_ct]", "sets[group]"]
+
+
+@needs_format_3
+async def test_a_plug_beyond_the_profiles_keeps_its_row_after_its_siblings(tmp_path):
+    old = tmp_path / "records" / "shelly" / "turn_on_for.json"
+    plug = {"model": "S3SW-001X8EU", "manufacturer": "Shelly", "firmware": "1.7.4", "class": "shelly"}
+    row = {
+        "id": "called[switch_plug-3]",
+        "domain": "switch",
+        "role": "switch_plug",
+        "result": "pass",
+        "devices": [plug],
+    }
+    format_3(old, [row])
+    ran = [
+        CaseResult(
+            case_id,
+            "switch_plug",
+            "switch",
+            Outcome.PASS,
+            reached=(Reached("S3SW-001X8EU", "1.7.4", "shelly", "Shelly"),),
+        )
+        for case_id in ("called[switch_plug]", "called[switch_plug-2]")
+    ]
+    tail = CaseResult(
+        "called[light_ct]", "light_ct", "light", Outcome.PASS, reached=(Reached("S3BL", "2.0", "shelly", "Shelly"),)
+    )
+    text = ONE_CALL.format(roles="switch_plug, light_ct")
+    written, _ = await write_records(
+        canned(text, [*ran, tail], tmp_path),
+        REGISTRY,
+        under(tmp_path / "records"),
+        "2026-11-25",
+        "rig run",
+        schema=SCHEMA_OF,
+        commit="abc1234",
+        calls=lambda integration, action: BLOB,
+        out=lambda _: None,
+    )
+    assert written == [old]
+    assert [test["id"] for test in held(old)["tests"]] == [
+        "called[switch_plug]",
+        "called[switch_plug-2]",
+        "called[switch_plug-3]",
+        "called[light_ct]",
+    ]
+
+
+def test_a_transcript_holds_where_every_segment_of_it_occurs_unchanged():
+    one, two = {"call": "a", "args": [1]}, {"call": "b"}
+    assert engine.transcript_holds(json.dumps([one]), json.dumps([two, {"args": [1], "call": "a"}]))
+    assert not engine.transcript_holds(json.dumps([one, two]), json.dumps([one]))
+    assert not engine.transcript_holds(json.dumps([{**one, "args": [2]}]), json.dumps([one]))
+    assert not engine.transcript_holds("", json.dumps([one]))
+    assert not engine.transcript_holds(json.dumps([]), json.dumps([one]))
 
 
 def test_a_json_record_the_rig_cant_read_holds_nothing(tmp_path):

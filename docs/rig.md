@@ -82,13 +82,16 @@ An entity is listed once per integration. Light roles stay first-entity on purpo
 roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
 first entity too.
 
-`--profile <name>` picks one, and can be left out while there is only one. Every test record names its profile, and
-a record never narrows to a profile: a run whose profile lacks a role (a bulb-only profile has no `switch_plug`), or
-whose group lacks the light a case targets, or that lists fewer plugs than the run whose record passed
-`<test>[switch_plug-3]`, writes no record over one that passed that case, and says `Kept <record>`. A record is one
-file per integration and suite, so two profiles on one integration (one plug each, say) can't both hold their plugs'
-tests in it: list every plug the record should hold in one profile. Run a profile with the role, or, to narrow on purpose
-(a retired device, say), delete the record by hand in the deviceside PR. A record is public, so name a profile for its
+`--profile <name>` picks one, and can be left out while there is only one. A record never narrows to a profile: a
+run whose profile lacks a role (a bulb-only profile has no `switch_plug` or `group`), or whose group lacks the light a
+case targets, or that lists fewer plugs than the run whose record passed `<test>[switch_plug-3]`, writes the cases it
+ran and keeps, as they are, the existing record's rows of the cases it passed that this run skips as not applying or
+doesn't plan (Test records, below). So one record holds what several profiles proved: Hue's group cases from a lab
+profile beside a single bulb's from another. A case's row is one per record, though, and a role's first entity's
+case is `<test>[<role>]` on every profile, so two profiles on one integration (one plug each, say) can't both hold their
+plugs' tests in it: the later run's replaces the earlier's. List every plug the record should hold in one profile. Run
+a profile with the role to retest those cases, or, to narrow on purpose (a retired device, say), delete the record by
+hand in the deviceside PR. A record is public, so name a profile for its
 setup (`lab`, `house`), never for a person or place. The household checks, deviceside's and this
 repo's (both `check-private`, reading `.private-terms.rig`), keep every profile's entity IDs, members, supplies,
 pause list and IEEEs out of commits.
@@ -491,10 +494,19 @@ by `-k`, unreachable, or cut short) writes nothing until a later run at the same
 A markdown record with fact cases ends with a line pointing to `_facts.md` and, for each, the latest row on file (``last on file
 2026-11-12, on Mini (`S3`), firmware `2.0`: fail``, or `none on file`), which only reports what is there. The record's
 Source row names `scripts/rig.py` and the deviceside commit HA loaded, never one of this repo's. Whether a record signs
-off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's. A record never
-narrows to a profile: a run never overwrites one with a record that skips, as not applying (a role the profile lacks, a
-group without the light, no adapter), or doesn't plan (a plug beyond the profile's), a case the record passed
-(Profiles, above). Facts live in `_facts.md` (`_facts.json`), never in
+off an integration's changes is deviceside's rule (`docs/evidence.md`, Release gate), not the rig's.
+
+A record never narrows to a profile (Profiles, above). Where the existing record passed a case this run skips as not
+applying (a role the profile lacks, a group without the light, no adapter) or doesn't plan (a plug beyond the
+profile's), the record this run writes carries that case's row over as it is, devices and all, in the case's place (a
+plug's after its siblings), and the run says which. The rest of the record is this run's: its date, commit, Home
+Assistant version and `calls`, and every case it ran or skipped otherwise. A carried row's own run is in the record's
+git history. Rows are carried only between format 3 records, and only where every segment of the transcript the old
+record cites occurs, unchanged, in this run's (deviceside's `segments_hold`): evidence binds to the call transcript
+(deviceside's `docs/evidence.md`), so a row on a transcript that still holds stands at the new one, which is the stricter
+binding. Otherwise (a markdown or format 2 record, either side, or a segment of the old transcript changed or gone)
+the run writes no record over it, and says `Kept <record>` and why: rerun those cases on a profile with their roles.
+A failure, or a case left to run, still writes nothing, so nothing carried covers up a regression. Facts live in `_facts.md` (`_facts.json`), never in
 a record.
 
 ### Facts
