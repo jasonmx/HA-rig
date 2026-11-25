@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from ha_rig import engine
-from ha_rig.engine import Outcome, Record, case_family, cases, in_head, narrows
+from ha_rig.engine import Outcome, Record, case_family, in_head, narrows
 from ha_rig.profile import Profile, RigEntity
 from ha_rig.progress import Progress
 from ha_rig.target import SCHEMA, deviceside_repo
+from tests.rig_fakes import planned_cases
 
 from .rig_fakes import FakeHA, Roster
 from .test_rig import rig
@@ -62,7 +63,7 @@ def test_an_entity_listed_twice_on_an_integration_is_refused(tmp_path):
 
 
 def test_each_plug_gets_its_own_case_and_the_first_keeps_the_bare_id(tmp_path):
-    planned = cases(suite(tmp_path, ON_THEN_OFF), plugs(*PLUGS))
+    planned = planned_cases(suite(tmp_path, ON_THEN_OFF), plugs(*PLUGS))
     assert [(case.id, case.entities) for case in planned] == [
         ("on_then_off[switch_plug]", {"switch_plug": PLUGS[0]}),
         ("on_then_off[switch_plug-2]", {"switch_plug": PLUGS[1]}),
@@ -72,12 +73,12 @@ def test_each_plug_gets_its_own_case_and_the_first_keeps_the_bare_id(tmp_path):
 
 
 def test_one_plug_plans_what_it_always_did(tmp_path):
-    [case] = cases(suite(tmp_path, ON_THEN_OFF), plugs(PLUGS[0]))
+    [case] = planned_cases(suite(tmp_path, ON_THEN_OFF), plugs(PLUGS[0]))
     assert (case.id, case.entities, case.index) == ("on_then_off[switch_plug]", {"switch_plug": PLUGS[0]}, 1)
 
 
 def test_no_plug_is_one_absent_case(tmp_path):
-    [case] = cases(suite(tmp_path, ON_THEN_OFF), Profile({"shelly": []}))
+    [case] = planned_cases(suite(tmp_path, ON_THEN_OFF), Profile({"shelly": []}))
     assert (case.id, case.skip, case.absent) == (
         "on_then_off[switch_plug]",
         "no switch_plug entity in the profile",
@@ -87,7 +88,7 @@ def test_no_plug_is_one_absent_case(tmp_path):
 
 def test_a_light_role_with_two_entities_still_tests_the_first(tmp_path):
     lights = [RigEntity("light.a", frozenset({"light_ct"})), RigEntity("light.b", frozenset({"light_ct"}))]
-    planned = cases(
+    planned = planned_cases(
         suite(tmp_path, TWO_ROLES), Profile({"shelly": [RigEntity(PLUGS[0], frozenset({"switch_plug"})), *lights]})
     )
     assert [(case.id, case.entities) for case in planned] == [
@@ -97,7 +98,7 @@ def test_a_light_role_with_two_entities_still_tests_the_first(tmp_path):
 
 
 def test_an_observed_case_pairs_with_its_own_plugs_automated_case(tmp_path):
-    planned = cases(suite(tmp_path, WATCHED), plugs(*PLUGS[:2]))
+    planned = planned_cases(suite(tmp_path, WATCHED), plugs(*PLUGS[:2]))
     assert [(case.id, case.twin, case.entities["switch_plug"]) for case in planned] == [
         ("on_then_off[switch_plug]", "on_then_off[switch_plug] observed", PLUGS[0]),
         ("on_then_off[switch_plug] observed", "on_then_off[switch_plug]", PLUGS[0]),
@@ -107,7 +108,7 @@ def test_an_observed_case_pairs_with_its_own_plugs_automated_case(tmp_path):
 
 
 def test_a_keyword_picks_one_plugs_case(tmp_path):
-    [case] = cases(suite(tmp_path, ON_THEN_OFF), plugs(*PLUGS), "switch_plug-2")
+    [case] = planned_cases(suite(tmp_path, ON_THEN_OFF), plugs(*PLUGS), "switch_plug-2")
     assert case.entities == {"switch_plug": PLUGS[1]}
 
 
@@ -164,11 +165,11 @@ def passed(*case_ids: str) -> Record:
 def test_a_run_with_fewer_plugs_narrows_the_record_and_one_with_as_many_does_not(tmp_path):
     record = passed("on_then_off[switch_plug]", "on_then_off[switch_plug-2]", "on_then_off[switch_plug-3]")
     steps = suite(tmp_path, ON_THEN_OFF)
-    assert narrows(cases(steps, plugs(*PLUGS[:2])), record) == ["on_then_off[switch_plug-3]"]
-    assert narrows(cases(steps, plugs(*PLUGS)), record) == []
-    assert narrows(cases(steps, Profile({"shelly": []})), record) == sorted(record.passed)
+    assert narrows(planned_cases(steps, plugs(*PLUGS[:2])), record) == ["on_then_off[switch_plug-3]"]
+    assert narrows(planned_cases(steps, plugs(*PLUGS)), record) == []
+    assert narrows(planned_cases(steps, Profile({"shelly": []})), record) == sorted(record.passed)
     # A test the step file no longer has is no narrowing: its family isn't planned.
-    assert narrows(cases(steps, plugs(*PLUGS)), passed("gone[switch_plug-2]")) == []
+    assert narrows(planned_cases(steps, plugs(*PLUGS)), passed("gone[switch_plug-2]")) == []
 
 
 def ledger(tmp_path: Path, steps, saved_on: Profile, resumed_on: Profile, saved: int) -> set[str]:
@@ -177,13 +178,13 @@ def ledger(tmp_path: Path, steps, saved_on: Profile, resumed_on: Profile, saved:
     progress = Progress.load(tmp_path, "lab")
     progress.track(steps, "c1")
     progress.check_ha("2026.10.1", lambda _: None)
-    for case in cases(steps, saved_on)[:saved]:
+    for case in planned_cases(steps, saved_on)[:saved]:
         progress.record(
             steps, engine.CaseResult(case.id, case.role, "switch", Outcome.PASS, "", tuple(case.entities.values()))
         )
     again = Progress.load(tmp_path, "lab")
     again.check_ha("2026.10.1", lambda _: None)
-    again.resume(steps, "c1", cases(steps, resumed_on))
+    again.resume(steps, "c1", planned_cases(steps, resumed_on))
     return set(again.saved(steps))
 
 
@@ -233,7 +234,7 @@ async def test_a_run_with_two_plugs_keeps_a_record_that_passed_three(tmp_path):
 def test_an_offline_second_plug_skips_only_its_own_case(tmp_path):
     inv = plugs(*PLUGS[:2])
     inv.offline = frozenset({PLUGS[1]})
-    assert [(case.id, case.skip) for case in cases(suite(tmp_path, ON_THEN_OFF), inv)] == [
+    assert [(case.id, case.skip) for case in planned_cases(suite(tmp_path, ON_THEN_OFF), inv)] == [
         ("on_then_off[switch_plug]", None),
         ("on_then_off[switch_plug-2]", f"{PLUGS[1]} unreachable"),
     ]
@@ -242,7 +243,7 @@ def test_an_offline_second_plug_skips_only_its_own_case(tmp_path):
 def test_a_powered_second_plug_leaves_the_lanes_and_the_first_stays(tmp_path):
     lamp = RigEntity("light.lamp", frozenset({"light_onoff"}), powered_by=PLUGS[1])
     inv = plugs(*PLUGS[:2], lamp=lamp)
-    assert [in_head(case, inv) for case in cases(suite(tmp_path, ON_THEN_OFF), inv)] == [True, False]
+    assert [in_head(case, inv) for case in planned_cases(suite(tmp_path, ON_THEN_OFF), inv)] == [True, False]
 
 
 def test_the_plan_the_check_and_the_platforms_cover_every_plug(tmp_path):

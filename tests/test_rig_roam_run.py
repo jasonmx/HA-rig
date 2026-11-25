@@ -22,6 +22,7 @@ from ha_rig.profile import Profile, RigEntity
 from ha_rig.progress import Progress
 from ha_rig.roam import Roamer
 from tests import rig_fakes as fakes
+from tests.rig_fakes import planned_cases
 
 RIG_HOME = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("rig_for_roaming", RIG_HOME / "scripts" / "rig.py")
@@ -1228,7 +1229,7 @@ def resumed(tmp_path, *, uncommitted: bool = False) -> rig.Setup:
     progress = Progress.load(tmp_path, "mixed")
     progress.track(suite, "c1")
     progress.check_ha("2026.10.1", lambda _: None)
-    for case in engine.cases(suite, profile, None, rig.adapters_for(suite, registry)):
+    for case in planned_cases(suite, profile, None, rig.adapters_for(suite, registry)):
         if not case.skip and case.entities.get("switch_plug") == "switch.plug_b":
             progress.record(
                 suite, engine.CaseResult(case.id, case.role, "switch", engine.Outcome.PASS, "", ("switch.plug_b",))

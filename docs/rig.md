@@ -89,7 +89,7 @@ run plans, from the code under test (`engine.unbuilt`), so `--dry-run` shows it,
 planned still fails it. A call that wouldn't run there (`only:` elsewhere, a class selector leaving the class out, a
 `target:` on another role) doesn't count. The run checks the declaration: a response naming another class for the
 entity fails the case, and a suite's record stands on such a skip only beside a pass on the same entity whose response
-named that class. A class the integration doesn't name stops the plan. Declare it only on a device some action isn't
+named that class. The record's rows of the case on that class go; those on other classes carry (Test records, below). A class the integration doesn't name stops the plan. Declare it only on a device some action isn't
 built on; other cases run as before.
 
 `--profile <name>` picks one, and can be left out while there is only one. A record never narrows to a profile: a
@@ -510,8 +510,9 @@ with the maker string, as a Tuya model ID is many makers'; not the class, which 
 device. A run's row replaces the existing record's row of that case on the same devices, in its place, and adds one
 beside it on other devices. The existing record's passing rows this run doesn't replace are carried over as they are,
 devices and all: of a case it ran on other devices; of a case it skips as not applying (a role the profile lacks, a
-group without the light, no adapter, a call not built on the declared class), in the skip's place; and of a case it
-doesn't plan, whose test and role it does (a plug beyond the profile's), after that test and role's rows. The run says which. Its skips, fact cases and cases no
+group without the light, no adapter, a call not built on the declared class), in the skip's place, but for a row on
+a device of a class its call is now not built on, which goes, as the code refuses what it shows passing (the run says
+`<case>: passed on <class> in the record, now not built: row dropped`); and of a case it doesn't plan, whose test and role it does (a plug beyond the profile's), after that test and role's rows. The run says which. Its skips, fact cases and cases no
 longer planned go. The rest of the record is this run's: its `calls`, and its date, commit and Home Assistant version, which a carried
 row takes too, as a verified fact stands across HA and code changes (deviceside's CLAUDE.md, Evidence 3); its own run
 is in the record's git history. Rows are carried only between format 3 records citing the same call transcript

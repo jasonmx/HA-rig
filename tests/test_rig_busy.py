@@ -18,7 +18,7 @@ from ha_rig.progress import Progress
 from ha_rig.roam import GroupError, Roamer
 from ha_rig.runlogs import RunLogs
 from tests import rig_fakes as fakes
-from tests.rig_fakes import FakeHA, profile
+from tests.rig_fakes import FakeHA, planned_cases, profile
 from tests.test_rig_engine import REGISTRY, TOLERANCE, header, outcomes, suite
 
 BUSY_LINE = json.dumps(
@@ -189,7 +189,7 @@ def test_a_case_not_run_is_never_saved_and_leaves_the_suite_incomplete(tmp_path)
     progress.track(SUITE, "fp")
     progress.record(SUITE, result)
     assert not (progress.entry(SUITE) or {}).get("cases")
-    planned = [case.id for case in engine.cases(SUITE, profile(switch_plug="switch.plug"), None, {"shelly"})]
+    planned = [case.id for case in planned_cases(SUITE, profile(switch_plug="switch.plug"), None, {"shelly"})]
     assert planned
     parts = [engine.SuiteResult(SUITE, [CaseResult(i, "switch_plug", "switch", Outcome.PASS) for i in planned], False)]
     parts[0].cases[0] = result

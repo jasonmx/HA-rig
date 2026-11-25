@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from ha_rig import engine, progress
-from ha_rig.engine import CaseResult, Outcome, Suite, SuiteResult, cases, load_step_file, run
+from ha_rig.engine import CaseResult, Outcome, Suite, SuiteResult, load_step_file, run
 from ha_rig.profile import Profile, RigEntity
-from tests.rig_fakes import FakeHA, Roster
+from tests.rig_fakes import FakeHA, Roster, planned_cases
 
 PLUG = "switch.plug"
 BASE = Roster({"shelly": {"turn_on_for", "get_attributes"}}, classes=frozenset({"shelly"}))
@@ -75,7 +75,7 @@ def declared(name: str | None = "Switch") -> Profile:
 def planned(tmp_path, text: str = TEXT, inv: Profile | None = None, registry=None) -> dict[str, tuple]:
     steps = suite(tmp_path, text)
     registry = registry or Registry()
-    found = cases(steps, inv or declared(), None, engine.adapters_for(steps, registry), registry)
+    found = planned_cases(steps, inv or declared(), None, engine.adapters_for(steps, registry), registry)
     return {case.id: (case.skip, case.inapplicable) for case in found}
 
 
@@ -104,6 +104,7 @@ def test_the_suites_own_action_counts(tmp_path):
         "{call: {action: get_attributes}, only: [zha]}",  # never runs on Shelly
         "{call: {action: get_attributes}, except_classes: {shelly: [Swi]}}",  # left out on the declared class
         "call: {action: get_attributes, target: light_color}",  # another role's target, not the case's own
+        "{call: {action: get_attributes}, classes: {zha: [Swi]}}",  # a classes selector naming another integration
     ],
 )
 def test_a_call_that_wont_run_on_the_target_is_not_judged(tmp_path, call):
@@ -205,3 +206,46 @@ def test_a_profile_reads_an_entitys_class(tmp_path):
         "shelly:\n  - {entity_id: switch.plug, roles: [switch_plug], class: Switch}\n"
     )
     assert Profile.load(path).declared_class("shelly", PLUG) == "Switch"
+
+
+def row(case_id: str, name: str, model: str) -> dict:
+    """A record's passing row of the case, on one device of class `name`."""
+    device = {"model": model, "manufacturer": "Maker", "firmware": None, "class": name}
+    return {"id": case_id, "domain": "switch", "role": "switch_plug", "result": "pass", "devices": [device]}
+
+
+SKIPPED = CaseResult(
+    "reads[switch_plug]",
+    "switch_plug",
+    "switch",
+    Outcome.SKIPPED,
+    "get_attributes is not built on Switch",
+    inapplicable=True,
+    declared=(PLUG, "Switch"),
+)
+
+
+def test_a_carried_row_on_the_class_now_not_built_is_dropped_and_another_class_stays():
+    other, same = row("reads[switch_plug]", "hue", "LCA001"), row("reads[switch_plug]", "Switch", "S3")
+    kept, dropped = engine.unbuilt_rows([other, same, row("plain[switch_plug]", "Switch", "S3")], [SKIPPED])
+    assert [(r["id"], r["devices"][0]["class"]) for r in kept] == [
+        ("reads[switch_plug]", "hue"),
+        ("plain[switch_plug]", "Switch"),
+    ]
+    assert dropped == [("reads[switch_plug]", "Switch")]
+
+
+def test_a_run_says_which_row_it_dropped_and_carries_the_other_class(tmp_path):
+    rows = [row("reads[switch_plug]", "hue", "LCA001"), row("reads[switch_plug]", "Switch", "S3")]
+    path = tmp_path / "turn_on_for.json"
+    path.write_text(json.dumps({"format": engine.CALLS_FORMAT, "calls": "b" * 40, "tests": rows}))
+    passed = CaseResult("plain[switch_plug]", "switch_plug", "switch", Outcome.PASS, declared=(PLUG, "Switch"))
+    said: list[str] = []
+    old, carried, why = engine._prior(
+        SuiteResult(suite(tmp_path), [passed, SKIPPED], True), path, object(), "b" * 40, said.append
+    )
+    assert why is None and carried == ["reads[switch_plug]"]
+    assert [r["devices"][0]["class"] for r in old if r["id"] == "reads[switch_plug]"] == ["hue"]
+    assert (
+        "shelly / turn_on_for: reads[switch_plug]: passed on Switch in the record, now not built: row dropped" in said
+    )

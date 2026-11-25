@@ -29,6 +29,7 @@ from ha_rig.facts import FactsFile
 from ha_rig.profile import Profile, RigEntity, normalize_ieee
 from ha_rig.schema import InvalidRecord, RecordSchema
 from ha_rig.target import SCHEMA, deviceside_repo
+from tests.rig_fakes import planned_cases
 
 from .rig_fakes import FakeHA, Roster, profile
 from .test_rig_engine import TOLERANCE, outcomes, suite, under
@@ -1108,7 +1109,7 @@ def test_a_resume_for_json_records_reruns_a_case_saved_with_no_devices(tmp_path)
     path = tmp_path / "steps.yaml"
     path.write_text(FACT.replace("    firmware_fact: true\n", ""))
     steps = engine.Suite(load_step_file(path), "shelly")
-    [case] = engine.cases(steps, profile(switch_plug="switch.plug"))
+    [case] = planned_cases(steps, profile(switch_plug="switch.plug"))
     blind = CaseResult(case.id, "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
     assert progress.holds(case, blind, unattended=False)  # markdown records name no case's devices
     assert not progress.holds(case, blind, unattended=False, devices=True)

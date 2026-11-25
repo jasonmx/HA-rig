@@ -952,13 +952,13 @@ def check_options(step_files: Iterable[StepFile], registry: Any) -> None:
 def cases(
     suite: Suite,
     profile: Profile,
-    keyword: str | None = None,
-    adapters: frozenset[str] | None = None,
-    registry: Any = None,
+    keyword: str | None,
+    adapters: frozenset[str] | None,
+    registry: Any,
 ) -> list[Case]:
     """The suite's cases in file order, a test's automated case before its observed one; `keyword` keeps only case
     ids containing it. With `adapters` (from adapters_for), a test calling another action without one is skipped, and
-    so is a fact case the suite didn't opt in to (`opt_out`). With `registry`, so is a case on a target whose
+    so is a fact case the suite didn't opt in to (`opt_out`), and, from `registry`, a case on a target whose
     declared class one of its calls isn't built on (unbuilt)."""
     result = []
     for test in suite.file.tests:
@@ -982,7 +982,7 @@ def cases(
 
 def _planned(case: Case, profile: Profile, registry: Any) -> Case:
     """A case with its entities, or skipped for why it can't run here: a role the profile lacks, a light outside the
-    group, a call not built on the target's declared class (with `registry`; unbuilt), or a device offline."""
+    group, a call not built on the target's declared class (unbuilt), or a device offline."""
     suite, test, role, index = case.suite, case.test, case.role, case.index
     entities = case_entities(test, role, index, profile, suite.integration)
     if missing := [name for name, entity_id in entities.items() if entity_id is None]:
@@ -997,7 +997,7 @@ def _planned(case: Case, profile: Profile, registry: Any) -> Case:
         return replace(case, entities=entities, members=members, skip=why, inapplicable=True)
     declared = profile.declared_class(suite.integration, entities[role])
     case = replace(case, entities=entities, members=members, declared=declared)
-    if registry is not None and (why := unbuilt(case, registry)):
+    if why := unbuilt(case, registry):
         return replace(case, skip=why, inapplicable=True)
     if why := unreachable(case, profile):
         return replace(case, skip=why, unreachable=True)
@@ -1037,9 +1037,12 @@ def unbuilt(case: Case, registry: Any) -> str | None:
 
 def _selects(step: Step, integration: str, name: str) -> bool:
     """Whether a step's class selector lets it run on a target of class `name`, as Run.skips_class decides it once the
-    class is known: a selector that doesn't name the integration lets every class through."""
-    if (selector := step.class_selector) is None or integration not in selector:
+    class is known: one that doesn't name the integration is inert there, `classes` leaving the step out and
+    `except_classes` letting it run."""
+    if (selector := step.class_selector) is None:
         return True
+    if integration not in selector:
+        return step.classes is None
     matches = any(name.startswith(prefix) for prefix in selector[integration])
     return matches if step.classes is not None else not matches
 
@@ -3245,6 +3248,25 @@ def row_devices(row: dict) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((d.get("model") or "", d.get("manufacturer") or "") for d in row.get("devices") or ()))
 
 
+def unbuilt_rows(rows: list[dict], cases: Iterable[CaseResult]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """`rows` less the passing rows of each case this run skips as not built on its declared class (unbuilt) on a
+    device of that class, and the (case, class) of each dropped: the code now refuses a call the row shows passing, so
+    the record mustn't carry it. Rows on other classes (a Hue bulb's) stay, to be carried (merge_rows)."""
+    refused = {case.id: case.declared[1] for case in cases if case.outcome is Outcome.SKIPPED and case.declared}
+    kept, dropped = [], []
+    for row in rows:
+        name = refused.get(row["id"])
+        if (
+            name is not None
+            and row.get("result") == "pass"
+            and any(isinstance(device, dict) and device.get("class") == name for device in row.get("devices") or ())
+        ):
+            dropped.append((row["id"], name))
+        else:
+            kept.append(row)
+    return kept, dropped
+
+
 def merge_rows(tests: list[dict], old: list[dict]) -> list[dict]:
     """`tests`, a run's rows in its suite's order, merged with `old`, the existing record's (prior). A row is its case
     ID and its devices (row_devices). This run's row of a case replaces the old one on the same devices, in its place,
@@ -3442,6 +3464,13 @@ def _prior(
         narrowed = narrows(suite_result.cases, Record.read(path))
         return [], narrowed, "the record isn't JSON format 3" if narrowed else None
     rows, why = prior(path, blob)
+    rows, dropped = unbuilt_rows(rows, suite_result.cases)
+    if dropped and why is None:
+        for case_id, name in dropped:
+            out(
+                f"{suite.integration} / {suite.name}: {case_id}: "
+                f"passed on {name} in the record, now not built: row dropped"
+            )
     merged = merge_rows([_test_json(suite, case) for case in suite_result.cases], rows)
     carried = sorted({row["id"] for row in merged if any(row is was for was in rows)})
     if carried and why is None:
