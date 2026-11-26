@@ -20,7 +20,7 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -944,6 +944,9 @@ class Case:
     # The DeviceSide class the profile declares for its own target (`class:`): a call it makes that DeviceSide's scope
     # doesn't serve on it skips the case as not applying (unbuilt), and a response naming another class fails it.
     declared: str | None = None
+    # The role whose entity Case.declared is the class of, when not its own: an ha_scene case's light held on, whose
+    # class the ridden action isn't built on (unbuilt_light), on the case's skip.
+    declared_role: str | None = None
 
     @property
     def id(self) -> str:
@@ -1017,16 +1020,40 @@ def case_family(case_id_: str) -> tuple[str, str, bool]:
     return test, rest.removesuffix("]").partition("-")[0], observed
 
 
+# The domain and HA integration of the ha_scene role's entity, a scene HA's own integration holds (scene.create): a
+# Ride naming them routes a call on it through the ridden action on every integration (routes).
+HA_SCENE_HOST = ("scene", "homeassistant")
+
+
+def ride(registry: Any, action: str) -> Any:
+    """deviceside's Action.rides for `action`, or None: a Ride naming the action whose adapters serve the targets it
+    routes itself, and those targets' domain and HA integration (set_scene rides set_attributes on scenes of
+    homeassistant). Read with getattr, as a checkout from before Ride has none."""
+    return getattr(registry.actions.get(action), "rides", None)
+
+
 def ridden(registry: Any, action: str) -> str | None:
-    """The action `action` rides, or None: deviceside's Action.rides, a Ride whose `action` is the one whose adapters
-    serve the targets it routes itself (set_scene rides set_attributes). Read with getattr, as a checkout from before
-    Ride has none."""
-    return getattr(getattr(registry.actions.get(action), "rides", None), "action", None)
+    """The action `action` rides (ride), or None."""
+    return getattr(ride(registry, action), "action", None)
 
 
-def serves(registry: Any, action: str, integration: str) -> str | None:
-    """The action whose adapter serves `action` on `integration`: its own, else, for an action that rides another
-    (ridden), the ridden action, whose adapter stands in as DeviceSide's route writes through it; None for neither."""
+def routes(registry: Any, action: str, role: str | None) -> str | None:
+    """The action DeviceSide routes `action`'s call on a target of `role` through, on every integration, or None: the
+    ridden one for the ha_scene role, when the Ride names its domain and integration (HA_SCENE_HOST). Any other target
+    (Hue's bridge scene, the scene role) is the integration's own adapter's."""
+    found = ride(registry, action)
+    if role == HA_SCENE and found is not None and (found.domain, found.integration) == HA_SCENE_HOST:
+        return found.action
+    return None
+
+
+def serves(registry: Any, action: str, integration: str, role: str | None = None) -> str | None:
+    """The action whose adapter serves `action`'s call on `integration`: on a target of `role` DeviceSide routes, the
+    ridden action (routes), whatever adapter of its own the integration has; else its own, else, for an action that
+    rides another (ridden), the ridden action, whose adapter stands in as DeviceSide's route writes through it; None
+    for neither. With no `role`, which adapter serves the suite at all (applies)."""
+    if (routed := routes(registry, action, role)) is not None:
+        return routed if registry.adapter(routed, integration) is not None else None
     if registry.adapter(action, integration) is not None:
         return action
     if (other := ridden(registry, action)) is not None and registry.adapter(other, integration) is not None:
@@ -1034,10 +1061,24 @@ def serves(registry: Any, action: str, integration: str) -> str | None:
     return None
 
 
-def serving(registry: Any, action: str, integration: str) -> Any:
-    """The adapter that serves `action` on `integration` (serves), or None."""
-    found = serves(registry, action, integration)
+def serving(registry: Any, action: str, integration: str, role: str | None = None) -> Any:
+    """The adapter that serves `action`'s call on `integration`, on a target of `role` (serves), or None."""
+    found = serves(registry, action, integration, role)
     return None if found is None else registry.adapter(found, integration)
+
+
+def suite_options(suite: Suite, registry: Any) -> frozenset[str]:
+    """The DeviceSide options of each adapter serving the suite's own action on its cases' targets (serving, by the
+    target's role), which a run pins as the file sets them: two adapters' for a riding action whose tests target both a
+    scene DeviceSide routes and another (Hue's set_scene, on its ha_scene and scene cases)."""
+    roles: set[str | None] = set()
+    for test in suite.file.tests:
+        for step in (*test.setup, *test.steps):
+            args = step.args if isinstance(step.args, dict) else {}
+            if step.kind == "call" and (args.get("action") or suite.action) == suite.action:
+                roles |= {args["target"]} if "target" in args else set(test.roles)
+    adapters = [serving(registry, suite.action, suite.integration, role) for role in roles or {None}]
+    return frozenset(option for adapter in adapters if adapter is not None for option in adapter.scope.options)
 
 
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
@@ -1119,6 +1160,9 @@ def _planned(case: Case, profile: Profile, registry: Any) -> Case:
     case = replace(case, entities=entities, members=members, declared=declared)
     if why := unbuilt(case, registry):
         return replace(case, skip=why, inapplicable=True)
+    if found := unbuilt_light(case, registry, profile):
+        why, light, name = found
+        return replace(case, skip=why, inapplicable=True, declared=name, declared_role=light)
     if why := unreachable(case, profile):
         return replace(case, skip=why, unreachable=True)
     return case
@@ -1132,28 +1176,78 @@ def unbuilt(case: Case, registry: Any) -> str | None:
     """Why the case doesn't apply to its target's declared class (Case.declared), or None: a call on its own target
     that would run there (its `only` and class selector, judged on that class) names an action whose scope, in the
     checkout under test, refuses the class as not built or no known method (AdapterScope.refusal, as DeviceSide's
-    dispatcher refuses it). For an action the integration has no adapter of, the scope is that of the action it rides
-    (serves). Decided before the case runs, from the code under test, so a refusal in a case that runs
+    dispatcher refuses it). The scope is that of the action serving the call on the target (serves): for an action that
+    rides another, the ridden one's where the integration has none of its own or DeviceSide routes the target through
+    it. Decided before the case runs, from the code under test, so a refusal in a case that runs
     still fails it. Raises ValueError for a class the integration doesn't name: a typo would skip every case."""
     if (declared := case.declared) is None:
         return None
     integration = case.suite.integration
-    if declared not in (named := getattr(registry.integrations[integration], "classes", None) or {}):
-        raise ValueError(f"the profile's class {declared!r} is not one {integration} names: {sorted(named)}")
+    _check_named(registry, integration, declared)
     domain = case.entities[case.role].partition(".")[0]
+    for step in _own_calls(case):
+        args = step.args if isinstance(step.args, dict) else {}
+        if not _selects(step, integration, declared):
+            continue
+        if (action := serves(registry, args.get("action") or case.suite.action, integration, case.role)) is None:
+            continue  # no adapter at all: cases() skips the test for that
+        if phrase := _refused(registry.adapter(action, integration), declared, domain):
+            return f"{action} {phrase} {declared}"
+    return None
+
+
+def unbuilt_light(case: Case, registry: Any, profile: Profile) -> tuple[str, str, str] | None:
+    """For a case on the ha_scene role: why a light its scene holds on doesn't apply to the class the profile declares
+    for it, with the light's role and class, or None. DeviceSide routes a call on the scene through the action it rides
+    (routes), gating each light held on on that action's scope as unbuilt judges a target; a light held off it turns
+    off through core's light.turn_off, which no class gates. Raises ValueError for a class the integration doesn't
+    name, as unbuilt does."""
+    if case.role != HA_SCENE or (made := case.test.ha_scene) is None:
+        return None
+    integration = case.suite.integration
+    held_on = {
+        role: name
+        for role, light in made.args.items()
+        if light["state"] == "on" and (name := profile.declared_class(integration, case.entities[role])) is not None
+    }
+    if not held_on:
+        return None
+    for name in held_on.values():
+        _check_named(registry, integration, name)
+    for step in _own_calls(case):
+        action = (step.args if isinstance(step.args, dict) else {}).get("action") or case.suite.action
+        if (routed := routes(registry, action, HA_SCENE)) is None:
+            continue
+        if (adapter := registry.adapter(routed, integration)) is None:
+            continue  # no adapter at all: the suite doesn't apply
+        for role, name in held_on.items():
+            if phrase := _refused(adapter, name, "light"):
+                return f"{routed} {phrase} {name} ({role})", role, name
+    return None
+
+
+def _own_calls(case: Case) -> Iterator[Step]:
+    """The case's call steps on its own target that run on its integration (their `only`)."""
+    integration = case.suite.integration
     for step in (*case.test.setup, *case.test.steps):
         args = step.args if isinstance(step.args, dict) else {}
         if step.kind != "call" or args.get("target", case.role) != case.role:
             continue
-        if (step.only is not None and integration not in step.only) or not _selects(step, integration, declared):
-            continue
-        if (action := serves(registry, args.get("action") or case.suite.action, integration)) is None:
-            continue  # no adapter at all: cases() skips the test for that
-        adapter = registry.adapter(action, integration)
-        refused = adapter.scope.refusal([declared], domain=domain, failure_harms=adapter.failure_harms)
-        if refused is not None and (phrase := UNBUILT.get(str(refused[0]))):
-            return f"{action} {phrase} {declared}"
-    return None
+        if step.only is None or integration in step.only:
+            yield step
+
+
+def _check_named(registry: Any, integration: str, name: str) -> None:
+    """Raise ValueError for a profile's class the integration doesn't name: a typo would skip every case."""
+    if name not in (named := getattr(registry.integrations[integration], "classes", None) or {}):
+        raise ValueError(f"the profile's class {name!r} is not one {integration} names: {sorted(named)}")
+
+
+def _refused(adapter: Any, name: str, domain: str) -> str | None:
+    """How the adapter's scope refuses class `name` on `domain` as UNBUILT phrases it, or None for serving it or
+    refusing it for another reason (AdapterScope.refusal, as DeviceSide's dispatcher refuses it)."""
+    refused = adapter.scope.refusal([name], domain=domain, failure_harms=adapter.failure_harms)
+    return UNBUILT.get(str(refused[0])) if refused is not None else None
 
 
 def _selects(step: Step, integration: str, name: str) -> bool:
@@ -1962,6 +2056,7 @@ class _CaseRun:
         self.upcoming: tuple[Step, ...] = ()  # the steps after the one running, in its phase (following)
         self.error: HAError | None = None
         self.last_action = case.suite.action
+        self.last_role = case.role  # the last call's target's role, which picks the adapter serving it (serving)
         self.query = False
         # The loop times the last call was sent and returned, which a sample's readings are timed from.
         self.call_times: tuple[float, float] | None = None
@@ -2472,6 +2567,7 @@ class _CaseRun:
             elif key not in ("action", "target"):
                 data[key] = value
         self.last_action, self.response, self.error, self.sent = action, None, None, data
+        self.last_role = args.get("target", self.case.role)
         # ActionKind is a StrEnum: compared by value so the engine needs no integration import.
         self.query = getattr(getattr(self.registry, "actions", {}).get(action), "kind", None) == "query"
         if self.cue is not None:
@@ -2516,7 +2612,7 @@ class _CaseRun:
 
     def expected(self, name: str, want: Any) -> Any:
         if name == "status" and want == "expected":
-            if (adapter := serving(self.registry, self.last_action, self.integration)) is None:
+            if (adapter := serving(self.registry, self.last_action, self.integration, self.last_role)) is None:
                 raise StepFailure(f"no {self.last_action} adapter on {self.integration} to expect a status from")
             return "confirmed" if adapter.scope.confirmable else "sent"
         if name == "integration" and want == "self":
@@ -2822,8 +2918,8 @@ async def run(
     only = unfinished(done, only)
     planned = _plan(suites, profile, registry, ha, admin, keyword, only, out)
     options = {
-        id(suite): {name: name in suite.file.options for name in adapter.scope.options}
-        for suite, adapter, *_ in planned
+        id(suite): {name: name in suite.file.options for name in suite_options(suite, registry)}
+        for suite, *_ in planned
     }
     planned = by_options(planned, options)
     rig_run = _Run(
@@ -2956,7 +3052,7 @@ def _plan(
             # Another integration's option file, such as Hue's predicted_state: selection drops it silently.
             continue
         client = admin if suite.integration in ADMIN_INTEGRATIONS else ha
-        if client is None or ((adapter.scope.options or suite.file.moves_entry) and admin is None):
+        if client is None or ((suite_options(suite, registry) or suite.file.moves_entry) and admin is None):
             out(f"{suite.integration} / {suite.action}: needs HA_ADMIN_TOKEN, skipped")
             continue
         planned.append((suite, adapter, client, suite_cases))
@@ -3122,7 +3218,11 @@ def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
         unreachable=case.unreachable,
         absent=case.absent,
         inapplicable=case.inapplicable,
-        declared=(case.entities[case.role], case.declared) if case.declared and case.inapplicable else None,
+        declared=(
+            (case.entities[case.declared_role or case.role], case.declared)
+            if case.declared and case.inapplicable
+            else None
+        ),
     )
 
 

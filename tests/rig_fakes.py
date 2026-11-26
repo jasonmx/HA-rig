@@ -48,7 +48,7 @@ class Roster:
 
     Which actions ride another is declared too (`rides`: the riding action's key to the ridden one's), as deviceside's
     Action.rides is new: each action is the real one's class, with a `rides` only for those declared, standing in for
-    deviceside's Ride, of which the rig reads only `action`."""
+    deviceside's Ride on Home Assistant scenes (domain scene, integration homeassistant), set_scene's."""
 
     def __init__(
         self, declared: dict[str, set[str]], classes: frozenset[str] = frozenset(), rides: dict[str, str] | None = None
@@ -63,7 +63,15 @@ class Roster:
             raise ValueError(f"deviceside has no {unknown[0]} action")
         self._declared = declared
         self.actions = {
-            key: type(cls.__name__, (cls,), {"rides": SimpleNamespace(action=rides[key]) if key in rides else None})
+            key: type(
+                cls.__name__,
+                (cls,),
+                {
+                    "rides": SimpleNamespace(action=rides[key], domain="scene", integration="homeassistant")
+                    if key in rides
+                    else None
+                },
+            )
             for key, cls in real.items()
         }
         self.integrations = {

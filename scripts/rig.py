@@ -169,6 +169,7 @@ from ha_rig.engine import (  # noqa: E402
     report_path,
     run,
     serving,
+    suite_options,
     unfinished,
     write_fact,
     write_records,
@@ -1198,10 +1199,7 @@ def reloads(setup: Setup) -> bool:
     """Whether a suite the run can run may reload the entry under every other run: it has entry steps, or its
     adapter has DeviceSide options, whose save does. A plain file pins its adapter's options off, which saves too
     when HA's are on (predicted_state is on by default)."""
-    return any(
-        suite.file.reloads or serving(setup.registry, suite.action, suite.integration).scope.options
-        for suite in runnable(setup)
-    )
+    return any(suite.file.reloads or suite_options(suite, setup.registry) for suite in runnable(setup))
 
 
 def supplies(profile: Profile, integrations: set[str]) -> set[str]:
@@ -1851,8 +1849,8 @@ def check_tokens(env: dict, suites: list[Suite], registry: AdapterRegistry, roam
     with_options = {
         suite.integration
         for suite in suites
-        if (adapter := serving(registry, suite.action, suite.integration)) is not None
-        and (adapter.scope.options or suite.file.moves_entry)
+        if serving(registry, suite.action, suite.integration) is not None
+        and (suite_options(suite, registry) or suite.file.moves_entry)
     }
     if admin_only := sorted(({suite.integration for suite in suites} & ADMIN_INTEGRATIONS) | with_options):
         raise SystemExit(

@@ -3895,17 +3895,26 @@ def test_a_riding_suite_applies_where_the_ridden_adapter_is_and_nowhere_else(tmp
     zha = suite(tmp_path, HA_SCENE_STEPS, "zha")
     assert engine.ridden(RIDING, "set_scene") == "set_attributes"
     assert engine.serves(RIDING, "set_scene", "zha") == "set_attributes"
-    assert engine.serves(RIDING, "set_scene", "hue") == "set_scene"  # its own adapter, where there is one
+    assert engine.serves(RIDING, "set_scene", "hue") == "set_scene"  # the suite: its own adapter, where there is one
     assert engine.serving(RIDING, "set_scene", "zha") is RIDING.adapter("set_attributes", "zha")
     assert engine.applies(zha, RIDING)
     assert not engine.applies(suite(tmp_path, HA_SCENE_STEPS, "shelly"), RIDING)  # no set_attributes there
     assert not engine.applies(zha, NOT_RIDING)
 
 
+CALLS_SET_SCENE = """
+action: get_attributes
+rig_seconds: 5
+tests:
+  - name: t
+    roles: [light_ct]
+    steps:
+      - call: {action: set_scene}
+"""
+
+
 def test_a_call_to_a_riding_action_from_another_suite_counts_the_ridden_adapter(tmp_path):
-    calling = suite(
-        tmp_path, SET_SCENE_ON_A_PLUG.replace("set_scene", "get_attributes").replace("{}", "{action: set_scene}"), "zha"
-    )
+    calling = suite(tmp_path, CALLS_SET_SCENE, "zha")
     assert engine.adapters_for(calling, RIDING) == {"set_scene"}
     assert engine.adapters_for(calling, NOT_RIDING) == frozenset()
 
@@ -3944,29 +3953,111 @@ async def test_a_riding_suite_runs_off_hue_and_its_bridge_scene_skip_leaves_it_r
     assert engine.narrows(ran.cases, None) == []
 
 
-SET_SCENE_ON_A_PLUG = """
-action: set_scene
-rig_seconds: 5
-tests:
-  - name: t
-    roles: [switch_plug]
-    steps:
-      - call: {}
-"""
+def shelly_scene(ct: str | None = None, dimmable: str | None = None) -> Profile:
+    """Shelly's ha_scene lights, each with the class the profile declares for it, if any."""
+    lights = [
+        RigEntity("light.ct", frozenset({"light_ct"}), declared_class=ct),
+        RigEntity("light.dim", frozenset({"light_dimmable"}), declared_class=dimmable),
+    ]
+    return Profile({"shelly": lights}, name="house")
 
 
-@pytest.mark.parametrize(("declared", "skip"), [("Switch", "set_attributes is not built on Switch"), ("RGBCCT", None)])
-def test_a_riding_calls_declared_class_is_judged_on_the_ridden_actions_scope(tmp_path, declared, skip):
-    # Shelly's set_attributes is not built on Switch; it has no set_scene adapter, so set_scene rides set_attributes.
-    registry = Roster(
-        {"shelly": {"set_attributes"}}, classes=frozenset({"shelly"}), rides={"set_scene": "set_attributes"}
+# Shelly has no set_scene adapter, so set_scene rides set_attributes there, which is not built on Switch.
+SHELLY_RIDING = Roster(
+    {"shelly": {"set_attributes"}}, classes=frozenset({"shelly"}), rides={"set_scene": "set_attributes"}
+)
+
+
+@pytest.mark.parametrize(
+    ("ct", "dimmable", "skip"),
+    [
+        ("Switch", None, "set_attributes is not built on Switch (light_ct)"),  # held on: gated on set_attributes
+        (None, "Switch", None),  # held off: core's light.turn_off, which no class gates
+        ("RGBCCT", "RGBCCT", None),
+    ],
+)
+def test_an_ha_scene_case_judges_each_light_it_holds_on_on_the_ridden_scope(tmp_path, ct, dimmable, skip):
+    steps = suite(tmp_path, HA_SCENE_STEPS, "shelly")
+
+    (case,) = engine.cases(
+        steps, shelly_scene(ct, dimmable), None, engine.adapters_for(steps, SHELLY_RIDING), SHELLY_RIDING
     )
-    inv = Profile({"shelly": [RigEntity("switch.plug", frozenset({"switch_plug"}), declared_class=declared)]})
-    steps = suite(tmp_path, SET_SCENE_ON_A_PLUG)
-
-    (case,) = engine.cases(steps, inv, None, engine.adapters_for(steps, registry), registry)
 
     assert (case.skip, case.inapplicable) == (skip, skip is not None)
+    assert (case.declared, case.declared_role) == (("Switch", "light_ct") if skip else (None, None))
+
+
+def test_an_ha_scene_lights_class_the_integration_doesnt_name_fails_the_plan(tmp_path):
+    steps = suite(tmp_path, HA_SCENE_STEPS, "shelly")
+    with pytest.raises(ValueError, match="'Plug' is not one shelly names"):
+        engine.cases(steps, shelly_scene("Plug"), None, engine.adapters_for(steps, SHELLY_RIDING), SHELLY_RIDING)
+
+
+async def test_an_ha_scene_lights_class_skip_names_the_light_and_needs_a_pass_to_confirm_it(tmp_path):
+    ha = scene_lights()
+    result = await run_one(ha, suite(tmp_path, HA_SCENE_STEPS, "shelly"), shelly_scene("Switch"), SHELLY_RIDING)
+
+    (ran,) = result.suites
+    (case,) = ran.cases
+    assert (case.outcome, case.detail) == (Outcome.SKIPPED, "set_attributes is not built on Switch (light_ct)")
+    assert (case.inapplicable, case.declared) == (True, ("light.ct", "Switch"))
+    assert not ran.recordable  # as any declared-class skip: no pass on light.ct named Switch
+    assert not any(call[:2] == ("scene", "create") for call in ha.calls)
+
+
+class Rescoped:
+    """RIDING, with the scopes of some adapters changed (`changes`, by action and integration): what a case reads from
+    its adapter's scope shows which adapter serves it."""
+
+    def __init__(self, changes: dict[tuple[str, str], dict]) -> None:
+        self.changes = changes
+
+    def adapter(self, action: str, integration: str):
+        found = RIDING.adapter(action, integration)
+        if found is None or (change := self.changes.get((action, integration))) is None:
+            return found
+        return SimpleNamespace(scope=dataclasses.replace(found.scope, **change), failure_harms=found.failure_harms)
+
+    def __getattr__(self, name: str):
+        return getattr(RIDING, name)
+
+
+def test_an_ha_scene_target_is_served_by_the_ridden_action_even_where_the_integration_has_its_own():
+    assert engine.serves(RIDING, "set_scene", "hue", "ha_scene") == "set_attributes"
+    assert engine.serves(RIDING, "set_scene", "hue", "scene") == "set_scene"  # Hue's bridge scene: its own adapter
+    assert engine.serves(RIDING, "set_scene", "zha", "scene") == "set_attributes"  # none of its own: the ride
+    assert engine.serves(NOT_RIDING, "set_scene", "zha", "ha_scene") is None
+
+
+EXPECTED_STATUS = HA_SCENE_STEPS.replace(
+    "      - expect_state: {target: light_ct, state: on}\n",
+    "      - expect_response: {status: expected}\n      - expect_state: {target: light_ct, state: on}\n",
+)
+
+
+@pytest.mark.parametrize(("confirmable", "outcome"), [(True, Outcome.PASS), (False, Outcome.FAIL)])
+async def test_an_ha_scene_cases_expected_status_is_the_ridden_adapters_on_hue(tmp_path, confirmable, outcome):
+    # Hue's own set_scene adapter is not confirmable; its set_attributes, here, is only where `confirmable`.
+    registry = Rescoped({("set_attributes", "hue"): {"confirmable": confirmable}})
+
+    def respond(ha: FakeHA, action: str, data: dict) -> dict:
+        if action != "set_scene":
+            return {}
+        ha.set("light.ct", "on")
+        return {data["entity_id"]: {"status": "confirmed", "integration": "hue"}}
+
+    result = await run_one(scene_lights(respond), suite(tmp_path, EXPECTED_STATUS, "hue"), scene_profile(), registry)
+
+    assert outcomes(result)["applies[ha_scene]"][0] is outcome
+
+
+def test_a_suites_options_are_those_of_each_adapter_serving_its_cases(tmp_path):
+    registry = Rescoped(
+        {("set_attributes", "hue"): {"options": frozenset({"a"})}, ("set_scene", "hue"): {"options": frozenset({"b"})}}
+    )
+    assert engine.suite_options(suite(tmp_path, RIDING_STEPS, "hue"), registry) == {"a", "b"}
+    assert engine.suite_options(suite(tmp_path, HA_SCENE_STEPS, "hue"), registry) == {"a"}
+    assert engine.suite_options(suite(tmp_path, option_file(), "hue"), registry) == frozenset()
 
 
 def test_a_roster_refuses_a_ride_on_an_action_deviceside_lacks():
