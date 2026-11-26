@@ -1499,6 +1499,10 @@ class CaseResult:
     # On a pass of an ha_scene case: each (light, class) its responses named in the scene's `member_capabilities`
     # (entity_classes), the lights it held on, which confirm a declared-class skip as `declared` does.
     confirms: tuple[tuple[str, str], ...] = ()
+    # The action whose adapter served its call, when not the suite's own (serves, by its role): an ha_scene case's
+    # ridden action, set_attributes. A record's test names it (`via`), so its pass credits that adapter, not the
+    # record's own action's (deviceside's check_release.credited, plan Decision 4). None for a case that didn't run.
+    via: str | None = None
     # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()
     # The classes its target reached (reached_classes), for an integration that names them; empty for none.
@@ -2109,8 +2113,15 @@ class _CaseRun:
     async def run(self) -> CaseResult:
         case = self.case
         domain = case.entities[case.role].partition(".")[0]
+        served = serves(self.registry, case.suite.action, self.integration, case.role)
         result = CaseResult(
-            case.id, case.role, domain, Outcome.PASS, entity_ids=tuple(case.entities.values()), twin=case.twin
+            case.id,
+            case.role,
+            domain,
+            Outcome.PASS,
+            entity_ids=tuple(case.entities.values()),
+            twin=case.twin,
+            via=served if served != case.suite.action else None,
         )
         try:
             if case.observed:
@@ -3297,7 +3308,8 @@ def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
     columns = ["Test", "Target", *(["Capability"] if classes else []), "Result"]
     lines = [f"| {' | '.join(columns)} |", "|" + "---|" * len(columns)]
     for case in suite_result.cases:
-        target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
+        via = f", via {case.via}" if case.via and case.outcome is not Outcome.SKIPPED else ""
+        target = f"`{case.domain}` ({case.role}{via})" if case.domain else f"{case.role}: none in the profile"
         if not case.domain and not case.absent:  # skipped before planning entities: no adapter, or not opted in
             target = case.role
         cells = [f"`{case.id}`", target]
@@ -3720,6 +3732,8 @@ def _test_json(suite: Suite, case: CaseResult) -> dict:
     test: dict[str, Any] = {"id": case.id, "domain": case.domain, "role": case.role, "result": str(case.outcome)}
     if case.role in GROUP_ROLES or case.role in SCENE_ROLES:  # a scene's test, as a group's, lists its lights
         test["group"] = True
+    if case.via:  # served by the action it rides (CaseResult.via): its pass credits that adapter, not the record's
+        test["via"] = case.via
     test["devices"] = [device.as_json() for device in case.reached]
     return test
 

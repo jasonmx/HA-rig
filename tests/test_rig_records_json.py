@@ -43,14 +43,26 @@ PAIRED_DOCUMENT = json.loads((PAIRED / SCHEMA).read_text())
 SCHEMA_OF = RecordSchema.load(PAIRED)
 
 
-def schema_listing(formats: list[int]) -> RecordSchema:
-    """The paired schema with its record's formats narrowed to `formats`: an older deviceside's takes [1, 2]."""
-    document = json.loads(json.dumps(PAIRED_DOCUMENT))
+def with_via(document: dict) -> dict:
+    """The schema `document` with a format 2 and 3 test's `via` (plan Decision 4): the action whose adapter served its
+    call when not the record's own, as deviceside's step 5 adds it. A no-op once the paired schema has it."""
+    document = json.loads(json.dumps(document))
+    document["$defs"]["test_v2"]["properties"].setdefault("via", {"$ref": "#/$defs/action"})
+    return document
+
+
+def schema_listing(formats: list[int], via: bool = False) -> RecordSchema:
+    """The paired schema with its record's formats narrowed to `formats`: an older deviceside's takes [1, 2]. With
+    `via`, it takes a test's `via` (with_via)."""
+    document = json.loads(json.dumps(with_via(PAIRED_DOCUMENT) if via else PAIRED_DOCUMENT))
     document["$defs"]["record"]["properties"]["format"]["enum"] = formats
     return RecordSchema.parse(PAIRED / SCHEMA, json.dumps(document))
 
 
 SCHEMA_2 = schema_listing([1, 2])  # deviceside from before format 3
+SCHEMA_2_VIA = schema_listing([1, 2], via=True)
+VIA_CONTRACT = Draft202012Validator(with_via(PAIRED_DOCUMENT))
+PAIRED_HAS_VIA = "via" in PAIRED_DOCUMENT["$defs"]["test_v2"]["properties"]
 needs_format_3 = pytest.mark.skipif(not SCHEMA_OF.binds_calls, reason="the paired deviceside schema has no format 3")
 BLOB = "0123456789abcdef0123456789abcdef01234567"  # a call transcript's git blob id, as git rev-parse prints it
 # Z2M and Shelly name classes, as on deviceside's device-classes branches; ZHA and Hue don't yet.
@@ -260,11 +272,12 @@ async def write(
     return written
 
 
-def held(path: Path) -> dict:
-    """The file at `path` as deviceside reads it: it holds to deviceside's schema, as indent 2 with a final newline."""
+def held(path: Path, contract: Draft202012Validator = CONTRACT) -> dict:
+    """The file at `path` as deviceside reads it: it holds to deviceside's schema (`contract`), as indent 2 with a
+    final newline."""
     text = path.read_text()
     data = json.loads(text)
-    assert list(CONTRACT.iter_errors(data)) == []
+    assert list(contract.iter_errors(data)) == []
     assert text == json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     return data
 
@@ -505,10 +518,9 @@ Z2M_RIDING = Roster(
 Z2M_HA_SCENE = "scene.ds_rig_ha_zigbee2mqtt"
 
 
-async def test_an_ha_scenes_test_lists_its_lights_each_with_the_class_its_entry_named(tmp_path):
-    """DeviceSide's entry for an HA scene: `member_capabilities` names each light it wrote through set_attributes (the
-    one held on); the light held off, which core's light.turn_off took, is in no map, so it is listed with no class,
-    as a native group's member the map leaves out."""
+async def ha_scene_run(tmp_path) -> RunResult:
+    """A Z2M ha_scene case passing, its scene's entry as DeviceSide's route folds it: `member_capabilities` names the
+    light it wrote through set_attributes (light_ct, held on), never the one core's light.turn_off took."""
 
     def respond(ha, action, data):
         if action != "set_scene":
@@ -523,18 +535,26 @@ async def test_an_ha_scenes_test_lists_its_lights_each_with_the_class_its_entry_
     result = await run(
         [steps], inv, Z2M_RIDING, ha, admin=ha, tolerance=TOLERANCE, out=lambda _: None, json_records=True
     )
-
     assert outcomes(result) == {"applies[ha_scene]": (Outcome.PASS, "")}
+    return result
+
+
+async def test_an_ha_scenes_test_lists_its_lights_each_with_the_class_its_entry_named(tmp_path):
+    """The held-off light is in no map, so it is listed with no class, as a native group's member the map leaves out.
+    The test names the ridden action that served its call (`via`), so its pass credits set_attributes' adapter."""
+    result = await ha_scene_run(tmp_path)
     (case,) = result.suites[0].cases
     assert case.confirms == (("light.z2m_a", "hue"),)  # the held-on light's class, for a declared skip on it
-    [path] = await write(result, tmp_path / "records", registry=Z2M_RIDING)
-    [test] = held(path)["tests"]
+    assert case.via == "set_attributes"
+    [path] = await write(result, tmp_path / "records", registry=Z2M_RIDING, schema=SCHEMA_2_VIA)
+    [test] = held(path, VIA_CONTRACT)["tests"]
     assert test == {
         "id": "applies[ha_scene]",
         "domain": "scene",
         "role": "ha_scene",
         "result": "pass",
         "group": True,
+        "via": "set_attributes",
         # The scene's lights, never the scene, which has no device.
         "devices": [
             {"model": "LWA012", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.116.3", "class": "hue"},
@@ -542,6 +562,16 @@ async def test_an_ha_scenes_test_lists_its_lights_each_with_the_class_its_entry_
         ],
     }
     assert Z2M_HA_SCENE not in ENTITIES
+
+
+@pytest.mark.skipif(PAIRED_HAS_VIA, reason="the paired deviceside schema takes a test's via")
+async def test_a_schema_without_via_refuses_an_ha_scene_record_rather_than_drop_the_field(tmp_path):
+    """Before deviceside's records take `via`, the rig writes no record whose passes would credit the wrong adapter."""
+    printed: list[str] = []
+    result = await ha_scene_run(tmp_path)
+    assert await write(result, tmp_path / "records", printed, registry=Z2M_RIDING) == []
+    assert "via" in printed[0]
+    assert not (tmp_path / "records" / "zigbee2mqtt" / "set_scene.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -1148,11 +1178,12 @@ def test_the_ledger_saves_what_each_case_reached(tmp_path):
     case = CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
     case.reached = (Reached("S3SW-001X8EU", None, "Switch"),)
     case.confirms = (("light.a", "CCT"), ("light.b", "RGBCCT"))
+    case.via = "set_attributes"
     saved.record(steps, case)
     again = progress.Progress.load(tmp_path, "lab")
     again.track(steps, "c1")
     loaded = again.saved(steps)["wins[switch_plug]"]
-    assert (loaded.reached, loaded.confirms) == (case.reached, case.confirms)
+    assert (loaded.reached, loaded.confirms, loaded.via) == (case.reached, case.confirms, case.via)
 
 
 def test_a_resume_for_json_records_reruns_a_case_saved_with_no_devices(tmp_path):

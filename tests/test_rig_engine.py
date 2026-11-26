@@ -3874,6 +3874,7 @@ RIDING = Roster(
     rides={"set_scene": "set_attributes"},
 )
 NOT_RIDING = Roster({"zha": {"get_attributes", "set_attributes"}})  # deviceside before SetScene rode set_attributes
+NOT_RIDING_HUE = Roster({"hue": {"set_scene", "get_attributes", "set_attributes"}})  # Hue's own adapter serves all
 ZHA_SCENE = "scene.ds_rig_ha_zha"
 # HA_SCENE_STEPS, beside a test of the Hue bridge's own scene, which no profile off Hue lists.
 RIDING_STEPS = (
@@ -3949,6 +3950,10 @@ async def test_a_riding_suite_runs_off_hue_and_its_bridge_scene_skip_leaves_it_r
     }
     assert ("deviceside", "set_scene", {"entity_id": ZHA_SCENE}) in ha.calls
     (ran,) = result.suites
+    assert [(case.id, case.via) for case in ran.cases] == [
+        ("applies[ha_scene]", "set_attributes"),  # served by the ridden action's adapter
+        ("bridge_scene[scene]", None),  # skipped: no call served
+    ]
     assert ran.recordable
     assert engine.narrows(ran.cases, None) == []
 
@@ -4030,6 +4035,26 @@ async def test_an_ha_scene_pass_names_each_held_on_lights_class_from_its_entry(t
     (ran,) = result.suites
     (case,) = ran.cases
     assert (case.outcome, case.confirms, case.declared) == (Outcome.PASS, confirms, None)
+
+
+@pytest.mark.parametrize(
+    ("role", "via", "cell"),
+    [
+        ("ha_scene", "set_attributes", "`scene` (ha_scene, via set_attributes)"),
+        ("scene", None, "`scene` (scene)"),  # Hue's bridge scene: its own adapter
+    ],
+)
+def test_a_test_served_by_a_ridden_action_names_it_in_the_record(tmp_path, role, via, cell):
+    steps = suite(tmp_path, RIDING_STEPS, "hue")
+    case = CaseResult(f"applies[{role}]", role, "scene", Outcome.PASS, via=via)
+    assert engine._test_json(steps, case).get("via") == via
+    assert engine.table(SuiteResult(steps, [case], True))[2] == f"| `applies[{role}]` | {cell} | pass |"
+
+
+async def test_a_case_served_by_its_own_action_names_no_via(tmp_path):
+    ha = scene_lights(scene_applies)
+    result = await run_one(ha, suite(tmp_path, HA_SCENE_STEPS, "hue"), scene_profile(), NOT_RIDING_HUE)
+    assert [(case.outcome, case.via) for case in result.suites[0].cases] == [(Outcome.PASS, None)]
 
 
 def scene_result(outcome: Outcome, **flags) -> CaseResult:
