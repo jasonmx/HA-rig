@@ -33,8 +33,12 @@ ENTITY_KEYS = frozenset({"entity_id", "roles", "powered_by", "members", "pre_aut
 # plugs, one per maker string). Every other role tests its first entity: a roaming bulb is listed beside a network's
 # fixed lights (Profile.add_roaming), so light roles often hold several, and only the first is meant.
 EACH_ENTITY = frozenset({"switch_plug"})
+# A Home Assistant scene a case's ha_scene setup step makes from its own lights (scene.create), under a fixed ID per
+# integration (ha_scene_entity): no profile lists it.
+HA_SCENE = "ha_scene"
 ROLES = frozenset(
-    {"light_onoff", "light_wrapped", "light_dimmable", "light_ct", "light_color", "switch_plug", "scene"} | GROUP_ROLES
+    {"light_onoff", "light_wrapped", "light_dimmable", "light_ct", "light_color", "switch_plug", "scene", HA_SCENE}
+    | GROUP_ROLES
 )
 
 # Seconds either side of a duration within which a device may flip. Zigbee and Matter hop through a mesh.
@@ -138,6 +142,17 @@ class RoamGroup:
 def rig_name(entity_id: str) -> str:
     """The native name of a rig-made group or scene with this fixed entity ID: `ds-rig-` and its object ID."""
     return RIG_PREFIX + entity_id.partition(".")[2].replace("_", "-")
+
+
+def ha_scene_id(integration: str) -> str:
+    """The `scene_id` scene.create makes the integration's ha_scene under: one per integration, so lanes never share
+    one."""
+    return f"ds_rig_ha_{integration}"
+
+
+def ha_scene_entity(integration: str) -> str:
+    """The entity ID of the integration's ha_scene (ha_scene_id)."""
+    return f"scene.{ha_scene_id(integration)}"
 
 
 @dataclass(slots=True)
@@ -331,6 +346,8 @@ def roam_bulb(path: Path, item: object) -> RoamBulb:
         raise ValueError(f"{path.name}: {entity_id} has unknown roles {sorted(unknown)}")
     if roles & GROUP_ROLES:
         raise ValueError(f"{path.name}: roam bulb {entity_id} is a bulb, not a group")
+    if HA_SCENE in roles:
+        raise ValueError(f"{path.name}: {entity_id} has the {HA_SCENE} role, which is made by the {HA_SCENE} step")
     if not isinstance(options := item.get("z2m_options") or {}, dict):
         raise ValueError(f"{path.name}: roam bulb {entity_id} z2m_options must be a mapping")
     if home not in HOMES:
@@ -413,6 +430,8 @@ def fixed_entity(path: Path, integration: str, item: object) -> RigEntity:
     roles = frozenset(item.get("roles", ()))
     if unknown := roles - ROLES:
         raise ValueError(f"{path.name}: {entity_id} has unknown roles {sorted(unknown)}")
+    if HA_SCENE in roles:
+        raise ValueError(f"{path.name}: {entity_id} has the {HA_SCENE} role, which is made by the {HA_SCENE} step")
     members = item.get("members", [])
     if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
         raise ValueError(f"{path.name}: {entity_id} members must be a list of entity IDs")
