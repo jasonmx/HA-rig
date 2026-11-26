@@ -28,6 +28,11 @@ has an adapter (`engine.applies`, `adapters_for`), so a `set_scene` suite never 
    carries the action that served its call (`"via": "set_attributes"`), and deviceside's `check_release.credited`
    (step 5 PR) credits a record's adapter only from tests that went through it. Hue's `set_scene.json` keeps both
    kinds of test (Decision 2) without its `[ha_scene]` passes counting toward `HueSetScene`'s class coverage.
+5. **A light the scene holds off is listed with class `null`** (Jason, 2026-11-26, from step 3's review): DeviceSide
+   turns it off through core's `light.turn_off`, so no response names its class, and a `null` class credits nothing.
+   On an integration that names classes, gen_compat therefore credits no `[ha_scene]` pass to a card; the
+   `set_scene` cell's proof is `set_attributes`' records anyway (gen_compat's `lent`). Step 5 adds a line saying so
+   to deviceside's `docs/evidence.md`.
 
 ## Design
 
