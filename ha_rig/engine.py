@@ -20,7 +20,7 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -37,7 +37,19 @@ from .facts import FILE as FACTS_FILE
 from .facts import JSON_FILE as JSON_FACTS_FILE
 from .facts import OBSERVED as OBSERVED_KIND
 from .journal import Journal
-from .profile import EACH_ENTITY, ENTRY_RELOADS, GROUP_ROLES, ROLES, SETTLE_S, TOLERANCE_S, Profile, normalize_ieee
+from .profile import (
+    EACH_ENTITY,
+    ENTRY_RELOADS,
+    GROUP_ROLES,
+    HA_SCENE,
+    ROLES,
+    SETTLE_S,
+    TOLERANCE_S,
+    Profile,
+    ha_scene_entity,
+    ha_scene_id,
+    normalize_ieee,
+)
 from .schema import CALLS_FORMAT, FORMAT, RecordSchema
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,6 +109,13 @@ _RAMPS = frozenset(
 )
 _PREDICTED = _RAMPS | {"stop"}
 SWEEP_TIME_S = 5.0
+
+# How long an ha_scene step waits for the scene scene.create made to show in HA.
+HA_SCENE_WAIT_S = 10.0
+# The roles whose target is a scene, an entity with no device: a test on one lists the lights behind it, as a group's.
+SCENE_ROLES = frozenset({"scene", HA_SCENE})
+# What an ha_scene step's light takes, in the rig's units: state, and for one on, its brightness and color temperature.
+HA_SCENE_KEYS = ("state", "brightness_pct", "color_temp_kelvin")
 
 # The statuses of a call that wrote to the device; `unchanged` and `rejected` sent nothing.
 _WRITES = frozenset({"confirmed", "sent"})
@@ -245,10 +264,20 @@ class RigTest:
         return tuple(dict.fromkeys(filter(None, named)))
 
     def roles_needed(self, role: str) -> list[str]:
-        """The case's own role and every role a step targets, in first-use order."""
-        steps = (*self.setup, *self.steps)
-        targets = (step.args.get("target") for step in steps if isinstance(step.args, dict))
-        return list(dict.fromkeys([role, *filter(None, targets)]))
+        """The case's own role and every role a step targets, or an ha_scene step makes its scene of, in first-use
+        order."""
+        names = [role]
+        for step in (*self.setup, *self.steps):
+            if step.kind == HA_SCENE:
+                names += step.args
+            elif isinstance(step.args, dict) and (target := step.args.get("target")):
+                names.append(target)
+        return list(dict.fromkeys(names))
+
+    @property
+    def ha_scene(self) -> Step | None:
+        """The setup step that makes the test's HA scene, if it has one."""
+        return next((step for step in self.setup if step.kind == HA_SCENE), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +487,42 @@ def _parse_entry(args: Any) -> str:
     return args
 
 
+def _parse_ha_scene(args: Any) -> dict[str, dict]:
+    """The lights of the HA scene the step makes, by light role: each one's state and, for one on, its brightness_pct
+    and color_temp_kelvin. An off light takes nothing else: the scene turns it off."""
+    if not isinstance(args, dict) or not args:
+        raise ValueError("ha_scene takes a mapping of light roles to their states in the scene")
+    lights = {}
+    for role, raw in args.items():
+        if not isinstance(role, str) or role not in ROLES or not role.startswith("light_"):
+            raise ValueError(f"{role!r} is not a light role")
+        light = _mapping(raw, required=("state",), allowed=HA_SCENE_KEYS)
+        light["state"] = _state(light["state"])
+        if light["state"] not in ("on", "off"):
+            raise ValueError(f"{role}: state must be on or off, got {light['state']!r}")
+        if light["state"] == "off" and len(light) > 1:
+            raise ValueError(f"{role}: an off light takes no brightness or color temperature")
+        pct = light.get("brightness_pct")
+        if pct is not None and (isinstance(pct, bool) or not isinstance(pct, int | float) or not 0 < pct <= 100):
+            raise ValueError(f"{role}: brightness_pct must be a number above 0 and up to 100, got {pct!r}")
+        kelvin = light.get("color_temp_kelvin")
+        if kelvin is not None and (isinstance(kelvin, bool) or not isinstance(kelvin, int) or kelvin <= 0):
+            raise ValueError(f"{role}: color_temp_kelvin must be a positive whole number, got {kelvin!r}")
+        lights[role] = light
+    return lights
+
+
+def _scene_light(light: dict) -> dict:
+    """One light's entry in scene.create's `entities`, as HA stores a light's state: brightness 0-255, and a color
+    temperature with its color mode, so the route's pick by color mode reads it as a real scene holds it."""
+    entry: dict[str, Any] = {"state": light["state"]}
+    if (pct := light.get("brightness_pct")) is not None:
+        entry["brightness"] = round(pct * 255 / 100)
+    if (kelvin := light.get("color_temp_kelvin")) is not None:
+        entry |= {"color_temp_kelvin": kelvin, "color_mode": "color_temp"}
+    return entry
+
+
 def _parse_restore(args: Any) -> None:
     if args not in (None, {}):
         raise ValueError("restore takes no arguments")
@@ -486,6 +551,9 @@ PARSERS: dict[str, Callable[[Any], Any]] = {
     "bridge": _parse_bridge,
     # One raw ZCL cluster command to a ZHA light, for probes; fails in any other integration's suite.
     "zcl": _parse_zcl,
+    # A Home Assistant scene of the case's lights (scene.create), the ha_scene role; setup only, deleted at the case's
+    # end.
+    "ha_scene": _parse_ha_scene,
     # Zigbee2MQTT device options; both steps do nothing in another integration's suite.
     "z2m_option": _parse_z2m_option,
     "expect_z2m_option": _parse_z2m_option,
@@ -598,6 +666,7 @@ def _parse_test(raw: Any) -> RigTest:
         _check_observe_scope(test)
         _check_step_scope(test)
         _check_class_selectors(test)
+        _check_ha_scene(test)
     except ValueError as err:
         raise ValueError(f"test {name}, {err}") from None
     return test
@@ -625,6 +694,31 @@ def _check_step_scope(test: RigTest) -> None:
             raise ValueError(f"{step.label}: only {', '.join(outside)} are not in the test's only")
 
 
+def _check_ha_scene(test: RigTest) -> None:
+    """The ha_scene role and the setup step that makes it come together: one step, on every integration the test runs
+    on (no `only` or class selector), before any step that targets the scene."""
+    made = [step for step in test.setup if step.kind == HA_SCENE]
+    if len(made) > 1:
+        raise ValueError(f"{made[1].label}: a test makes one {HA_SCENE}")
+    step = made[0] if made else None
+    steps = (*test.setup, *test.steps)
+    targeting = [
+        s for s in steps if isinstance(s.args, dict) and s.kind != HA_SCENE and s.args.get("target") == HA_SCENE
+    ]
+    if step is None:
+        if HA_SCENE in test.roles or targeting:
+            raise ValueError(f"the {HA_SCENE} role needs an {HA_SCENE} setup step to make it")
+        return
+    if step.only is not None or step.class_selector is not None:
+        raise ValueError(
+            f"{step.label}: it runs wherever the test does, so it takes no only, classes or except_classes"
+        )
+    if HA_SCENE not in test.roles and not targeting:
+        raise ValueError(f"{step.label}: no step uses the scene it makes; give the test the {HA_SCENE} role")
+    if early := next((s for s in targeting if steps.index(s) < steps.index(step)), None):
+        raise ValueError(f"{early.label}: targets the {HA_SCENE} before the step that makes it")
+
+
 def _check_class_selectors(test: RigTest) -> None:
     """A selector needs a class to read: a `call` step before it (setup, then steps), or no class can be known. Its
     integrations are ones the test runs on, as a step's `only` is."""
@@ -647,6 +741,8 @@ def _parse_phases(raw: dict) -> tuple[tuple[Step, ...], tuple[Step, ...], Observ
         raise ValueError("a test with observe needs setup: the steps that bring the lights to where see begins")
     if do := next((step for step in steps if step.kind == "do"), None):
         raise ValueError(f"{do.label}: do belongs in setup, before the brief")
+    if made := next((step for step in steps if step.kind == HA_SCENE), None):
+        raise ValueError(f"{made.label}: {HA_SCENE} belongs in setup, which makes the scene the steps use")
     if observe is None and (do := next((step for step in setup if step.kind == "do"), None)):
         raise ValueError(f"{do.label}: do is only for a test with observe")
     return steps, setup, observe
@@ -769,7 +865,7 @@ def merge_owned(shared: list[StepFile], owned: list[StepFile]) -> list[StepFile]
 def check_owned(step_files: Iterable[StepFile], registry: Any) -> None:
     """Raise SchemaError for an integration's own tests of an action it has no adapter for."""
     for step_file in step_files:
-        if missing := sorted(x for x in step_file.owned_by if registry.adapter(step_file.action, x) is None):
+        if missing := sorted(x for x in step_file.owned_by if serving(registry, step_file.action, x) is None):
             raise SchemaError(f"{missing[0]}/rig: {missing[0]} has no {step_file.action} adapter")
 
 
@@ -850,6 +946,9 @@ class Case:
     # The DeviceSide class the profile declares for its own target (`class:`): a call it makes that DeviceSide's scope
     # doesn't serve on it skips the case as not applying (unbuilt), and a response naming another class fails it.
     declared: str | None = None
+    # The role whose entity Case.declared is the class of, when not its own: an ha_scene case's light held on, whose
+    # class the ridden action isn't built on (unbuilt_light), on the case's skip.
+    declared_role: str | None = None
 
     @property
     def id(self) -> str:
@@ -923,16 +1022,79 @@ def case_family(case_id_: str) -> tuple[str, str, bool]:
     return test, rest.removesuffix("]").partition("-")[0], observed
 
 
+# The domain and HA integration of the ha_scene role's entity, a scene HA's own integration holds (scene.create): a
+# Ride naming them routes a call on it through the ridden action on every integration (routes).
+HA_SCENE_HOST = ("scene", "homeassistant")
+
+
+def ride(registry: Any, action: str) -> Any:
+    """deviceside's Action.rides for `action`, or None: a Ride naming the action whose adapters serve the targets it
+    routes itself, and those targets' domain and HA integration (set_scene rides set_attributes on scenes of
+    homeassistant). Read with getattr, as a checkout from before Ride has none."""
+    return getattr(registry.actions.get(action), "rides", None)
+
+
+def ridden(registry: Any, action: str) -> str | None:
+    """The action `action` rides (ride), or None."""
+    return getattr(ride(registry, action), "action", None)
+
+
+def routes(registry: Any, action: str, role: str | None) -> str | None:
+    """The action DeviceSide routes `action`'s call on a target of `role` through, on every integration, or None: the
+    ridden one for the ha_scene role, when the Ride names its domain and integration (HA_SCENE_HOST). Any other target
+    (Hue's bridge scene, the scene role) is the integration's own adapter's."""
+    found = ride(registry, action)
+    if role == HA_SCENE and found is not None and (found.domain, found.integration) == HA_SCENE_HOST:
+        return found.action
+    return None
+
+
+def serves(registry: Any, action: str, integration: str, role: str | None = None) -> str | None:
+    """The action whose adapter serves `action`'s call on `integration`: on a target of `role` DeviceSide routes, the
+    ridden action (routes), whatever adapter of its own the integration has; else its own, else, for an action that
+    rides another (ridden), the ridden action, whose adapter stands in as DeviceSide's route writes through it; None
+    for neither. With no `role`, which adapter serves the suite at all (applies)."""
+    if (routed := routes(registry, action, role)) is not None:
+        return routed if registry.adapter(routed, integration) is not None else None
+    if registry.adapter(action, integration) is not None:
+        return action
+    if (other := ridden(registry, action)) is not None and registry.adapter(other, integration) is not None:
+        return other
+    return None
+
+
+def serving(registry: Any, action: str, integration: str, role: str | None = None) -> Any:
+    """The adapter that serves `action`'s call on `integration`, on a target of `role` (serves), or None."""
+    found = serves(registry, action, integration, role)
+    return None if found is None else registry.adapter(found, integration)
+
+
+def suite_options(suite: Suite, registry: Any) -> frozenset[str]:
+    """The DeviceSide options of each adapter serving the suite's own action on its cases' targets (serving, by the
+    target's role), which a run pins as the file sets them: two adapters' for a riding action whose tests target both a
+    scene DeviceSide routes and another (Hue's set_scene, on its ha_scene and scene cases; neither adapter has options
+    today)."""
+    roles: set[str | None] = set()
+    for test in suite.file.tests:
+        for step in (*test.setup, *test.steps):
+            args = step.args if isinstance(step.args, dict) else {}
+            if step.kind == "call" and (args.get("action") or suite.action) == suite.action:
+                roles |= {args["target"]} if "target" in args else set(test.roles)
+    adapters = [serving(registry, suite.action, suite.integration, role) for role in roles or {None}]
+    return frozenset(option for adapter in adapters if adapter is not None for option in adapter.scope.options)
+
+
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
-    """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
+    """The actions the suite's tests call that an adapter serves on its integration (serving), for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
-    return frozenset(action for action in called if registry.adapter(action, suite.integration) is not None)
+    return frozenset(action for action in called if serving(registry, action, suite.integration) is not None)
 
 
 def applies(suite: Suite, registry: Any) -> bool:
-    """Whether the suite runs on its integration: the adapter exists and its scope has every option the file sets (a
-    file with none applies wherever there is an adapter). An option file that doesn't apply is not part of the run."""
-    adapter = registry.adapter(suite.action, suite.integration)
+    """Whether the suite runs on its integration: an adapter serves its action (serving: its own, or the ridden
+    action's) and its scope has every option the file sets (a file with none applies wherever there is an adapter). An
+    option file that doesn't apply is not part of the run."""
+    adapter = serving(registry, suite.action, suite.integration)
     return adapter is not None and suite.file.options <= adapter.scope.options
 
 
@@ -988,6 +1150,8 @@ def _planned(case: Case, profile: Profile, registry: Any) -> Case:
     if missing := [name for name, entity_id in entities.items() if entity_id is None]:
         why = f"no {missing[0]} entity in the profile"
         return replace(case, skip=why, absent=True, inapplicable=True)
+    if why := one_light(test, entities):
+        return replace(case, entities=entities, skip=why, inapplicable=True)
     group = next((name for name in entities if name in GROUP_ROLES), None)
     members = profile.members(suite.integration, entities[group]) if group else ()
     # A group case that also targets a light means one of the group's: where the profile lists them.
@@ -999,6 +1163,9 @@ def _planned(case: Case, profile: Profile, registry: Any) -> Case:
     case = replace(case, entities=entities, members=members, declared=declared)
     if why := unbuilt(case, registry):
         return replace(case, skip=why, inapplicable=True)
+    if found := unbuilt_light(case, registry, profile):
+        why, light, name = found
+        return replace(case, skip=why, inapplicable=True, declared=name, declared_role=light)
     if why := unreachable(case, profile):
         return replace(case, skip=why, unreachable=True)
     return case
@@ -1012,27 +1179,78 @@ def unbuilt(case: Case, registry: Any) -> str | None:
     """Why the case doesn't apply to its target's declared class (Case.declared), or None: a call on its own target
     that would run there (its `only` and class selector, judged on that class) names an action whose scope, in the
     checkout under test, refuses the class as not built or no known method (AdapterScope.refusal, as DeviceSide's
-    dispatcher refuses it). Decided before the case runs, from the code under test, so a refusal in a case that runs
+    dispatcher refuses it). The scope is that of the action serving the call on the target (serves): for an action that
+    rides another, the ridden one's where the integration has none of its own or DeviceSide routes the target through
+    it. Decided before the case runs, from the code under test, so a refusal in a case that runs
     still fails it. Raises ValueError for a class the integration doesn't name: a typo would skip every case."""
     if (declared := case.declared) is None:
         return None
     integration = case.suite.integration
-    if declared not in (named := getattr(registry.integrations[integration], "classes", None) or {}):
-        raise ValueError(f"the profile's class {declared!r} is not one {integration} names: {sorted(named)}")
+    _check_named(registry, integration, declared)
     domain = case.entities[case.role].partition(".")[0]
+    for step in _own_calls(case):
+        args = step.args if isinstance(step.args, dict) else {}
+        if not _selects(step, integration, declared):
+            continue
+        if (action := serves(registry, args.get("action") or case.suite.action, integration, case.role)) is None:
+            continue  # no adapter at all: cases() skips the test for that
+        if phrase := _refused(registry.adapter(action, integration), declared, domain):
+            return f"{action} {phrase} {declared}"
+    return None
+
+
+def unbuilt_light(case: Case, registry: Any, profile: Profile) -> tuple[str, str, str] | None:
+    """For a case on the ha_scene role: why a light its scene holds on doesn't apply to the class the profile declares
+    for it, with the light's role and class, or None. DeviceSide routes a call on the scene through the action it rides
+    (routes), gating each light held on on that action's scope as unbuilt judges a target; a light held off it turns
+    off through core's light.turn_off, which no class gates. Raises ValueError for a class the integration doesn't
+    name, as unbuilt does."""
+    if case.role != HA_SCENE or (made := case.test.ha_scene) is None:
+        return None
+    integration = case.suite.integration
+    held_on = {
+        role: name
+        for role, light in made.args.items()
+        if light["state"] == "on" and (name := profile.declared_class(integration, case.entities[role])) is not None
+    }
+    if not held_on:
+        return None
+    for name in held_on.values():
+        _check_named(registry, integration, name)
+    for step in _own_calls(case):
+        action = (step.args if isinstance(step.args, dict) else {}).get("action") or case.suite.action
+        if (routed := routes(registry, action, HA_SCENE)) is None:
+            continue
+        if (adapter := registry.adapter(routed, integration)) is None:
+            continue  # no adapter at all: the suite doesn't apply
+        for role, name in held_on.items():
+            if phrase := _refused(adapter, name, "light"):
+                return f"{routed} {phrase} {name} ({role})", role, name
+    return None
+
+
+def _own_calls(case: Case) -> Iterator[Step]:
+    """The case's call steps on its own target that run on its integration (their `only`)."""
+    integration = case.suite.integration
     for step in (*case.test.setup, *case.test.steps):
         args = step.args if isinstance(step.args, dict) else {}
         if step.kind != "call" or args.get("target", case.role) != case.role:
             continue
-        if (step.only is not None and integration not in step.only) or not _selects(step, integration, declared):
-            continue
-        action = args.get("action") or case.suite.action
-        if (adapter := registry.adapter(action, integration)) is None:
-            continue  # no adapter at all: cases() skips the test for that
-        refused = adapter.scope.refusal([declared], domain=domain, failure_harms=adapter.failure_harms)
-        if refused is not None and (phrase := UNBUILT.get(str(refused[0]))):
-            return f"{action} {phrase} {declared}"
-    return None
+        if step.only is None or integration in step.only:
+            yield step
+
+
+def _check_named(registry: Any, integration: str, name: str) -> None:
+    """Raise ValueError for a profile's class the integration doesn't name: a typo would skip every case."""
+    if name not in (named := getattr(registry.integrations[integration], "classes", None) or {}):
+        raise ValueError(f"the profile's class {name!r} is not one {integration} names: {sorted(named)}")
+
+
+def _refused(adapter: Any, name: str, domain: str) -> str | None:
+    """How the adapter's scope refuses class `name` on `domain` as UNBUILT phrases it, or None for serving it or
+    refusing it for another reason (AdapterScope.refusal, as DeviceSide's dispatcher refuses it)."""
+    refused = adapter.scope.refusal([name], domain=domain, failure_harms=adapter.failure_harms)
+    return UNBUILT.get(str(refused[0])) if refused is not None else None
 
 
 def _selects(step: Step, integration: str, name: str) -> bool:
@@ -1057,10 +1275,25 @@ def roles_by_entity(test: RigTest, profile: Profile, integration: str) -> list[t
     return found
 
 
+def one_light(test: RigTest, entities: dict[str, str | None]) -> str | None:
+    """Why the test's ha_scene can't be made here, or None: two of its roles are one light in the profile, so the
+    scene would hold it twice."""
+    if (step := test.ha_scene) is None:
+        return None
+    roles = list(step.args)
+    for index, first in enumerate(roles):
+        if second := next((other for other in roles[index + 1 :] if entities[other] == entities[first]), None):
+            return f"{HA_SCENE}: {first} and {second} are one light"
+    return None
+
+
 def case_entities(test: RigTest, role: str, index: int, profile: Profile, integration: str) -> dict[str, str | None]:
     """The entity for each role the case needs (None: the profile lists none): its own role's `index`-th, the first
-    for every role a step targets."""
-    entities = {name: profile.entity(integration, name) for name in test.roles_needed(role)}
+    for every role a step targets, and for the ha_scene, the integration's fixed scene, which no profile lists."""
+    entities = {
+        name: ha_scene_entity(integration) if name == HA_SCENE else profile.entity(integration, name)
+        for name in test.roles_needed(role)
+    }
     if index > 1:
         entities[role] = profile.entities(integration, role)[index - 1]
     return entities
@@ -1264,6 +1497,14 @@ class CaseResult:
     # Its own target and the class the profile declares for it (Case.declared): on a skip, the class a call isn't built
     # on (unbuilt); on a pass, the class DeviceSide's response named for it. A record needs each skip's beside a pass's.
     declared: tuple[str, str] | None = None
+    # On a pass of an ha_scene case: each (light, class) its responses named in the scene's `member_capabilities`
+    # (entity_classes), the lights it held on, which confirm a declared-class skip as `declared` does.
+    confirms: tuple[tuple[str, str], ...] = ()
+    # The action whose adapter served its call, when not the suite's own (serves, by its role): an ha_scene case's
+    # ridden action, set_attributes. A record's test names it (`via`), so its pass credits that adapter, not the
+    # record's own action's (deviceside's check_release.credited, plan Decision 4). Set when the case starts, so a
+    # not_run or not_observed row keeps it; None for a case that never started.
+    via: str | None = None
     # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()
     # The classes its target reached (reached_classes), for an integration that names them; empty for none.
@@ -1305,12 +1546,13 @@ class SuiteResult:
         whose results are facts, not the record's, and of cases that don't apply (Case.inapplicable). At least one
         passed: a record of nothing would replace one that proved something. A skip for a declared class (unbuilt)
         stands only beside a pass whose response named that class for the same entity, so a profile's stale class
-        never drops cases unseen."""
+        never drops cases unseen; an ha_scene pass names its held-on lights' classes (CaseResult.confirms)."""
         default = [case for case in self.cases if not opt_in(self.suite, case.id)]
         allowed = all(
             case.outcome is Outcome.PASS or (case.outcome is Outcome.SKIPPED and case.inapplicable) for case in default
         )
-        confirmed = {case.declared for case in default if case.outcome is Outcome.PASS}
+        passed = [case for case in default if case.outcome is Outcome.PASS]
+        confirmed = {case.declared for case in passed} | {pair for case in passed for pair in case.confirms}
         declared = all(
             case.declared in confirmed for case in default if case.declared and case.outcome is Outcome.SKIPPED
         )
@@ -1388,11 +1630,33 @@ class Snapshot:
     paced: bool = False  # a Z2M group case: its restore waits RESTORE_SETTLE_S though nothing was put back
     auto: dict[str, dict] = field(default_factory=dict)  # entity -> {auto_off, auto_on}, as get_attributes reads them
     reloading: dict[str, asyncio.Task] = field(default_factory=dict)  # entity -> its entry reload's watcher
+    ha_scene: str | None = None  # the HA scene the case made (its ha_scene step), deleted when it is restored
 
     def entry(self) -> dict:
-        """What the journal keeps for the case: `auto` and `integration` only where a case read auto config."""
+        """What the journal keeps for the case: `auto` and `integration` only where a case read auto config,
+        `ha_scene` only where it made one."""
         entry = {"taken": self.taken, "stored": self.stored, "power": self.power}
-        return entry | ({"auto": self.auto, "integration": self.integration} if self.auto else {})
+        entry |= {"auto": self.auto, "integration": self.integration} if self.auto else {}
+        return entry | ({"ha_scene": self.ha_scene} if self.ha_scene else {})
+
+    def making_scene(self, entity_id: str) -> None:
+        """Journal the HA scene the case is about to make, so a crash leaves it to --recover to delete."""
+        self.ha_scene = entity_id
+        if self.journal is not None:
+            self.journal.put("cases", self.journal_key, self.entry())
+
+    async def delete_scene(self) -> bool:
+        """Delete the case's HA scene, if HA still has it (a restart drops it); whether it is gone."""
+        if self.ha_scene is None:
+            return True
+        try:
+            if await self.ha.get_state(self.ha_scene) is not None:
+                await self.ha.call_service("scene", "delete", {"entity_id": self.ha_scene})
+        except Exception as err:  # noqa: BLE001 - as restore(): logged, and --recover tries again
+            _LOGGER.warning("Could not delete %s: %s; --recover tries again", self.ha_scene, err)
+            return False
+        self.ha_scene = None
+        return True
 
     async def take(self, entity_id: str, group: bool = False) -> dict | None:
         """The entity's state before the case moved it, and that of every entity it powers."""
@@ -1506,17 +1770,20 @@ class Snapshot:
             elif (self.taken[self.power[entity_id]] or {}).get("state") == "on":  # unpowered before: nothing to restore
                 if not await self.put_back_after_power(entity_id, state):
                     failed.append(entity_id)
+        # The case's end, not a restore step's: the lights are back, so the scene goes.
+        scene_left = clear and not await self.delete_scene()
         # A paced case's next groupcasts mustn't land in this one's broadcast-table entries (~9 s each on EmberZNet).
         if clear and (put_back or self.paced):
             await asyncio.sleep(RESTORE_SETTLE_S)
         if clear and self.journal is not None:
             self.journal.drop("cases", self.journal_key)
-            self.keep_unrestored(failed)
+            self.keep_unrestored(failed, scene_left)
 
-    def keep_unrestored(self, failed: list[str]) -> None:
-        """Journal the entities a restore failed on under the key's `unrestored` entry, keeping any already there.
-        Recovering that entry itself, it was dropped first, so only what failed again is left."""
-        if not failed or self.journal is None:
+    def keep_unrestored(self, failed: list[str], scene_left: bool = False) -> None:
+        """Journal the entities a restore failed on, and a scene it couldn't delete, under the key's `unrestored`
+        entry, keeping any already there. Recovering that entry itself, it was dropped first, so only what failed
+        again is left."""
+        if not (failed or scene_left) or self.journal is None:
             return
         key = self.journal_key if self.journal_key.endswith(UNRESTORED) else f"{self.journal_key}{UNRESTORED}"
         kept = (self.journal.get("cases") or {}).get(key) or {"taken": {}, "stored": {}, "power": {}}
@@ -1532,6 +1799,8 @@ class Snapshot:
                 if entity_id in self.auto:
                     kept.setdefault("auto", {})[entity_id] = self.auto[entity_id]
                     kept["integration"] = self.integration
+        if scene_left:
+            kept["ha_scene"] = self.ha_scene
         self.journal.put("cases", key, kept)
 
     async def put_back_after_power(self, entity_id: str, state: dict) -> bool:
@@ -1799,6 +2068,7 @@ class _CaseRun:
         self.upcoming: tuple[Step, ...] = ()  # the steps after the one running, in its phase (following)
         self.error: HAError | None = None
         self.last_action = case.suite.action
+        self.last_role = case.role  # the last call's target's role, which picks the adapter serving it (serving)
         self.query = False
         # The loop times the last call was sent and returned, which a sample's readings are timed from.
         self.call_times: tuple[float, float] | None = None
@@ -1845,8 +2115,15 @@ class _CaseRun:
     async def run(self) -> CaseResult:
         case = self.case
         domain = case.entities[case.role].partition(".")[0]
+        served = serves(self.registry, case.suite.action, self.integration, case.role)
         result = CaseResult(
-            case.id, case.role, domain, Outcome.PASS, entity_ids=tuple(case.entities.values()), twin=case.twin
+            case.id,
+            case.role,
+            domain,
+            Outcome.PASS,
+            entity_ids=tuple(case.entities.values()),
+            twin=case.twin,
+            via=served if served != case.suite.action else None,
         )
         try:
             if case.observed:
@@ -1878,9 +2155,18 @@ class _CaseRun:
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
         else:
             await self.note_reached(result)
-        if result.outcome is Outcome.PASS and case.declared in (self.target_classes or ()):
-            result.declared = (case.entities[case.role], case.declared)
+        if result.outcome is Outcome.PASS:
+            self.note_confirmed(result)
         return result
+
+    def note_confirmed(self, result: CaseResult) -> None:
+        """On a pass, the classes its responses named that confirm a declared-class skip (SuiteResult.recordable): its
+        own target's declared class, when named (CaseResult.declared), and an ha_scene's lights' (scene_classes)."""
+        case = self.case
+        if case.declared in (self.target_classes or ()):
+            result.declared = (case.entities[case.role], case.declared)
+        if case.role == HA_SCENE:
+            result.confirms = self.scene_classes()
 
     async def note_reached(self, result: CaseResult) -> None:
         """What the case reached, on its result once it has its outcome, as the run's records name it: for JSON ones,
@@ -1980,7 +2266,7 @@ class _CaseRun:
             if role in GROUP_ROLES:
                 behind = [member for member in await self.members(target) if member in entity_ids]
             else:
-                behind = entity_ids if role == "scene" else [target]
+                behind = entity_ids if role in SCENE_ROLES else [target]
             found = await reached_devices(self.ha, entity_ids, self.entity_classes(entity_ids, behind))
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning(
@@ -1998,11 +2284,13 @@ class _CaseRun:
 
     async def reached_entities(self) -> list[str]:
         """The entities whose devices the case reached, each once, in role order: a native group's members, never the
-        group's own entity, and every other one but a scene's, which has no device (a scene case reaches its group's
-        lights). A light a step targets is one of the case's group in every step file today."""
+        group's own entity, and every other one but a scene's, which has no device (a Hue scene case reaches its
+        group's lights; an ha_scene case, the lights its step made the scene of, held off ones included, which the
+        scene's entry names no class for: entity_classes). A light a step targets is one of the case's group in every
+        step file today."""
         found: list[str] = []
         for role, entity_id in self.case.entities.items():
-            if role != "scene":
+            if role not in SCENE_ROLES:
                 found += await self.members(entity_id)
         return list(dict.fromkeys(found))
 
@@ -2024,6 +2312,14 @@ class _CaseRun:
                     if entity_id in entries:
                         seen[entity_id].add(_one_class(entries[entity_id]))
         return {entity_id: next(iter(found)) if len(found) == 1 else None for entity_id, found in seen.items()}
+
+    def scene_classes(self) -> tuple[tuple[str, str], ...]:
+        """An ha_scene case's lights, each with the class the scene's entry named for it (entity_classes reads its
+        `member_capabilities`), sorted: the lights its route wrote through the ridden action, held on, a held-off one
+        never named, as core's light.turn_off takes it. None for an integration that names no classes."""
+        lights = [entity_id for role, entity_id in self.case.entities.items() if role != HA_SCENE]
+        named = self.entity_classes(lights, lights).items()
+        return tuple(sorted((entity_id, name) for entity_id, name in named if name is not None))
 
     async def fact_devices(self) -> tuple[Device, ...]:
         """The devices behind the case's entities, a group's members included, for its _facts.md row; none when the
@@ -2191,6 +2487,21 @@ class _CaseRun:
             await self.ha.call_service(domain, service, call)
             await self.await_state(entity_id, want, within)
 
+    async def _ha_scene(self, args: dict[str, dict], _following: str | None) -> None:
+        """Make the case's HA scene of its lights (scene.create), journaled first, and wait for HA to show it. Its
+        lights are snapshotted first, as they are the case's to put back."""
+        entity_id = self.case.entities[HA_SCENE]
+        entities = {}
+        for role, light in args.items():
+            await self.touch(self.case.entities[role])
+            entities[self.case.entities[role]] = _scene_light(light)
+        self.snapshot.making_scene(entity_id)
+        await self.ha.call_service("scene", "create", {"scene_id": ha_scene_id(self.integration), "entities": entities})
+        try:
+            await self.ha.wait_for(entity_id, lambda state: state is not None, HA_SCENE_WAIT_S)
+        except TimeoutError:
+            raise StepFailure(f"scene.create made no {entity_id} within {HA_SCENE_WAIT_S:g} s") from None
+
     async def z2m_ieee(self, entity_id: str) -> str:
         entry = await self.ha.command({"type": "config/entity_registry/get", "entity_id": entity_id})
         for device in await self.ha.command({"type": "config/device_registry/list"}):
@@ -2294,6 +2605,7 @@ class _CaseRun:
             elif key not in ("action", "target"):
                 data[key] = value
         self.last_action, self.response, self.error, self.sent = action, None, None, data
+        self.last_role = args.get("target", self.case.role)
         # ActionKind is a StrEnum: compared by value so the engine needs no integration import.
         self.query = getattr(getattr(self.registry, "actions", {}).get(action), "kind", None) == "query"
         if self.cue is not None:
@@ -2338,7 +2650,7 @@ class _CaseRun:
 
     def expected(self, name: str, want: Any) -> Any:
         if name == "status" and want == "expected":
-            if (adapter := self.registry.adapter(self.last_action, self.integration)) is None:
+            if (adapter := serving(self.registry, self.last_action, self.integration, self.last_role)) is None:
                 raise StepFailure(f"no {self.last_action} adapter on {self.integration} to expect a status from")
             return "confirmed" if adapter.scope.confirmable else "sent"
         if name == "integration" and want == "self":
@@ -2644,8 +2956,8 @@ async def run(
     only = unfinished(done, only)
     planned = _plan(suites, profile, registry, ha, admin, keyword, only, out)
     options = {
-        id(suite): {name: name in suite.file.options for name in adapter.scope.options}
-        for suite, adapter, *_ in planned
+        id(suite): {name: name in suite.file.options for name in suite_options(suite, registry)}
+        for suite, *_ in planned
     }
     planned = by_options(planned, options)
     rig_run = _Run(
@@ -2770,7 +3082,7 @@ def _plan(
         suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry), registry)
         if only is not None and not (suite_cases := [case for case in suite_cases if only(case)]):
             continue
-        adapter = registry.adapter(suite.action, suite.integration)
+        adapter = serving(registry, suite.action, suite.integration)
         if adapter is None:
             out(f"{suite.integration} / {suite.action}: no adapter, skipped")
             continue
@@ -2778,7 +3090,7 @@ def _plan(
             # Another integration's option file, such as Hue's predicted_state: selection drops it silently.
             continue
         client = admin if suite.integration in ADMIN_INTEGRATIONS else ha
-        if client is None or ((adapter.scope.options or suite.file.moves_entry) and admin is None):
+        if client is None or ((suite_options(suite, registry) or suite.file.moves_entry) and admin is None):
             out(f"{suite.integration} / {suite.action}: needs HA_ADMIN_TOKEN, skipped")
             continue
         planned.append((suite, adapter, client, suite_cases))
@@ -2944,7 +3256,11 @@ def _not_run(case: Case, outcome: Outcome, detail: str = "") -> CaseResult:
         unreachable=case.unreachable,
         absent=case.absent,
         inapplicable=case.inapplicable,
-        declared=(case.entities[case.role], case.declared) if case.declared and case.inapplicable else None,
+        declared=(
+            (case.entities[case.declared_role or case.role], case.declared)
+            if case.declared and case.inapplicable
+            else None
+        ),
     )
 
 
@@ -2994,7 +3310,8 @@ def table(suite_result: SuiteResult, details: bool = False) -> list[str]:
     columns = ["Test", "Target", *(["Capability"] if classes else []), "Result"]
     lines = [f"| {' | '.join(columns)} |", "|" + "---|" * len(columns)]
     for case in suite_result.cases:
-        target = f"`{case.domain}` ({case.role})" if case.domain else f"{case.role}: none in the profile"
+        via = f", via {case.via}" if case.via and case.outcome is not Outcome.SKIPPED else ""
+        target = f"`{case.domain}` ({case.role}{via})" if case.domain else f"{case.role}: none in the profile"
         if not case.domain and not case.absent:  # skipped before planning entities: no adapter, or not opted in
             target = case.role
         cells = [f"`{case.id}`", target]
@@ -3415,8 +3732,10 @@ def _test_json(suite: Suite, case: CaseResult) -> dict:
     if case.outcome is Outcome.SKIPPED:
         return {"id": case.id, "role": case.role, "result": str(Outcome.SKIPPED), "reason": case.detail}
     test: dict[str, Any] = {"id": case.id, "domain": case.domain, "role": case.role, "result": str(case.outcome)}
-    if case.role in GROUP_ROLES or case.role == "scene":  # a scene's test, as a group's, lists the lights behind it
+    if case.role in GROUP_ROLES or case.role in SCENE_ROLES:  # a scene's test, as a group's, lists its lights
         test["group"] = True
+    if case.via:  # served by the action it rides (CaseResult.via): its pass credits that adapter, not the record's
+        test["via"] = case.via
     test["devices"] = [device.as_json() for device in case.reached]
     return test
 

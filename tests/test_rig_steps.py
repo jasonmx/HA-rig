@@ -7,7 +7,7 @@ from custom_components.deviceside.core.registry import AdapterRegistry
 
 from ha_rig.engine import Expr, Observe, SchemaError, check_owned, load_step_file, load_step_files
 from ha_rig.target import deviceside_repo, integration_steps_dirs, steps_dir
-from tests.rig_fakes import STEPS
+from tests.rig_fakes import STEPS, Roster
 
 # deviceside's step files, the only ones a rig test reads, and only to check they parse: what they test is deviceside's.
 SHIPPED = steps_dir(deviceside_repo())
@@ -99,11 +99,19 @@ def test_an_integrations_own_file_refuses(tmp_path, text, message):
 
 def test_an_integrations_own_file_needs_its_adapter(tmp_path):
     registry = AdapterRegistry.discover()
-    assert registry.adapter("set_scene", "shelly") is None
-    files = load_step_files(STEPS, own_dirs(tmp_path, OWN.replace("turn_on_for", "set_scene").replace("own_case", "x")))
-    with pytest.raises(SchemaError, match="shelly has no set_scene adapter"):
+    assert registry.adapter("raise_hue", "shelly") is None
+    files = load_step_files(STEPS, own_dirs(tmp_path, OWN.replace("turn_on_for", "raise_hue").replace("own_case", "x")))
+    with pytest.raises(SchemaError, match="shelly has no raise_hue adapter"):
         check_owned(files, registry)
     check_owned(load_step_files(STEPS, own_dirs(tmp_path / "ok")), registry)
+
+
+def test_an_integrations_own_file_of_a_riding_action_needs_the_ridden_adapter(tmp_path):
+    text = OWN.replace("turn_on_for", "set_scene").replace("own_case", "x")
+    files = load_step_files(STEPS, own_dirs(tmp_path, text))
+    check_owned(files, Roster({"shelly": {"set_attributes"}}, rides={"set_scene": "set_attributes"}))
+    with pytest.raises(SchemaError, match="shelly has no set_scene adapter"):
+        check_owned(files, Roster({"shelly": {"set_attributes"}}))
 
 
 HEADER = "action: turn_on_for\nrig_seconds: 5\ntests:\n  - name: broken\n    roles: [switch_plug]\n    steps:\n"

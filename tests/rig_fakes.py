@@ -44,14 +44,36 @@ class Roster:
 
     Which integrations name classes is declared too (`classes`), as a deviceside checkout before IntegrationInfo's
     `capability` names none: each integration reads the real one's fields, with a `capability` only for those
-    declared. The rig never calls it, as it reads the class from DeviceSide's response."""
+    declared. The rig never calls it, as it reads the class from DeviceSide's response.
 
-    def __init__(self, declared: dict[str, set[str]], classes: frozenset[str] = frozenset()) -> None:
+    Which actions ride another is declared too (`rides`: the riding action's key to the ridden one's), as deviceside's
+    Action.rides is new: each action is the real one's class, with a `rides` only for those declared, standing in for
+    deviceside's Ride on Home Assistant scenes (domain scene, integration homeassistant), set_scene's."""
+
+    def __init__(
+        self, declared: dict[str, set[str]], classes: frozenset[str] = frozenset(), rides: dict[str, str] | None = None
+    ) -> None:
         for integration, actions in declared.items():
             for action in actions:
                 if _discovered().adapter(action, integration) is None:
                     raise ValueError(f"deviceside has no {action} adapter for {integration}")
+        real = _discovered().actions
+        rides = rides or {}
+        if unknown := sorted({*rides, *rides.values()} - real.keys()):
+            raise ValueError(f"deviceside has no {unknown[0]} action")
         self._declared = declared
+        self.actions = {
+            key: type(
+                cls.__name__,
+                (cls,),
+                {
+                    "rides": SimpleNamespace(action=rides[key], domain="scene", integration="homeassistant")
+                    if key in rides
+                    else None
+                },
+            )
+            for key, cls in real.items()
+        }
         self.integrations = {
             key: SimpleNamespace(
                 **{field.name: getattr(info, field.name) for field in dataclasses.fields(info)}
@@ -183,6 +205,7 @@ class FakeHA(HAClient):
         self.z2m_restart_s = 0.01
         self._z2m_responses: list[asyncio.Queue[str]] = []  # live bridge/response/device/remove subscriptions
         self._z2m_device_topics: dict[str, asyncio.Queue[str]] = {}  # live zigbee2mqtt/<name> subscriptions
+        self.scenes: dict[str, dict] = {}  # scene.create's scenes, by entity ID: each one's `entities`
 
     async def close(self) -> None:
         """Nothing to close: a fake opens no connection."""
@@ -432,6 +455,9 @@ class FakeHA(HAClient):
         if (domain, service) == ("logger", "set_level"):
             self.logger_levels.update(data)
             return None
+        if domain == "scene" and service in ("create", "delete"):
+            self._scene_service(service, data or {})
+            return None
         entity_id = data["entity_id"]
         attributes = {key: value for key, value in data.items() if key != "entity_id"}
         state = "on" if service == "turn_on" else "off"
@@ -442,6 +468,20 @@ class FakeHA(HAClient):
         if members:
             self.states[entity_id]["attributes"]["entity_id"] = members
         return None
+
+    def _scene_service(self, service: str, data: dict) -> None:
+        """scene.create makes (or remakes) `scene.<scene_id>`, listing its lights as HA's scene does; scene.delete
+        refuses a scene it doesn't have, as core's does."""
+        if service == "create":
+            entity_id = f"scene.{data['scene_id']}"
+            self.scenes[entity_id] = copy.deepcopy(data["entities"])
+            attributes = {"entity_id": list(data["entities"])}
+            self.states[entity_id] = {"entity_id": entity_id, "state": "unknown", "attributes": attributes}
+            return
+        entity_id = data["entity_id"]
+        if self.scenes.pop(entity_id, None) is None:
+            raise HAError({"code": "service_validation_error", "message": f"{entity_id} not found"})
+        self.states.pop(entity_id, None)
 
     def _mqtt_publish(self, topic: str, payload: dict) -> None:
         """A Z2M bridge request, a device's `/get`, or a `/set` read of CurrentHue, answered while the device is there.
@@ -821,6 +861,7 @@ def registry(options: frozenset[str]) -> SimpleNamespace:
     """A registry whose every adapter has these DeviceSide options."""
     return SimpleNamespace(
         integrations={},
+        actions={},
         adapter=lambda action, integration: SimpleNamespace(
             scope=SimpleNamespace(confirmable=False, fields=frozenset(), options=options)
         ),

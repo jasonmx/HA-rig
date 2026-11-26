@@ -168,6 +168,8 @@ from ha_rig.engine import (  # noqa: E402
     merge,
     report_path,
     run,
+    serving,
+    suite_options,
     unfinished,
     write_fact,
     write_records,
@@ -329,7 +331,7 @@ def plan_lines(
         suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry), registry)
         if only is not None and not (suite_cases := [case for case in suite_cases if only(case)]):
             continue
-        if registry.adapter(suite.action, suite.integration) is None:
+        if serving(registry, suite.action, suite.integration) is None:
             lines.append(f"{suite.integration} / {suite.action} (no adapter, will skip)")
             continue
         entities = [entity for case in suite_cases for entity in case.entities.values()]
@@ -370,7 +372,7 @@ def estimate(
     """Each suite's rig_seconds, summed; with `profile`, the run is in lanes, so each suite's seconds are split by its
     share of cases in the lanes, which count as the longest lane, and the phases, which add up. Resuming (`done`, with
     the profile as `resumed`), each suite's seconds shrink to its share of cases left."""
-    runnable = [suite for suite in suites if registry.adapter(suite.action, suite.integration)]
+    runnable = [suite for suite in suites if serving(registry, suite.action, suite.integration)]
     profile_for = profile or resumed
 
     def seconds_left(suite: Suite) -> float:
@@ -1190,17 +1192,14 @@ def runnable_suites(suites: list[Suite], registry: AdapterRegistry) -> list[Suit
 
 
 def runnable_suite(suite: Suite, registry: AdapterRegistry) -> bool:
-    return registry.adapter(suite.action, suite.integration) is not None
+    return serving(registry, suite.action, suite.integration) is not None
 
 
 def reloads(setup: Setup) -> bool:
     """Whether a suite the run can run may reload the entry under every other run: it has entry steps, or its
     adapter has DeviceSide options, whose save does. A plain file pins its adapter's options off, which saves too
     when HA's are on (predicted_state is on by default)."""
-    return any(
-        suite.file.reloads or setup.registry.adapter(suite.action, suite.integration).scope.options
-        for suite in runnable(setup)
-    )
+    return any(suite.file.reloads or suite_options(suite, setup.registry) for suite in runnable(setup))
 
 
 def supplies(profile: Profile, integrations: set[str]) -> set[str]:
@@ -1662,9 +1661,9 @@ def run_suites(
     suites = [
         suite
         for suite in select(step_files, profile, args.integration, args.action, args.facts)
-        if registry.adapter(suite.action, suite.integration) is None or applies(suite, registry)
+        if serving(registry, suite.action, suite.integration) is None or applies(suite, registry)
     ]
-    if not any(registry.adapter(suite.action, suite.integration) for suite in suites):
+    if not any(serving(registry, suite.action, suite.integration) for suite in suites):
         raise SystemExit("No rig test matches the profile's integrations (and --integration/--action, if given).")
     return suites
 
@@ -1850,8 +1849,8 @@ def check_tokens(env: dict, suites: list[Suite], registry: AdapterRegistry, roam
     with_options = {
         suite.integration
         for suite in suites
-        if (adapter := registry.adapter(suite.action, suite.integration)) is not None
-        and (adapter.scope.options or suite.file.moves_entry)
+        if serving(registry, suite.action, suite.integration) is not None
+        and (suite_options(suite, registry) or suite.file.moves_entry)
     }
     if admin_only := sorted(({suite.integration for suite in suites} & ADMIN_INTEGRATIONS) | with_options):
         raise SystemExit(
@@ -2566,7 +2565,7 @@ def will_run(
     result for."""
     only = unfinished(done, only)
     for suite in suites:
-        if registry.adapter(suite.action, suite.integration):
+        if serving(registry, suite.action, suite.integration):
             for case in cases(suite, profile, keyword, adapters_for(suite, registry), registry):
                 if not case.skip and (only is None or only(case)):
                     yield case
@@ -2581,7 +2580,7 @@ def platforms(
     only = unfinished(done)
     found: dict[str, tuple[str, str]] = {}
     for suite in suites:
-        if not registry.adapter(suite.action, suite.integration):
+        if not serving(registry, suite.action, suite.integration):
             continue
         domain = HA_DOMAINS.get(suite.integration, suite.integration)
         for case in cases(suite, profile, keyword, adapters_for(suite, registry), registry):
@@ -2882,6 +2881,8 @@ def recover_case(ha: HAClient, entry: dict, out: Callable[[str], None], **journa
     for entity_id, rows in entry.get("auto", {}).items():
         shown = ", ".join(f"{name} {'off' if row is None else f'{row['duration']:g} s'}" for name, row in rows.items())
         out(f"Putting {entity_id}'s {shown} back, waiting out the entry reload a change makes.")
+    if scene := entry.get("ha_scene"):
+        out(f"Deleting {scene}, the scene the case made, if HA still has it.")
     return Snapshot(
         ha,
         entry.get("power", {}),
@@ -2889,6 +2890,7 @@ def recover_case(ha: HAClient, entry: dict, out: Callable[[str], None], **journa
         stored=entry.get("stored", {}),
         integration=entry.get("integration"),
         auto=entry.get("auto", {}),
+        ha_scene=entry.get("ha_scene"),
         **journaled,
     )
 

@@ -315,5 +315,7 @@ def _result(case: dict) -> CaseResult:
         classes=tuple(case.get("classes", ())),
         inapplicable=case.get("inapplicable", case.get("absent", False)),
         declared=tuple(declared) if (declared := case.get("declared")) else None,
+        confirms=tuple(tuple(pair) for pair in case.get("confirms", ())),
+        via=case.get("via"),
         reached=tuple(Reached(**device) for device in case.get("reached", ())),
     )

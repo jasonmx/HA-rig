@@ -820,6 +820,30 @@ async def test_recover_puts_back_every_lanes_case(tmp_path, monkeypatch):
     assert not journal.path.exists()
 
 
+HA_SCENE_ENTITY = "scene.ds_rig_ha_hue"
+
+
+@pytest.mark.parametrize("left_in_ha", [True, False])  # False: an HA restart dropped it
+async def test_recover_deletes_the_ha_scene_a_crashed_case_made(tmp_path, left_in_ha):
+    journal = Journal(tmp_path / "journal.json")
+    ha = fakes.FakeHA({})
+    if left_in_ha:
+        await ha.call_service(
+            "scene", "create", {"scene_id": "ds_rig_ha_hue", "entities": {"light.a": {"state": "on"}}}
+        )
+    entry = {"taken": {}, "stored": {}, "power": {}, "ha_scene": HA_SCENE_ENTITY}
+    journal.put("cases", "hue", entry)
+    printed = []
+
+    await rig.recover_case(ha, entry, printed.append, journal=journal, journal_key="hue").restore()
+
+    deleted = ("scene", "delete", {"entity_id": HA_SCENE_ENTITY}) in ha.calls
+    assert deleted is left_in_ha
+    assert HA_SCENE_ENTITY not in ha.states
+    assert f"Deleting {HA_SCENE_ENTITY}, the scene the case made, if HA still has it." in printed
+    assert not journal.path.exists()
+
+
 async def test_recover_puts_back_a_cases_auto_config_and_waits_out_its_reload(monkeypatch):
     monkeypatch.setitem(engine.ENTRY_RELOADS, "shelly", replace(engine.ENTRY_RELOADS["shelly"], deadline_s=0.5))
     shelly = fakes.ShellyAuto({"switch.plug": {"auto_off": {"duration": 6}, "auto_on": None}})
