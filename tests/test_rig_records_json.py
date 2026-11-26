@@ -32,7 +32,7 @@ from ha_rig.target import SCHEMA, deviceside_repo
 from tests.rig_fakes import planned_cases
 
 from .rig_fakes import FakeHA, Roster, profile
-from .test_rig_engine import TOLERANCE, outcomes, suite, under
+from .test_rig_engine import HA_SCENE_STEPS, TOLERANCE, outcomes, suite, under
 
 PAIRED = deviceside_repo()
 if not (PAIRED / SCHEMA).is_file():
@@ -494,6 +494,54 @@ async def test_a_group_answered_member_by_member_gives_each_its_own_class(tmp_pa
     response = {"light.z2m_a": {"status": "sent", "capability": "hue"}, "light.z2m_b": {"status": "sent"}}
     test = await group_test(tmp_path, response)  # light.z2m_b isn't placed yet: its entry names no class
     assert [device["class"] for device in test["devices"]] == ["hue", None]
+
+
+# Z2M with no set_scene adapter: set_scene rides its set_attributes, which names classes there.
+Z2M_RIDING = Roster(
+    {"zigbee2mqtt": {"get_attributes", "set_attributes"}},
+    classes=frozenset({"zigbee2mqtt"}),
+    rides={"set_scene": "set_attributes"},
+)
+Z2M_HA_SCENE = "scene.ds_rig_ha_zigbee2mqtt"
+
+
+async def test_an_ha_scenes_test_lists_its_lights_each_with_the_class_its_entry_named(tmp_path):
+    """DeviceSide's entry for an HA scene: `member_capabilities` names each light it wrote through set_attributes (the
+    one held on); the light held off, which core's light.turn_off took, is in no map, so it is listed with no class,
+    as a native group's member the map leaves out."""
+
+    def respond(ha, action, data):
+        if action != "set_scene":
+            return {}
+        ha.set("light.z2m_a", "on")
+        entry = {"status": "sent", "integration": "zigbee2mqtt", "member_capabilities": {"light.z2m_a": "hue"}}
+        return {data["entity_id"]: entry}
+
+    ha = RegistryHA({"light.z2m_a": {"state": "on"}, "light.z2m_b": {"state": "off"}}, respond)
+    inv = profile("zigbee2mqtt", light_ct="light.z2m_a", light_dimmable="light.z2m_b")
+    steps = suite(tmp_path, HA_SCENE_STEPS, "zigbee2mqtt")
+    result = await run(
+        [steps], inv, Z2M_RIDING, ha, admin=ha, tolerance=TOLERANCE, out=lambda _: None, json_records=True
+    )
+
+    assert outcomes(result) == {"applies[ha_scene]": (Outcome.PASS, "")}
+    (case,) = result.suites[0].cases
+    assert case.confirms == (("light.z2m_a", "hue"),)  # the held-on light's class, for a declared skip on it
+    [path] = await write(result, tmp_path / "records", registry=Z2M_RIDING)
+    [test] = held(path)["tests"]
+    assert test == {
+        "id": "applies[ha_scene]",
+        "domain": "scene",
+        "role": "ha_scene",
+        "result": "pass",
+        "group": True,
+        # The scene's lights, never the scene, which has no device.
+        "devices": [
+            {"model": "LWA012", "manufacturer": "Signify Netherlands B.V.", "firmware": "1.116.3", "class": "hue"},
+            {"model": "LCA016", "manufacturer": None, "firmware": None, "class": None},
+        ],
+    }
+    assert Z2M_HA_SCENE not in ENTITIES
 
 
 @pytest.mark.parametrize(
@@ -1099,10 +1147,12 @@ def test_the_ledger_saves_what_each_case_reached(tmp_path):
     saved.track(steps, "c1")
     case = CaseResult("wins[switch_plug]", "switch_plug", "switch", Outcome.PASS, entity_ids=("switch.plug",))
     case.reached = (Reached("S3SW-001X8EU", None, "Switch"),)
+    case.confirms = (("light.a", "CCT"), ("light.b", "RGBCCT"))
     saved.record(steps, case)
     again = progress.Progress.load(tmp_path, "lab")
     again.track(steps, "c1")
-    assert again.saved(steps)["wins[switch_plug]"].reached == case.reached
+    loaded = again.saved(steps)["wins[switch_plug]"]
+    assert (loaded.reached, loaded.confirms) == (case.reached, case.confirms)
 
 
 def test_a_resume_for_json_records_reruns_a_case_saved_with_no_devices(tmp_path):

@@ -112,6 +112,8 @@ SWEEP_TIME_S = 5.0
 
 # How long an ha_scene step waits for the scene scene.create made to show in HA.
 HA_SCENE_WAIT_S = 10.0
+# The roles whose target is a scene, an entity with no device: a test on one lists the lights behind it, as a group's.
+SCENE_ROLES = frozenset({"scene", HA_SCENE})
 # What an ha_scene step's light takes, in the rig's units: state, and for one on, its brightness and color temperature.
 HA_SCENE_KEYS = ("state", "brightness_pct", "color_temp_kelvin")
 
@@ -1494,6 +1496,9 @@ class CaseResult:
     # Its own target and the class the profile declares for it (Case.declared): on a skip, the class a call isn't built
     # on (unbuilt); on a pass, the class DeviceSide's response named for it. A record needs each skip's beside a pass's.
     declared: tuple[str, str] | None = None
+    # On a pass of an ha_scene case: each (light, class) its responses named in the scene's `member_capabilities`
+    # (entity_classes), the lights it held on, which confirm a declared-class skip as `declared` does.
+    confirms: tuple[tuple[str, str], ...] = ()
     # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()
     # The classes its target reached (reached_classes), for an integration that names them; empty for none.
@@ -1535,12 +1540,13 @@ class SuiteResult:
         whose results are facts, not the record's, and of cases that don't apply (Case.inapplicable). At least one
         passed: a record of nothing would replace one that proved something. A skip for a declared class (unbuilt)
         stands only beside a pass whose response named that class for the same entity, so a profile's stale class
-        never drops cases unseen."""
+        never drops cases unseen; an ha_scene pass names its held-on lights' classes (CaseResult.confirms)."""
         default = [case for case in self.cases if not opt_in(self.suite, case.id)]
         allowed = all(
             case.outcome is Outcome.PASS or (case.outcome is Outcome.SKIPPED and case.inapplicable) for case in default
         )
-        confirmed = {case.declared for case in default if case.outcome is Outcome.PASS}
+        passed = [case for case in default if case.outcome is Outcome.PASS]
+        confirmed = {case.declared for case in passed} | {pair for case in passed for pair in case.confirms}
         declared = all(
             case.declared in confirmed for case in default if case.declared and case.outcome is Outcome.SKIPPED
         )
@@ -2136,9 +2142,18 @@ class _CaseRun:
             result.outcome, result.detail = Outcome.NOT_RUN, COORDINATOR_BUSY
         else:
             await self.note_reached(result)
-        if result.outcome is Outcome.PASS and case.declared in (self.target_classes or ()):
-            result.declared = (case.entities[case.role], case.declared)
+        if result.outcome is Outcome.PASS:
+            self.note_confirmed(result)
         return result
+
+    def note_confirmed(self, result: CaseResult) -> None:
+        """On a pass, the classes its responses named that confirm a declared-class skip (SuiteResult.recordable): its
+        own target's declared class, when named (CaseResult.declared), and an ha_scene's lights' (scene_classes)."""
+        case = self.case
+        if case.declared in (self.target_classes or ()):
+            result.declared = (case.entities[case.role], case.declared)
+        if case.role == HA_SCENE:
+            result.confirms = self.scene_classes()
 
     async def note_reached(self, result: CaseResult) -> None:
         """What the case reached, on its result once it has its outcome, as the run's records name it: for JSON ones,
@@ -2238,7 +2253,7 @@ class _CaseRun:
             if role in GROUP_ROLES:
                 behind = [member for member in await self.members(target) if member in entity_ids]
             else:
-                behind = entity_ids if role == "scene" else [target]
+                behind = entity_ids if role in SCENE_ROLES else [target]
             found = await reached_devices(self.ha, entity_ids, self.entity_classes(entity_ids, behind))
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning(
@@ -2256,11 +2271,13 @@ class _CaseRun:
 
     async def reached_entities(self) -> list[str]:
         """The entities whose devices the case reached, each once, in role order: a native group's members, never the
-        group's own entity, and every other one but a scene's, which has no device (a scene case reaches its group's
-        lights). A light a step targets is one of the case's group in every step file today."""
+        group's own entity, and every other one but a scene's, which has no device (a Hue scene case reaches its
+        group's lights; an ha_scene case, the lights its step made the scene of, held off ones included, which the
+        scene's entry names no class for: entity_classes). A light a step targets is one of the case's group in every
+        step file today."""
         found: list[str] = []
         for role, entity_id in self.case.entities.items():
-            if role != "scene":
+            if role not in SCENE_ROLES:
                 found += await self.members(entity_id)
         return list(dict.fromkeys(found))
 
@@ -2282,6 +2299,14 @@ class _CaseRun:
                     if entity_id in entries:
                         seen[entity_id].add(_one_class(entries[entity_id]))
         return {entity_id: next(iter(found)) if len(found) == 1 else None for entity_id, found in seen.items()}
+
+    def scene_classes(self) -> tuple[tuple[str, str], ...]:
+        """An ha_scene case's lights, each with the class the scene's entry named for it (entity_classes reads its
+        `member_capabilities`), sorted: the lights its route wrote through the ridden action, held on, a held-off one
+        never named, as core's light.turn_off takes it. None for an integration that names no classes."""
+        lights = [entity_id for role, entity_id in self.case.entities.items() if role != HA_SCENE]
+        named = self.entity_classes(lights, lights).items()
+        return tuple(sorted((entity_id, name) for entity_id, name in named if name is not None))
 
     async def fact_devices(self) -> tuple[Device, ...]:
         """The devices behind the case's entities, a group's members included, for its _facts.md row; none when the
@@ -3693,7 +3718,7 @@ def _test_json(suite: Suite, case: CaseResult) -> dict:
     if case.outcome is Outcome.SKIPPED:
         return {"id": case.id, "role": case.role, "result": str(Outcome.SKIPPED), "reason": case.detail}
     test: dict[str, Any] = {"id": case.id, "domain": case.domain, "role": case.role, "result": str(case.outcome)}
-    if case.role in GROUP_ROLES or case.role == "scene":  # a scene's test, as a group's, lists the lights behind it
+    if case.role in GROUP_ROLES or case.role in SCENE_ROLES:  # a scene's test, as a group's, lists its lights
         test["group"] = True
     test["devices"] = [device.as_json() for device in case.reached]
     return test

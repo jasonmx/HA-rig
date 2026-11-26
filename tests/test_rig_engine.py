@@ -3963,9 +3963,8 @@ def shelly_scene(ct: str | None = None, dimmable: str | None = None) -> Profile:
 
 
 # Shelly has no set_scene adapter, so set_scene rides set_attributes there, which is not built on Switch.
-SHELLY_RIDING = Roster(
-    {"shelly": {"set_attributes"}}, classes=frozenset({"shelly"}), rides={"set_scene": "set_attributes"}
-)
+SHELLY_RIDING_RIDES = {"set_scene": "set_attributes"}
+SHELLY_RIDING = Roster({"shelly": {"set_attributes"}}, classes=frozenset({"shelly"}), rides=SHELLY_RIDING_RIDES)
 
 
 @pytest.mark.parametrize(
@@ -4003,6 +4002,55 @@ async def test_an_ha_scene_lights_class_skip_names_the_light_and_needs_a_pass_to
     assert (case.inapplicable, case.declared) == (True, ("light.ct", "Switch"))
     assert not ran.recordable  # as any declared-class skip: no pass on light.ct named Switch
     assert not any(call[:2] == ("scene", "create") for call in ha.calls)
+
+
+def scene_classed(member_capabilities: dict[str, str]) -> Callable:
+    """set_scene turning light_ct on, answered as Shelly's set_attributes would through the route: the scene's entry
+    names each light it wrote (`member_capabilities`), never the one it turned off."""
+
+    def respond(ha: FakeHA, action: str, data: dict) -> dict:
+        if action != "set_scene":
+            return {}
+        ha.set("light.ct", "on")
+        entry = {"status": "sent", "integration": "shelly", "member_capabilities": member_capabilities}
+        return {data["entity_id"]: entry}
+
+    return respond
+
+
+@pytest.mark.parametrize(
+    ("registry", "confirms"),
+    [(SHELLY_RIDING, (("light.ct", "CCT"),)), (Roster({"shelly": {"set_attributes"}}, rides=SHELLY_RIDING_RIDES), ())],
+)
+async def test_an_ha_scene_pass_names_each_held_on_lights_class_from_its_entry(tmp_path, registry, confirms):
+    """Only where the integration names classes; light.dim, held off, is in no map whatever the response."""
+    ha = scene_lights(scene_classed({"light.ct": "CCT"}))
+    result = await run_one(ha, suite(tmp_path, HA_SCENE_STEPS, "shelly"), shelly_scene(), registry)
+
+    (ran,) = result.suites
+    (case,) = ran.cases
+    assert (case.outcome, case.confirms, case.declared) == (Outcome.PASS, confirms, None)
+
+
+def scene_result(outcome: Outcome, **flags) -> CaseResult:
+    return CaseResult("applies[ha_scene]", "ha_scene", "scene", outcome, **flags)
+
+
+@pytest.mark.parametrize(
+    ("confirms", "recordable"),
+    [
+        ((("light.ct", "Switch"),), True),  # a pass's scene entry named Switch on light.ct
+        ((("light.ct", "CCT"),), False),  # another class: the profile's Switch may be stale
+        ((("light.dim", "Switch"),), False),  # the class, on another light
+        ((), False),
+    ],
+)
+def test_an_ha_scene_lights_class_skip_stands_beside_a_pass_whose_scene_named_it(tmp_path, confirms, recordable):
+    skipped = CaseResult(
+        "other[ha_scene]", "ha_scene", None, Outcome.SKIPPED, inapplicable=True, declared=("light.ct", "Switch")
+    )
+    results = [scene_result(Outcome.PASS, confirms=confirms), skipped]
+    assert SuiteResult(suite(tmp_path, HA_SCENE_STEPS, "shelly"), results, True).recordable is recordable
 
 
 class Rescoped:
