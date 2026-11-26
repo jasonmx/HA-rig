@@ -48,7 +48,8 @@ case entities.
 
 **Where the suite runs.** `applies`, `adapters_for` and `unbuilt` read a ridden action. When the integration has no
 adapter for the action and the deviceside action class names one it rides (`getattr(action_cls, "rides", None)`,
-read through the registry the way `check_options` reads it), the ridden action's adapter stands in. The suite then
+a `Ride(action, domain, integration)` from deviceside's `core/action.py`, so the ridden action is `.action`; read
+through the registry the way `check_options` reads it), the ridden action's adapter stands in. The suite then
 applies, and `unbuilt` judges the declared class against `set_attributes`' scope, as the dispatcher gates each light.
 `check_options` is unchanged: `set_scene` files set no options. The existing `[scene]` cases skip off Hue as before
 (`no scene entity in the profile`, inapplicable), so they never narrow a record. `tests/rig_fakes.py` `Roster` gains
@@ -123,9 +124,9 @@ roam.py's `SCENE_BRIGHTNESS`/`SCENE_MIREK` values for the scene, so both scene k
 
 Intent: the rig tests set_scene on Home Assistant scenes: an `ha_scene` role made per case with scene.create, suites
 for actions that ride another, and per-integration set_scene records.
-Touches: ha_rig/profile.py, ha_rig/engine.py, ha_rig/profile.example.yaml, scripts/rig.py, tests/test_rig_engine.py, tests/rig_fakes.py, docs/rig.md, docs/plans/2026-11-26-ha-scene-rig.md
+Touches: ha_rig/profile.py, ha_rig/engine.py, ha_rig/profile.example.yaml, scripts/rig.py, tests/test_rig.py, tests/test_rig_engine.py, tests/rig_fakes.py, docs/rig.md, docs/plans/2026-11-26-ha-scene-rig.md
 Depends-on: none to merge. Needs from deviceside `wt/set-scene-ha-scenes` step 3: an HA scene's response entry
-carries `member_capabilities` and the lights' `integration`. Step 4: `SetScene` names `rides = "set_attributes"`.
+carries `member_capabilities` and the lights' `integration`. Step 4: `SetScene.rides = Ride("set_attributes", "scene", "homeassistant")` (peer, 2026-11-26).
 Message that worktree's owner (`agent-find --branch wt/set-scene-ha-scenes`) at step 0.
 Tests-with: DeviceSide/DeviceSide#<step-file PR, step 5>
 
