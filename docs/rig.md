@@ -388,8 +388,8 @@ replaces the action's own. A file with no test for an integration (every test `o
 is for all but Hue) isn't selected there, so the record and the dry-run don't show it.
 
 An adapter with options runs each file for its action with them pinned through DeviceSide's options flow (for an
-action that rides another, every adapter serving the file's calls, by their targets' roles: Hue's `set_scene` pins
-both its own and `set_attributes`'):
+action that rides another, every adapter serving the file's calls of that action, by their targets' roles: Hue's `set_scene`
+would pin both its own and `set_attributes`', though neither has options today):
 `options: [<name>]` at the top of a file turns those on, and every other option in the adapter's scope runs off. Its
 record is `<action>-<name>.md`, with an `Options` row. The rig's own options are put back when the run ends. Each
 save reloads the entry, so a run pins each set of options once: the suites that share a set run together, rather

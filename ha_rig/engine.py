@@ -1072,7 +1072,8 @@ def serving(registry: Any, action: str, integration: str, role: str | None = Non
 def suite_options(suite: Suite, registry: Any) -> frozenset[str]:
     """The DeviceSide options of each adapter serving the suite's own action on its cases' targets (serving, by the
     target's role), which a run pins as the file sets them: two adapters' for a riding action whose tests target both a
-    scene DeviceSide routes and another (Hue's set_scene, on its ha_scene and scene cases)."""
+    scene DeviceSide routes and another (Hue's set_scene, on its ha_scene and scene cases; neither adapter has options
+    today)."""
     roles: set[str | None] = set()
     for test in suite.file.tests:
         for step in (*test.setup, *test.steps):
