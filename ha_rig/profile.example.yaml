@@ -18,6 +18,7 @@
 # Then one list per integration key (shelly, zigbee2mqtt, zha, matter, hue). Roles pick which test uses an entity:
 #   switch_plug, light_onoff (a relay shown as a light), light_wrapped (a switch_as_x light over a switch),
 #   light_dimmable, light_ct, light_color, group, group_color (a native group whose members all take color), scene
+#   ha_scene: made by the step, never listed (a Home Assistant scene a case's ha_scene step makes of its own lights)
 # A role's cases test its first entity on the integration, but switch_plug's run once per plug listed, each its own
 # case and record test (on_then_off[switch_plug], on_then_off[switch_plug-2], ...): list several plugs to test each
 # model or maker string.

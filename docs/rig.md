@@ -62,7 +62,9 @@ restart still stops the run.
 The run starts with one lane per integration, side by side, each holding that integration's cases on fixed entities.
 A case stays out of the lanes when its step file sets DeviceSide options or has `entry` steps (either reloads the
 integration, cutting off every lane's fades), or when it uses a roaming bulb, a rig-made group or scene, or a powered entity or
-its supply. Those run afterwards, one at a time. `--serial` runs every case one at a time: a case that passes with it
+its supply. Those run afterwards, one at a time. A case on the `ha_scene` role stays in its lane: the scene its step
+makes holds the case's own fixed lights, under one ID per integration (`scene.ds_rig_ha_<integration>`), so no two lanes
+share one. One whose lights are roaming bulbs runs afterwards, as any roaming case does. `--serial` runs every case one at a time: a case that passes with it
 and fails in a lane points at radio or HA contention.
 
 ### Profiles
@@ -82,6 +84,12 @@ An entity is listed once per integration. Light roles stay first-entity on purpo
 roaming bulb is listed beside each network's fixed lights. A role a step reaches only through `target:` takes the
 first entity too.
 
+`ha_scene` is never listed: a profile giving it to an entity, fixed or roaming, is refused. Its entity is a Home
+Assistant scene the case's `ha_scene` step makes of the case's own lights (Writing a step file, below), always
+`scene.ds_rig_ha_<integration>` (`ha_rig/profile.py`, `ha_scene_entity`), so a case needing it looks nothing up. The
+lights are the profile's, by their roles, as any case's are. Where two of those roles are one light in the profile, the
+scene would hold it twice, so the case skips as not applying: `ha_scene: light_ct and light_dimmable are one light`.
+
 **`class:`** on a fixed entity that isn't a group declares its device's DeviceSide class (`class: aqara`). A case
 whose call on that entity names an action the checkout's scope doesn't serve on the class (DeviceSide would refuse it
 `not_built` or `no_known_method`) skips as not applying, `<action> is not built on <class>`. It is decided when the
@@ -90,7 +98,11 @@ planned still fails it. A call that wouldn't run there (`only:` elsewhere, a cla
 `target:` on another role) doesn't count. The run checks the declaration: a response naming another class for the
 entity fails the case, and a suite's record stands on such a skip only beside a pass on the same entity whose response
 named that class. The record's rows of the case on that class go; those on other classes carry (Test records, below). A class the integration doesn't name stops the plan. Declare it only on a device some action isn't
-built on; other cases run as before.
+built on; other cases run as before. An `ha_scene` case judges each light its scene holds on, not the scene: DeviceSide
+writes each through the action the suite's action rides (What runs, below), on that action's scope, so a light held on
+whose declared class it refuses skips the case, `set_attributes is not built on <class> (<role>)`. A light held off
+is turned off through core's `light.turn_off`, which no class gates, so its class is never judged. Such a skip stands
+in a record beside a pass of an `ha_scene` case whose scene's `member_capabilities` named that class for that light.
 
 `--profile <name>` picks one, and can be left out while there is only one. A record never narrows to a profile: a
 run whose profile lacks a role (a bulb-only profile has no `switch_plug` or `group`), or whose group lacks the light a
@@ -181,8 +193,8 @@ you can try a branch's non-device features by hand. When HA already runs the che
 - **Home record.** What a roaming bulb was before its first move is kept until it is back as it was, across crashes
   (`ha_rig/home.py`).
 - **Journal.** Each run journals what it changes, so Ctrl-C, a signal, or the next run after a crash puts the devices
-  back, DeviceSide's options, a disabled entry and a Shelly device's persistent auto-off / auto-on included;
-  `--recover` puts back everything (`ha_rig/journal.py`). One Ctrl-C or signal, even mid-move, still brings the
+  back, DeviceSide's options, a disabled entry and a Shelly device's persistent auto-off / auto-on included, and an HA
+  scene an `ha_scene` step made deleted; `--recover` puts back everything (`ha_rig/journal.py`). One Ctrl-C or signal, even mid-move, still brings the
   roaming bulbs home before the run stops; one that can't exits 1, saying so. A second leaves them where they are.
 - **Baseline.** Changes beyond the devices (paused automations, log levels, Z2M device options) are shared by runs
   side by side, and the last one out puts them back (`ha_rig/baseline.py`).
@@ -203,7 +215,16 @@ covers. `--dry-run` prints whether it may go and runs nothing.
 ### What runs, stopping and resuming
 
 A run runs the suites it is asked for: every one the profile has an adapter for, narrowed by `--integration`,
-`--action` and `-k`. What needs testing is deviceside's to say, not the rig's: the rig keeps no record of what is
+`--action` and `-k`.
+
+**Riding actions.** An action whose deviceside class names another it rides (`Action.rides`, a `Ride` of the ridden
+action and the domain and HA integration of the targets it routes, as `set_scene` rides `set_attributes` on scenes of
+`homeassistant`) has its suite run wherever the ridden action has an adapter, even on an integration with no adapter
+of its own: the ridden adapter stands in, as DeviceSide's route writes through it (`engine.serves`). A call on an
+`[ha_scene]` target, a scene of HA's own, is served by the ridden action on every integration, Hue included, where
+`set_scene` also has an adapter of its own for the bridge's scenes. Its `expect_response: {status: expected}` and
+its declared-class skips (Profiles, above) read the ridden action's scope. The `[scene]` cases skip off Hue as
+before, `no scene entity in the profile`, not applying, so they never narrow a record. What needs testing is deviceside's to say, not the rig's: the rig keeps no record of what is
 proven or stale, and a test record in the checkout never leaves a suite out.
 
 **`--signoffs`** runs what deviceside says needs a sign-off: the suites its `scripts/check_release.py --signoffs
@@ -308,6 +329,7 @@ tests:
 | `do` | Prints an instruction for the person and waits for Enter. Only in the `setup` of an observed test. |
 | `restore` | Puts back the state from before the test. It also runs after every test, pass or fail. |
 | `entry` | `reload`, `disable` or `enable` DeviceSide's config entry, and waits until it has. A test that leaves it disabled has it enabled when it ends, pass or fail, before its restore. |
+| `ha_scene` | Setup only: makes the case's Home Assistant scene, the `ha_scene` role's entity, of its lights (`scene.create`), and waits up to 10 s for HA to show it. Keys are light roles, values each light's `state` (`on` or `off`) and, for one on, `brightness_pct` (above 0, up to 100) and `color_temp_kelvin` (a positive whole number). The scene is deleted at the case's end. |
 | `bridge` | Hue only: writes to the Hue bridge directly, bypassing Home Assistant, as another actor (the Hue app) would. `put: {...}` sends that CLIP v2 body to the target's light (a `group` target's grouped_light); `recall: true` recalls the `scene` target. In an observed run it runs as written. It needs `HUE_BRIDGE_HOST` and `HUE_APP_KEY` in `.env.rig`, and fails in any other integration's suite. |
 | `zcl` | ZHA only: sends one raw ZCL command to the target through `zha.issue_zigbee_cluster_command`, for probes. `cluster` and `command` are numbers, `params` the command's fields (a mapping, may be empty), `endpoint` defaults to the one in the target's ZHA unique_id. It is a server-cluster command (`cluster_type: in`, `command_type: server`). Fails in any other integration's suite. |
 | `z2m_option` | Sets Zigbee2MQTT device options on the target (`hue_native_control: false`) and waits for Z2M's ok. Does nothing in another integration's suite. |
@@ -319,6 +341,23 @@ skipped where the profile lists the group's `members` and that light isn't one. 
 some integrations; when those pile up, split the file. A step takes `only` too, beside its kind (`- {wait: 2, only:
 [zha]}`), for a step one integration needs and the others would only wait through; it names integrations the test
 runs on.
+
+An `ha_scene` step makes the scene the test calls on, under the integration's fixed ID (Profiles, above):
+
+```yaml
+    roles: [ha_scene]
+    setup:
+      - ha_scene: {light_ct: {state: on, brightness_pct: 40, color_temp_kelvin: 2732}, light_dimmable: {state: off}}
+```
+
+A test takes at most one, in `setup`, with no `only`, `classes` or `except_classes`, as it runs wherever the test
+does. The test must use the scene, by the `ha_scene` role or a `target: ha_scene`, and nothing may target it before
+the step; the role, or such a target, with no step fails at load too. Each key is a light role the case then needs,
+as a target's is. An off light takes nothing but its state: the scene turns it off. The rig stores each light as HA
+stores one, `brightness` 0-255 and `color_temp_kelvin` with `color_mode: color_temp`, so a call reads it as a real
+scene holds it. The case snapshots its lights first, as they are its to put back, then journals the scene, then makes
+it. Its end, pass or fail, after the restore, deletes the scene if HA still has it (a restart drops it); one it can't
+delete is journaled for `--recover` (Shared state, Journal).
 
 A step takes `classes:` or `except_classes:` too (not both, and beside `only:` both must hold), to run only on, or
 skip, targets of some DeviceSide classes in one integration: each maps an integration key to a non-empty list of class
@@ -348,7 +387,9 @@ file, and needs a top-level `name:`, which its record takes (`config_entry.json`
 replaces the action's own. A file with no test for an integration (every test `only:` elsewhere, as `config_entry.yaml`
 is for all but Hue) isn't selected there, so the record and the dry-run don't show it.
 
-An adapter with options runs each file for its action with them pinned through DeviceSide's options flow:
+An adapter with options runs each file for its action with them pinned through DeviceSide's options flow (for an
+action that rides another, every adapter serving the file's calls, by their targets' roles: Hue's `set_scene` pins
+both its own and `set_attributes`'):
 `options: [<name>]` at the top of a file turns those on, and every other option in the adapter's scope runs off. Its
 record is `<action>-<name>.md`, with an `Options` row. The rig's own options are put back when the run ends. Each
 save reloads the entry, so a run pins each set of options once: the suites that share a set run together, rather
@@ -489,7 +530,14 @@ and the maker string is never a device name: a Tuya `TS011F` is hundreds of make
 response reported it for the target, a native group's member's from its `member_capabilities`, or null where it reported
 none (an integration that names no classes, or a device not placed yet). A response from before that map names a
 group's members' class only when they share one. A native group's test (`group`) lists
-its members, never the group, and a scene's (`group` too) its group's lights. A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
+its members, never the group, and a scene's (`group` too) its group's lights. An `ha_scene` test (`group` too) lists the
+lights its step made the scene of, each with the class the scene's response entry named for it in its
+`member_capabilities`. A light the scene holds off is listed with class null: DeviceSide turns it off through core's
+`light.turn_off`, so no response names its class, and a null class credits nothing. A test whose call a ridden action
+served (Riding actions, above) names it, `"via": "set_attributes"`, so deviceside credits its pass to that adapter,
+not the record's own action's (`check_release.credited`): Hue's `set_scene.json` holds its `[scene]` tests and its
+`[ha_scene]` ones side by side. Deviceside's schema must accept `via` before such a record can be written: a checkout
+whose schema doesn't refuses the record, as any record it refuses (above). A skipped test gives its reason, and a fact case reads `fact`. Each case's devices are
 read as it ends and saved in the ledger; a case that ran with none noted (the lookup failed, or an older rig saved it)
 keeps its suite's record back, and a run at the same commit reruns just that case.
 
