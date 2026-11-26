@@ -24,6 +24,11 @@ has an adapter (`engine.applies`, `adapters_for`), so a `set_scene` suite never 
    unit-tested in deviceside step 3. A spanning scene would need two locks, run outside the lanes, and have a record
    that belongs to neither integration.
 
+4. **Credit follows the serving call** (Jason, 2026-11-26, from step 3's review): each `[ha_scene]` test in a record
+   carries the action that served its call (`"via": "set_attributes"`), and deviceside's `check_release.credited`
+   (step 5 PR) credits a record's adapter only from tests that went through it. Hue's `set_scene.json` keeps both
+   kinds of test (Decision 2) without its `[ha_scene]` passes counting toward `HueSetScene`'s class coverage.
+
 ## Design
 
 **The role.** `ha_scene` joins `ROLES` (`ha_rig/profile.py`), but no profile lists it: `fixed_entity` refuses it
