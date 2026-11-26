@@ -142,7 +142,7 @@ Touches: ha_rig/profile.py, ha_rig/engine.py, ha_rig/profile.example.yaml, scrip
 Depends-on: none to merge. Needs from deviceside `wt/set-scene-ha-scenes` step 3: an HA scene's response entry
 carries `member_capabilities` and the lights' `integration`. Step 4: `SetScene.rides = Ride("set_attributes", "scene", "homeassistant")` (peer, 2026-11-26).
 Message that worktree's owner (`agent-find --branch wt/set-scene-ha-scenes`) at step 0.
-Tests-with: DeviceSide/DeviceSide#<step-file PR, step 5>
+Tests-with: DeviceSide/DeviceSide#635
 
 ## Implementing session
 
