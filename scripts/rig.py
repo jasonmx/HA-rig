@@ -186,6 +186,7 @@ from ha_rig.profile import (  # noqa: E402
     TOLERANCE_S,
     Profile,
     RoamBulb,
+    is_ha_scene,
     load_env,
     profile_paths,
 )
@@ -2543,12 +2544,13 @@ def targets(
     done: Done | None = None,
 ) -> list[str]:
     """Every entity a case `only` accepts will move, a group's listed members included; none of a case `done` has a
-    result for, which the run leaves out."""
+    result for, which the run leaves out. A case's ha_scene isn't one: HA has it only once the case has made it."""
     return sorted(
         {
             entity
             for case in will_run(suites, profile, registry, keyword, only, done)
             for entity in (*case.entities.values(), *case.members)
+            if not is_ha_scene(entity)
         }
     )
 
@@ -2663,7 +2665,7 @@ async def check_devices(
     With `ignore_unreachables`, an unavailable fixed entity is no problem: it becomes `profile.offline`, and its cases
     skip as unreachable (engine.unreachable). A roaming bulb is still checked strictly.
     `homes` are the bulbs whose Hue home the home record holds, which a run puts back."""
-    fixed = [e for e in targets(suites, profile, registry, keyword, done=done) if e not in profile.made_entities]
+    fixed = [e for e in targets(suites, profile, registry, keyword, done=done) if not profile.made_by_run(e)]
     bulbs = list(profile.roam) if roaming else []
     print(f"Checking profile {profile.name}: {len(fixed)} entities" + (f", {len(bulbs)} roaming." if bulbs else "."))
     if not (env.get("HA_URL") and env.get("HA_TOKEN")):

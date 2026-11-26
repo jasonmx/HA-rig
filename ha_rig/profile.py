@@ -155,6 +155,11 @@ def ha_scene_entity(integration: str) -> str:
     return f"scene.{ha_scene_id(integration)}"
 
 
+def is_ha_scene(entity_id: str) -> bool:
+    """Whether the entity ID is an integration's ha_scene (ha_scene_entity), which HA has only once a case made it."""
+    return entity_id.startswith(ha_scene_entity(""))
+
+
 @dataclass(slots=True)
 class Profile:
     integrations: dict[str, list[RigEntity]] = field(default_factory=dict)
@@ -238,6 +243,11 @@ class Profile:
         run has moved or made them."""
         bulbs = {bulb.entity_id for bulb in self.roam}
         return frozenset(bulbs | {e for group in self.roam_groups for e in (group.entity_id, group.scene) if e})
+
+    def made_by_run(self, entity_id: str) -> bool:
+        """Whether HA has the entity only once the run has made or moved it: a made_entities one, or a case's ha_scene,
+        so no check looks it up beforehand."""
+        return entity_id in self.made_entities or is_ha_scene(entity_id)
 
     def entity(self, integration: str, role: str) -> str | None:
         """The first entity with the role: the one a case of any role but EACH_ENTITY's targets."""
