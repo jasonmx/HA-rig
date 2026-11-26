@@ -1501,7 +1501,8 @@ class CaseResult:
     confirms: tuple[tuple[str, str], ...] = ()
     # The action whose adapter served its call, when not the suite's own (serves, by its role): an ha_scene case's
     # ridden action, set_attributes. A record's test names it (`via`), so its pass credits that adapter, not the
-    # record's own action's (deviceside's check_release.credited, plan Decision 4). None for a case that didn't run.
+    # record's own action's (deviceside's check_release.credited, plan Decision 4). Set when the case starts, so a
+    # not_run or not_observed row keeps it; None for a case that never started.
     via: str | None = None
     # A case whose result is a fact (fact_kind): the devices it ran on, for its _facts.md row. Never saved.
     devices: tuple[Device, ...] = ()

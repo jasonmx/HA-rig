@@ -104,7 +104,11 @@ An HA scene edit applying (re-read per call) is unit-tested (`tests/core/test_ha
    `ha_rig/profile.example.yaml`'s role list ("ha_scene: made by the step, never listed"). README's `--help` block
    only if options change (none expected).
 5. **Paired deviceside PR** (branch `wt/set-scene-ha-scene-rig-steps` off `wt/set-scene-ha-scenes`, `pr-draft`): the
-   three cases above in `tests/rig/steps/set_scene.yaml`, the header comment updated, `rig_seconds` raised; the
+   three cases above in `tests/rig/steps/set_scene.yaml`, the header comment updated, `rig_seconds` raised;
+   `via` in `docs/test-records.schema.json`'s `test_v2` (an `action`; the rig refuses every `set_scene.json` holding an
+   `[ha_scene]` test until it is there) and `check_release.credited` crediting a record's adapter only from tests it
+   served (Decision 4); the `docs/evidence.md` line for a held-off light's `null` class, checked against gen_compat's
+   `tested` (Decision 5); the
    `check_release.py --records` test that a `set_scene.json` on a riding integration is validated and not demanded
    (if deviceside step 4 hasn't pinned it already); gen_compat linking the record in the derived cell (Decision 2).
    Name it here as `Tests-with` and rerun `pr-draft`. **Merge order:** this rig PR first (`merge-green --squash
