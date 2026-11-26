@@ -44,14 +44,28 @@ class Roster:
 
     Which integrations name classes is declared too (`classes`), as a deviceside checkout before IntegrationInfo's
     `capability` names none: each integration reads the real one's fields, with a `capability` only for those
-    declared. The rig never calls it, as it reads the class from DeviceSide's response."""
+    declared. The rig never calls it, as it reads the class from DeviceSide's response.
 
-    def __init__(self, declared: dict[str, set[str]], classes: frozenset[str] = frozenset()) -> None:
+    Which actions ride another is declared too (`rides`: the riding action's key to the ridden one's), as deviceside's
+    Action.rides is new: each action is the real one's class, with a `rides` only for those declared, standing in for
+    deviceside's Ride, of which the rig reads only `action`."""
+
+    def __init__(
+        self, declared: dict[str, set[str]], classes: frozenset[str] = frozenset(), rides: dict[str, str] | None = None
+    ) -> None:
         for integration, actions in declared.items():
             for action in actions:
                 if _discovered().adapter(action, integration) is None:
                     raise ValueError(f"deviceside has no {action} adapter for {integration}")
+        real = _discovered().actions
+        rides = rides or {}
+        if unknown := sorted({*rides, *rides.values()} - real.keys()):
+            raise ValueError(f"deviceside has no {unknown[0]} action")
         self._declared = declared
+        self.actions = {
+            key: type(cls.__name__, (cls,), {"rides": SimpleNamespace(action=rides[key]) if key in rides else None})
+            for key, cls in real.items()
+        }
         self.integrations = {
             key: SimpleNamespace(
                 **{field.name: getattr(info, field.name) for field in dataclasses.fields(info)}
@@ -839,6 +853,7 @@ def registry(options: frozenset[str]) -> SimpleNamespace:
     """A registry whose every adapter has these DeviceSide options."""
     return SimpleNamespace(
         integrations={},
+        actions={},
         adapter=lambda action, integration: SimpleNamespace(
             scope=SimpleNamespace(confirmable=False, fields=frozenset(), options=options)
         ),

@@ -124,7 +124,7 @@ roam.py's `SCENE_BRIGHTNESS`/`SCENE_MIREK` values for the scene, so both scene k
 
 Intent: the rig tests set_scene on Home Assistant scenes: an `ha_scene` role made per case with scene.create, suites
 for actions that ride another, and per-integration set_scene records.
-Touches: ha_rig/profile.py, ha_rig/engine.py, ha_rig/profile.example.yaml, scripts/rig.py, tests/test_rig.py, tests/test_rig_engine.py, tests/rig_fakes.py, docs/rig.md, docs/plans/2026-11-26-ha-scene-rig.md
+Touches: ha_rig/profile.py, ha_rig/engine.py, ha_rig/profile.example.yaml, scripts/rig.py, tests/test_rig.py, tests/test_rig_engine.py, tests/test_rig_steps.py, tests/test_rig_locks.py, tests/rig_fakes.py, docs/rig.md, docs/plans/2026-11-26-ha-scene-rig.md
 Depends-on: none to merge. Needs from deviceside `wt/set-scene-ha-scenes` step 3: an HA scene's response entry
 carries `member_capabilities` and the lights' `integration`. Step 4: `SetScene.rides = Ride("set_attributes", "scene", "homeassistant")` (peer, 2026-11-26).
 Message that worktree's owner (`agent-find --branch wt/set-scene-ha-scenes`) at step 0.

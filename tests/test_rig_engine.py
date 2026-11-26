@@ -815,6 +815,7 @@ def members_on(*members: str) -> Callable:
 
 GROUP_REGISTRY = SimpleNamespace(
     integrations={},
+    actions={},
     adapter=lambda action, integration: SimpleNamespace(
         scope=SimpleNamespace(confirmable=False, fields=frozenset(), options=frozenset())
     ),
@@ -824,6 +825,7 @@ GROUP_REGISTRY = SimpleNamespace(
 # Like Z2M: a turn_on_for adapter, and none for get_attributes or set_attributes.
 NO_ATTRIBUTES_REGISTRY = SimpleNamespace(
     integrations={},
+    actions={},
     adapter=lambda action, integration: (
         GROUP_REGISTRY.adapter(action, integration) if action == "turn_on_for" else None
     ),
@@ -1089,6 +1091,7 @@ tests:
 # Like Hue: a get_attributes adapter, and none for turn_on_for.
 NO_TIMER_REGISTRY = SimpleNamespace(
     integrations={},
+    actions={},
     adapter=lambda action, integration: (
         None if action == "turn_on_for" else GROUP_REGISTRY.adapter(action, integration)
     ),
@@ -2512,6 +2515,7 @@ tests:
 """
 ENTRY_REGISTRY = SimpleNamespace(
     integrations={},
+    actions={},
     adapter=lambda action, integration: SimpleNamespace(scope=SimpleNamespace(confirmable=False, options=frozenset())),
 )
 STORED = {"brightness": 80}
@@ -3861,6 +3865,113 @@ def test_an_ha_scene_whose_roles_are_one_light_skips_as_not_applying(tmp_path):
     assert case.skip == "ha_scene: light_ct and light_dimmable are one light"
     assert case.inapplicable
     assert not case.absent
+
+
+# --- riding actions: a suite whose action rides another runs where the ridden action's adapter is -------------------
+
+RIDING = Roster(
+    {"hue": {"set_scene", "get_attributes", "set_attributes"}, "zha": {"get_attributes", "set_attributes"}},
+    rides={"set_scene": "set_attributes"},
+)
+NOT_RIDING = Roster({"zha": {"get_attributes", "set_attributes"}})  # deviceside before SetScene rode set_attributes
+ZHA_SCENE = "scene.ds_rig_ha_zha"
+# HA_SCENE_STEPS, beside a test of the Hue bridge's own scene, which no profile off Hue lists.
+RIDING_STEPS = (
+    HA_SCENE_STEPS
+    + """
+  - name: bridge_scene
+    roles: [scene]
+    steps:
+      - call: {}
+"""
+)
+
+
+def zha_scene_profile() -> Profile:
+    return profile("zha", light_ct="light.ct", light_dimmable="light.dim")
+
+
+def test_a_riding_suite_applies_where_the_ridden_adapter_is_and_nowhere_else(tmp_path):
+    zha = suite(tmp_path, HA_SCENE_STEPS, "zha")
+    assert engine.ridden(RIDING, "set_scene") == "set_attributes"
+    assert engine.serves(RIDING, "set_scene", "zha") == "set_attributes"
+    assert engine.serves(RIDING, "set_scene", "hue") == "set_scene"  # its own adapter, where there is one
+    assert engine.serving(RIDING, "set_scene", "zha") is RIDING.adapter("set_attributes", "zha")
+    assert engine.applies(zha, RIDING)
+    assert not engine.applies(suite(tmp_path, HA_SCENE_STEPS, "shelly"), RIDING)  # no set_attributes there
+    assert not engine.applies(zha, NOT_RIDING)
+
+
+def test_a_call_to_a_riding_action_from_another_suite_counts_the_ridden_adapter(tmp_path):
+    calling = suite(
+        tmp_path, SET_SCENE_ON_A_PLUG.replace("set_scene", "get_attributes").replace("{}", "{action: set_scene}"), "zha"
+    )
+    assert engine.adapters_for(calling, RIDING) == {"set_scene"}
+    assert engine.adapters_for(calling, NOT_RIDING) == frozenset()
+
+
+def test_a_riding_suite_plans_its_ha_scene_case_and_skips_the_bridge_scene_as_not_applying(tmp_path):
+    steps = suite(tmp_path, RIDING_STEPS, "zha")
+    found = {
+        case.id: case
+        for case in engine.cases(steps, zha_scene_profile(), None, engine.adapters_for(steps, RIDING), RIDING)
+    }
+
+    assert found["applies[ha_scene]"].skip is None
+    scene = found["bridge_scene[scene]"]
+    assert (scene.skip, scene.absent, scene.inapplicable) == ("no scene entity in the profile", True, True)
+
+
+def scene_applies_on_zha(ha: FakeHA, action: str, data: dict) -> dict:
+    """set_scene turning light_ct on, as scene_applies does, answered as ZHA's; nothing for get_attributes."""
+    if action != "set_scene":
+        return {}
+    ha.set("light.ct", "on")
+    return {data["entity_id"]: {"status": "sent", "integration": "zha"}}
+
+
+async def test_a_riding_suite_runs_off_hue_and_its_bridge_scene_skip_leaves_it_recordable(tmp_path):
+    ha = scene_lights(scene_applies_on_zha)
+    result = await run_one(ha, suite(tmp_path, RIDING_STEPS, "zha"), zha_scene_profile(), RIDING, admin=ha)
+
+    assert outcomes(result) == {
+        "applies[ha_scene]": (Outcome.PASS, ""),
+        "bridge_scene[scene]": (Outcome.SKIPPED, "no scene entity in the profile"),
+    }
+    assert ("deviceside", "set_scene", {"entity_id": ZHA_SCENE}) in ha.calls
+    (ran,) = result.suites
+    assert ran.recordable
+    assert engine.narrows(ran.cases, None) == []
+
+
+SET_SCENE_ON_A_PLUG = """
+action: set_scene
+rig_seconds: 5
+tests:
+  - name: t
+    roles: [switch_plug]
+    steps:
+      - call: {}
+"""
+
+
+@pytest.mark.parametrize(("declared", "skip"), [("Switch", "set_attributes is not built on Switch"), ("RGBCCT", None)])
+def test_a_riding_calls_declared_class_is_judged_on_the_ridden_actions_scope(tmp_path, declared, skip):
+    # Shelly's set_attributes is not built on Switch; it has no set_scene adapter, so set_scene rides set_attributes.
+    registry = Roster(
+        {"shelly": {"set_attributes"}}, classes=frozenset({"shelly"}), rides={"set_scene": "set_attributes"}
+    )
+    inv = Profile({"shelly": [RigEntity("switch.plug", frozenset({"switch_plug"}), declared_class=declared)]})
+    steps = suite(tmp_path, SET_SCENE_ON_A_PLUG)
+
+    (case,) = engine.cases(steps, inv, None, engine.adapters_for(steps, registry), registry)
+
+    assert (case.skip, case.inapplicable) == (skip, skip is not None)
+
+
+def test_a_roster_refuses_a_ride_on_an_action_deviceside_lacks():
+    with pytest.raises(ValueError, match="deviceside has no set_sceen action"):
+        Roster({}, rides={"set_sceen": "set_attributes"})
 
 
 def test_an_ha_scene_case_lacking_a_light_skips_as_absent(tmp_path):

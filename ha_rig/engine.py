@@ -863,7 +863,7 @@ def merge_owned(shared: list[StepFile], owned: list[StepFile]) -> list[StepFile]
 def check_owned(step_files: Iterable[StepFile], registry: Any) -> None:
     """Raise SchemaError for an integration's own tests of an action it has no adapter for."""
     for step_file in step_files:
-        if missing := sorted(x for x in step_file.owned_by if registry.adapter(step_file.action, x) is None):
+        if missing := sorted(x for x in step_file.owned_by if serving(registry, step_file.action, x) is None):
             raise SchemaError(f"{missing[0]}/rig: {missing[0]} has no {step_file.action} adapter")
 
 
@@ -1017,16 +1017,40 @@ def case_family(case_id_: str) -> tuple[str, str, bool]:
     return test, rest.removesuffix("]").partition("-")[0], observed
 
 
+def ridden(registry: Any, action: str) -> str | None:
+    """The action `action` rides, or None: deviceside's Action.rides, a Ride whose `action` is the one whose adapters
+    serve the targets it routes itself (set_scene rides set_attributes). Read with getattr, as a checkout from before
+    Ride has none."""
+    return getattr(getattr(registry.actions.get(action), "rides", None), "action", None)
+
+
+def serves(registry: Any, action: str, integration: str) -> str | None:
+    """The action whose adapter serves `action` on `integration`: its own, else, for an action that rides another
+    (ridden), the ridden action, whose adapter stands in as DeviceSide's route writes through it; None for neither."""
+    if registry.adapter(action, integration) is not None:
+        return action
+    if (other := ridden(registry, action)) is not None and registry.adapter(other, integration) is not None:
+        return other
+    return None
+
+
+def serving(registry: Any, action: str, integration: str) -> Any:
+    """The adapter that serves `action` on `integration` (serves), or None."""
+    found = serves(registry, action, integration)
+    return None if found is None else registry.adapter(found, integration)
+
+
 def adapters_for(suite: Suite, registry: Any) -> frozenset[str]:
-    """The actions the suite's tests call that have an adapter on its integration, for `cases`."""
+    """The actions the suite's tests call that an adapter serves on its integration (serving), for `cases`."""
     called = {action for test in suite.file.tests for action in test.calls}
-    return frozenset(action for action in called if registry.adapter(action, suite.integration) is not None)
+    return frozenset(action for action in called if serving(registry, action, suite.integration) is not None)
 
 
 def applies(suite: Suite, registry: Any) -> bool:
-    """Whether the suite runs on its integration: the adapter exists and its scope has every option the file sets (a
-    file with none applies wherever there is an adapter). An option file that doesn't apply is not part of the run."""
-    adapter = registry.adapter(suite.action, suite.integration)
+    """Whether the suite runs on its integration: an adapter serves its action (serving: its own, or the ridden
+    action's) and its scope has every option the file sets (a file with none applies wherever there is an adapter). An
+    option file that doesn't apply is not part of the run."""
+    adapter = serving(registry, suite.action, suite.integration)
     return adapter is not None and suite.file.options <= adapter.scope.options
 
 
@@ -1108,7 +1132,8 @@ def unbuilt(case: Case, registry: Any) -> str | None:
     """Why the case doesn't apply to its target's declared class (Case.declared), or None: a call on its own target
     that would run there (its `only` and class selector, judged on that class) names an action whose scope, in the
     checkout under test, refuses the class as not built or no known method (AdapterScope.refusal, as DeviceSide's
-    dispatcher refuses it). Decided before the case runs, from the code under test, so a refusal in a case that runs
+    dispatcher refuses it). For an action the integration has no adapter of, the scope is that of the action it rides
+    (serves). Decided before the case runs, from the code under test, so a refusal in a case that runs
     still fails it. Raises ValueError for a class the integration doesn't name: a typo would skip every case."""
     if (declared := case.declared) is None:
         return None
@@ -1122,9 +1147,9 @@ def unbuilt(case: Case, registry: Any) -> str | None:
             continue
         if (step.only is not None and integration not in step.only) or not _selects(step, integration, declared):
             continue
-        action = args.get("action") or case.suite.action
-        if (adapter := registry.adapter(action, integration)) is None:
+        if (action := serves(registry, args.get("action") or case.suite.action, integration)) is None:
             continue  # no adapter at all: cases() skips the test for that
+        adapter = registry.adapter(action, integration)
         refused = adapter.scope.refusal([declared], domain=domain, failure_harms=adapter.failure_harms)
         if refused is not None and (phrase := UNBUILT.get(str(refused[0]))):
             return f"{action} {phrase} {declared}"
@@ -2491,7 +2516,7 @@ class _CaseRun:
 
     def expected(self, name: str, want: Any) -> Any:
         if name == "status" and want == "expected":
-            if (adapter := self.registry.adapter(self.last_action, self.integration)) is None:
+            if (adapter := serving(self.registry, self.last_action, self.integration)) is None:
                 raise StepFailure(f"no {self.last_action} adapter on {self.integration} to expect a status from")
             return "confirmed" if adapter.scope.confirmable else "sent"
         if name == "integration" and want == "self":
@@ -2923,7 +2948,7 @@ def _plan(
         suite_cases = cases(suite, profile, keyword, adapters_for(suite, registry), registry)
         if only is not None and not (suite_cases := [case for case in suite_cases if only(case)]):
             continue
-        adapter = registry.adapter(suite.action, suite.integration)
+        adapter = serving(registry, suite.action, suite.integration)
         if adapter is None:
             out(f"{suite.integration} / {suite.action}: no adapter, skipped")
             continue
