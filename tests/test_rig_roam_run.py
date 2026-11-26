@@ -611,6 +611,34 @@ async def check(tmp_path: Path, roaming: bool = True) -> list[str]:
     )
 
 
+HA_SCENE_CASE = """
+action: set_scene
+rig_seconds: 10
+tests:
+  - name: t
+    roles: [ha_scene]
+    setup:
+      - ha_scene: {light_ct: {state: on, brightness_pct: 40, color_temp_kelvin: 2732}, light_dimmable: {state: off}}
+    steps:
+      - call: {}
+"""
+
+
+async def test_the_check_and_the_wait_leave_out_the_ha_scene_a_case_makes_later(tmp_path, lab, capsys):
+    path = tmp_path / "scene.yaml"
+    path.write_text(HA_SCENE_CASE)
+    suites = [rig.Suite(load_step_file(path), "hue")]
+    profile = Profile.load(lab_profile(tmp_path))
+    registry = AdapterRegistry.discover()
+    assert list(rig.will_run(suites, profile, registry, None))  # the case is planned, so the scene is a target to skip
+    assert "scene.ds_rig_ha_hue" not in lab.ha.states
+
+    assert await rig.check_devices(ENV, suites, profile, registry, None, False) == []
+
+    assert "scene.ds_rig_ha_hue" not in rig.targets(suites, profile, registry, None)  # wait_for_targets waits for none
+    assert "Every device is ready." in capsys.readouterr().out
+
+
 async def test_the_check_passes_with_every_fixed_entity_up_and_the_bulbs_home(tmp_path, lab, capsys):
     plug_up(lab)
 
