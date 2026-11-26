@@ -1,4 +1,4 @@
-# Rig support for set_scene on Home Assistant scenes (v0.3.0)
+# Rig support for set_scene on Home Assistant scenes (v0.2.0)
 
 ## Context
 
@@ -10,7 +10,8 @@ Its Decision 5 leaves the rig case to this plan. The rig today knows only the Hu
 roam group's rig-made Hue scene, `ha_rig/profile.py` `RoamGroup.scene`), and it runs a suite only where the action
 has an adapter (`engine.applies`, `adapters_for`), so a `set_scene` suite never runs off Hue. Outcome: a
 `set_scene` run on each integration with `set_attributes` tests a rig-made HA scene and writes that integration's
-`set_scene.json`. That run decides the v0.3.0 release. No merge waits on it.
+`set_scene.json`. That run decides whether set_scene on HA scenes rides v0.2.0rc1 (deviceside Decision 7: if it slips, rc1 is cut
+without it). No merge waits on it.
 
 ## Decisions (Jason, 2026-11-26)
 
@@ -113,7 +114,7 @@ An HA scene edit applying (re-read per call) is unit-tested (`tests/core/test_ha
    (if deviceside step 4 hasn't pinned it already); gen_compat linking the record in the derived cell (Decision 2).
    Name it here as `Tests-with` and rerun `pr-draft`. **Merge order:** this rig PR first (`merge-green --squash
    --delete-branch`), as the rig must know the step kind before deviceside's step file uses it. The step-file PR
-   follows `wt/set-scene-ha-scenes`, after v0.2.0 is tagged.
+   follows `wt/set-scene-ha-scenes` (stacked on it, DeviceSide#630).
 6. **Audit** `/audit-code` on the rig PR's diff, fix, mark ready, merge.
 
 ## Reuse
@@ -132,7 +133,7 @@ roam.py's `SCENE_BRIGHTNESS`/`SCENE_MIREK` values for the scene, so both scene k
   `[scene]` skipped off Hue.
 - The live run is Jason's, on the Mac, behind the authorization gate:
   `../ha-rig/scripts/rig.py --action set_scene` from the step-file worktree. It writes each integration's
-  `set_scene.json` and decides v0.3.0. No merge waits on it.
+  `set_scene.json` and decides whether #630 rides v0.2.0rc1. No merge waits on it.
 
 ## Coordination
 
