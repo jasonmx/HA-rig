@@ -20,7 +20,7 @@ without it). No merge waits on it.
 2. **Record:** `docs/integrations/<x>/test-records/set_scene.json` on each integration it ran on, Hue's together with
    its bridge-scene cases. `check_release.py --records` validates it but doesn't demand one where `set_scene` only
    rides `set_attributes` (that gate stays on `set_attributes`). gen_compat's derived set-scene cell links it
-   when it exists.
+   when it exists and passes.
 3. **Per-integration scenes only.** No scene spans two integrations. Splitting a scene across integrations is
    unit-tested in deviceside step 3. A spanning scene would need two locks, run outside the lanes, and have a record
    that belongs to neither integration.
@@ -34,6 +34,10 @@ without it). No merge waits on it.
    On an integration that names classes, gen_compat therefore credits no `[ha_scene]` pass to a card; the
    `set_scene` cell's proof is `set_attributes`' records anyway (gen_compat's `lent`). Step 5 adds a line saying so
    to deviceside's `docs/evidence.md`.
+6. **A record signs off its own adapter only from a test without `via`** (Jason, 2026-11-26, from step 5's review):
+   deviceside's release gate counts a passing record toward its own adapter only when a test that no other action
+   served passed; a failing `via` test still fails the record, since a broken HA scene on Hue is `set_scene`
+   failing to its users. Closes Hue's `set_scene.json` signing off `HueSetScene` from `[ha_scene]` passes alone.
 
 ## Design
 
@@ -80,9 +84,9 @@ the lights far from the scene's values, at 100 % and 6500 K.
 
 | Case | Steps | What it catches that no unit test or existing case does |
 |---|---|---|
-| `sets_while_off` | both lights off; call; expect `sent`, both still off after 1 s; turn light_ct on; expect 40 % ±, 2732 K ± | The **live `scene_config` read**: unit tests fake `hass.data["homeassistant_scene"]`, and only a real `scene.create` entity proves core keeps it there with `scene_config.states` in that shape. Also that the route's indirect resolve (`via_group` = the scene, `named=False`) writes stored attributes on a real off light of each integration. The `set_attributes` cases name the light directly, and Hue's `[scene]` goes through the bridge adapter. |
-| `applies_while_on` | light_ct on at 100 %/6500 K; call; expect 40 % ±, 2732 K ± within 5 s | That the 0-255 to percent conversion and the `color_temp_kelvin` pick by `color_mode` land on a device as core stored them, and that an on light changes straight away on each integration. The unit tests assert the request, not the light. |
-| `turns_off_held_off` | light_dimmable on; call; expect light_dimmable off within 5 s, light_ct still off and holding the scene's values when turned on | The **`light.turn_off` path**: no `set_attributes` case turns a light off, and Hue's bridge scene sends `on: false` to the bridge, not to core. This is the only check that the blocking turn-off with the call's context reaches each integration's light, and that turning off one light doesn't stop the write to the other. |
+| `ha_sets_while_off` | both lights off; call; expect `sent`, both still off after 1 s; turn light_ct on; expect 40 % ±, 2732 K ± | The **live `scene_config` read**: unit tests fake `hass.data["homeassistant_scene"]`, and only a real `scene.create` entity proves core keeps it there with `scene_config.states` in that shape. Also that the route's indirect resolve (`via_group` = the scene, `named=False`) writes stored attributes on a real off light of each integration. The `set_attributes` cases name the light directly, and Hue's `[scene]` goes through the bridge adapter. |
+| `ha_applies_while_on` | light_ct on at 100 %/6500 K; call; expect 40 % ±, 2732 K ± within 5 s | That the 0-255 to percent conversion and the `color_temp_kelvin` pick by `color_mode` land on a device as core stored them, and that an on light changes straight away on each integration. The unit tests assert the request, not the light. |
+| `ha_turns_off_held_off` | light_dimmable on; call; expect light_dimmable off within 5 s, light_ct still off and holding the scene's values when turned on | The **`light.turn_off` path**: no `set_attributes` case turns a light off, and Hue's bridge scene sends `on: false` to the bridge, not to core. This is the only check that the blocking turn-off with the call's context reaches each integration's light, and that turning off one light doesn't stop the write to the other. |
 
 An HA scene edit applying (re-read per call) is unit-tested (`tests/core/test_ha_scene.py`), so it is not a case.
 
@@ -128,9 +132,10 @@ roam.py's `SCENE_BRIGHTNESS`/`SCENE_MIREK` values for the scene, so both scene k
 
 - `.venv/bin/pytest` green, with `scripts/ci_deviceside.sh` pairing the step-file PR (`Tests-with`), so
   `tests/test_rig_steps.py` parses the new cases against the new step kind.
-- `scripts/rig.py --plan --action set_scene` (no lock, no move) from the deviceside step-file worktree lists
-  `[ha_scene]` cases on hue, zha, zigbee2mqtt (and every other profile integration with `set_attributes`), with
-  `[scene]` skipped off Hue.
+- rig.py has no `--plan` (and `--check`/`--dry-run` reach HA), so step 5 checked the selection offline, with
+  rig.py's own selection over each profile: `[ha_scene]` cases plan on hue, zha and zigbee2mqtt, with `[scene]`
+  skipped off Hue. Profiles whose light_ct and light_dimmable are one light, or lack one, run none, so no current
+  profile gives Matter or Shelly a `set_scene.json`.
 - The live run is Jason's, on the Mac, behind the authorization gate:
   `../ha-rig/scripts/rig.py --action set_scene` from the step-file worktree. It writes each integration's
   `set_scene.json` and decides whether #630 rides v0.2.0rc1. No merge waits on it.
