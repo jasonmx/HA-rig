@@ -158,3 +158,34 @@ response-shape coordination with an in-flight deviceside branch is also a judgme
 ```
 cd ~/projects/ha/ha-rig && claude --model opus 'Implement docs/plans/2026-11-26-ha-scene-rig.md, starting at step 0.'
 ```
+
+## Handoff
+
+2026-11-26, from the implementing session (context limit).
+
+**Done.** Steps 0-5, each plan-reviewed with findings fixed or answered (each step's last commit carries a
+`Plan review:` note).
+- Rig, `wt/ha-scene-rig`, PR jasonmx/HA-rig#110 (draft), worktree `~/projects/ha/ha-rig-wt/ha-scene-rig`: step 1
+  b2a7591; step 2 6767a5c, dfe5eca; step 3 e7a6014, 13e5f6b; step 4 7d87d77, a29051d. 1372 tests pass alone, 1371 + 1
+  expected skip paired with #635.
+- DeviceSide, `wt/set-scene-ha-scene-rig-steps` stacked on `wt/set-scene-ha-scenes` (#630), PR DeviceSide/DeviceSide#635
+  (draft), worktree `~/projects/ha/deviceside-wt/set-scene-ha-scene-rig-steps`: dee7dca9, bf9a0f3b (merge of the
+  base), 53b45d0f, 11b99b57. Deviceside's pre-push pytest passes (3893).
+- Decisions 4-6 added from Jason's answers; Decision 7 of #630's plan moved this to v0.2.0rc1 (plan retitled).
+
+**Next: step 6.**
+1. #110: `audit-gate brief pr`, spawn the Agent it prints, `audit-gate record`, `audit-gate status`; fix Critical/High,
+   then `gh run rerun` its Tests runs (they read #635 afresh; `Tests-with: DeviceSide/DeviceSide#635`), `ci-green`,
+   `gh pr ready`, `merge-green 110 --squash --delete-branch` (the rig merges first).
+2. #635 (deviceside code: schema, check_release, gen_compat, step file): its own audit the same way, then ready. Its
+   base is #630's branch, owned by session `set-scene-ha-scenes-cc` (SendMessage) / `deviceside-87` (agent-inbox
+   147ad531-16b8-4dfa-bfd6-ce997521c62e): agree with that owner before merging into their branch, after #110 merges.
+   If #630 moves again, merge its branch in, never rebase.
+
+**Open, for Jason's report (no decision pending):**
+- From the profiles today, `[ha_scene]` cases plan on hue, zha and zigbee2mqtt only; profiles whose light_ct and
+  light_dimmable are one light (or lack one) run none, so Matter and Shelly get no `set_scene.json`. Where they run,
+  they run after the lanes, as their lights roam.
+- The live run (`../ha-rig/scripts/rig.py --action set_scene` from the #635 worktree) is Jason's; it decides whether
+  #630 rides v0.2.0rc1. Whether every integration holds a 40 % write on an off light (`ha_sets_while_off`) is
+  only known live; `rig_seconds` 140 is an estimate.
